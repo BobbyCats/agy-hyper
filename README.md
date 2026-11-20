@@ -111,22 +111,22 @@ Docked directly in Antigravity's auxiliary pane via `SIDECAR_UI_ENTRYPOINT_AUX_P
 
 ---
 
-## Under the Hood (For Systems Engineers)
+## How It Works
 
-### 1. Single-Turn Semantic Packing (`hyper_pack` <= 8.5KB)
-One parallel workspace scan combines alternation-compiled embedded `ripgrep`, **7 compiled Tree-sitter grammars** (Rust, TypeScript/TSX, JavaScript, Python, Go, JSON), multi-language 1-hop import neighbors (including Rust `pub(crate) use crate::{...}` / `super::`, Python relative & dotted modules, and TS dotted filenames / ESM `.js -> .ts`), inline source slices for top matched symbols, and read-only `gix` hotspots — strictly capped at `<= 8.5KB` so it never trips Antigravity's 10KB disk-spill threshold. The persistent daemon caches parsed ASTs and packs in true LRU memory (`14ms` warm end-to-end).
+<div align="center">
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="./assets/mechanics-dark.svg">
+  <source media="(prefers-color-scheme: light)" srcset="./assets/mechanics-light.svg">
+  <img alt="AGY Hyper Core Mechanics — Semantic Packing, 3-Phase Atomic WAL, Zero-Trust Sandbox, Adaptive Telemetry" src="./assets/mechanics-dark.svg" width="100%">
+</picture>
+</div>
 
-### 2. Three-Phase Atomic Edits (`hyper_edit` + BLAKE3 WAL)
-Every edit acquires an exclusive `flock`, checks BLAKE3 ETag CAS + UTF-8/BOM/CRLF preservation, writes and `fsync`s the pre-image WAL snapshot, stages temp files in target directories, and commits via atomic `rename`. On `ENOSPC` or permission errors, temp files are removed and live targets are never truncated; `<1ms` post-edit Tree-sitter syntax verification flags broken edits immediately. Even when the model falls back to built-in `edit_file` or `write_file`, `PostToolUse` verifies byte-exact pre-images (with zero permission-gate interference) and logs them to the same WAL ledger for 1-click Undo.
+<br/>
 
-### 3. Security Enforced at Compile Time
-- **Physically read-only Git**: linked against `gix` with mutation and network transports disabled at compile time — zero `git` subprocesses.
-- **Strict `realpath` workspace jail**: blocks `../` escapes, symlink escapes, and dangling intermediate directory symlinks.
-- **Secret Shield (ON by default)**: blocks `.env`, `.env.*`, `.envrc`, `*.pem`, `*.key`, `id_rsa`, `.npmrc`, `.netrc`, `.pypirc`, `*.keystore`, and `.htpasswd` across search, glob, and edits while permitting `.env.example`.
-- **Shell-free `hyper_check`**: always spawns with `shell: false`, rejects path-qualified `argv[0]` spoofing and inline eval flags, strips secret/password/credential env vars, preserves head 64KB + tail 512KB so fatal `stderr` errors survive, and cleans up full child process trees on timeout or MCP cancellation (`setsid` on Unix, `taskkill /F /T` on Windows).
-
-### 4. Lock-Free Telemetry & Model-Aware Guardlines
-Snapshot polling and rollbacks run outside the daemon state lock with `(mtime, size)`-cached transcript parsing so 2.5s UI refreshes never stall concurrent MCP calls. Guardlines automatically adapt to the active model: `96k / 115k` on 128k models, `140k / 175k` on 200k models, and `180k / 280k` on 1M models ahead of the `200k` 2x long-context pricing cliff and multimodal TTFT spike.
+1. **Single-Pass Semantic Pack (`hyper_pack`)**: One parallel scan combines embedded `ripgrep`, 7 compiled Tree-sitter grammars (Rust, TypeScript/TSX, JavaScript, Python, Go, JSON), multi-language 1-hop import neighbors, `gix` hotspots, and inline source slices for top matches. Payloads stay strictly `<= 8.5KB` so they never spill past Antigravity's 10KB disk threshold; daemon true-LRU hits return in `14ms`.
+2. **3-Phase Atomic WAL (`hyper_edit`)**: Acquires an exclusive `flock` with BLAKE3 ETag CAS and BOM/CRLF preservation, `fsync`s pre-image bytes to the WAL journal, then stages temp files and commits via atomic `rename`. On `ENOSPC` or permission errors, temp files are dropped and live files remain untouched. Every commit runs `<1ms` Tree-sitter syntax verification, and `PostToolUse` logs verified native `edit_file` / `write_file` pre-images into the same 1-click Undo ledger.
+3. **Compile-Time Zero-Trust Sandbox**: `gix` is linked with write-ref and network transports compiled out (zero `git` subprocesses). A strict `realpath` jail blocks `../`, symlink escapes, and dangling directory symlinks; Secret Shield blocks `.env`, `*.pem`, `*.key`, and `id_rsa` by default while allowing `.env.example`. `hyper_check` runs with `shell: false`, strips credential env vars, keeps a 64KB head + 512KB tail ring buffer, and kills entire process trees (`setsid` / `taskkill /F /T`) on timeout or cancellation.
+4. **Lock-Free Telemetry & Adaptive Guardlines**: Snapshot polling and rollbacks run outside the daemon state mutex with `(mtime, size)`-cached `transcript.jsonl` parsing, so 2.5s dashboard refreshes never stall MCP calls. Context guardlines automatically adapt to the active model: `96k / 115k` (128k), `140k / 175k` (200k), and `180k / 280k` (1M, ahead of the `200k` 2x pricing cliff).
 
 ---
 

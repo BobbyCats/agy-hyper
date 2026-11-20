@@ -67,9 +67,16 @@ function writeSidecarPid() {
 }
 
 /**
- * Render index.html with styles.css and i18n locale bundles inlined on every GET /.
- * Guarantees zero missing CSS, zero FOUC, zero proxy-path mismatch, and instant i18n boot.
+ * Render index.html with styles.css, i18n locale bundles, and modular app scripts inlined on GET /.
+ * Guarantees zero missing assets, zero CORS module-graph failures inside sandboxed gateways, and instant boot.
  */
+const APP_SCRIPTS = [
+  'modules/api.js',
+  'modules/charts.js',
+  'modules/render.js',
+  'app.js',
+];
+
 function renderIndexHtml() {
   let html = readFileSync(join(__dirname, 'index.html'), 'utf8');
   try {
@@ -79,7 +86,7 @@ function renderIndexHtml() {
       `<style id="hyper-inline-styles">\n${css}\n</style>`
     );
   } catch {
-    // fallback to external link if styles.css unreadable
+    // fallback to external stylesheet
   }
 
   try {
@@ -97,6 +104,17 @@ function renderIndexHtml() {
     );
   } catch {
     // fallback to runtime fetch
+  }
+
+  try {
+    const inlined = APP_SCRIPTS.map((rel) => {
+      const src = readFileSync(join(__dirname, rel), 'utf8').replace(/<\/script/gi, '<\\/script');
+      return `<script data-module="${rel}">\n${src}\n</script>`;
+    }).join('\n');
+    html = html.replace('<!-- INLINE_APP_SCRIPTS -->', inlined);
+  } catch {
+    const tags = APP_SCRIPTS.map((rel) => `<script src="/${rel}"></script>`).join('\n');
+    html = html.replace('<!-- INLINE_APP_SCRIPTS -->', tags);
   }
   return html;
 }

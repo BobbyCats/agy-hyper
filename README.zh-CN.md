@@ -111,22 +111,22 @@ agy-hyper bench    # 对最近真实会话生成逐轮瀑布耗时分析
 
 ---
 
-## 给工程师看的四张工程底牌
+## 工作原理与安全边界
 
-### 1. 单回合语义打包（`hyper_pack` ≤ 8.5KB）
-单次遍历并行执行内置 `ripgrep`（多词编译成单条交替正则），结合 **7 种原生编译的 Tree-sitter AST 语法**（Rust / TypeScript / TSX / JavaScript / Python / Go / JSON）、多语言 1-hop 导入邻接图以及只读 `gix` 热点排序，并为得分最高的匹配符号直接内联源码切片。返回体积严格锁死在 `<= 8.5KB`，绝不触发 Antigravity 的 10KB 落盘截断。常驻守护进程维护真 LRU 的 AST 与打包缓存，热命中端到端约 `14ms`。
+<div align="center">
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="./assets/mechanics-dark.svg">
+  <source media="(prefers-color-scheme: light)" srcset="./assets/mechanics-light.svg">
+  <img alt="AGY Hyper 核心工作原理图解" src="./assets/mechanics-dark.svg" width="100%">
+</picture>
+</div>
 
-### 2. 三阶段原子事务编辑（`hyper_edit` + BLAKE3 WAL）
-每次编辑严格按三阶段落盘：排他 `flock` + BLAKE3 ETag 乐观锁 + UTF-8/BOM/CRLF 保留 → `fsync` 写入修改前预像 WAL → 同目录临时文件 staging 后原子 `rename`。遇到磁盘满（`ENOSPC`）或权限报错时立即清理临时文件并中止，绝不打开或截断源文件。改完后会执行 `<1ms` Tree-sitter 语法自检。即使模型偶尔退回原生 `edit_file` / `write_file`，`PostToolUse` 也会在不干扰权限审批的前提下验证字节一致性，将可证明的修改前预像记入同一本 WAL 账本，供侧边栏一键还原。
+<br/>
 
-### 3. 编译期焊死的零信任边界
-- **物理只读 Git**：链接关闭写引用与网络特性的精简版 `gix`，全程零 `git` 子进程调用。
-- **严格 `realpath` 工作区牢笼**：逐级封死 `../` 穿越、软链接逃逸及悬空目录软链。
-- **默认开启密钥盾**：搜索、列举与编辑默认拦截 `.env` / `.env.*` / `.envrc` / `*.pem` / `*.key` / `id_rsa` / `.npmrc` / `.netrc` / `.pypirc` / `*.keystore`（放行 `.env.example` 等模板文件）。
-- **无 Shell 的 `hyper_check`**：强制 `shell: false`，禁止带路径伪造 `argv[0]` 及内联求值参数，剥离密钥与密码类环境变量，用头 64KB + 尾 512KB 环形缓冲保住尾部根因报错，超时或取消时按独立进程组（Unix `setsid` / Windows `taskkill /T`）整树清干净。
-
-### 4. 无锁并发遥测与诚实口径
-常驻守护进程在 `Snapshot` 与 `Rollback` 期间释放全局状态锁，并对 `transcript.jsonl` 按 `(mtime, size)` 缓存解析结果，每 2.5 秒轮询驾驶舱也不会阻塞并发 MCP 调用。警戒线随日志里的当前模型自动适配：128k 模型按 `96k / 115k`，200k 模型按 `140k / 175k`，1M 模型在 `200k` 长上下文 2 倍计费悬崖与多模态大图首字飙升前标出 `180k / 280k`。
+1. **单回合语义打包（`hyper_pack`）**：一次并行扫描完成内置 `ripgrep`、7 种 Tree-sitter 语法解析（Rust / TypeScript / TSX / JavaScript / Python / Go / JSON）、1-hop 导入图与 `gix` 热点排序，并内联高分符号切片。输出严格压在 `<= 8.5KB` 内，避开 Antigravity 10KB 落盘截断，守护进程真 LRU 热命中约 `14ms`。
+2. **三阶段原子 WAL（`hyper_edit`）**：排他 `flock` 加 BLAKE3 ETag 乐观锁，先 `fsync` 写入修改前预像，再经同目录临时文件原子 `rename`。遇到磁盘满（`ENOSPC`）直接清理临时文件并中止，绝不破坏源文件。改完立刻做 `<1ms` 语法校验，原生 `edit_file` / `write_file` 验证后的修改前预像也会自动入账，统一支持一键撤回。
+3. **编译期零信任沙箱**：只读 `gix` 在编译阶段去掉写引用与网络代码，全程零 `git` 子进程。`realpath` 牢笼拦截 `../`、软链接逃逸及悬空目录软链，密钥盾默认封禁 `.env` / `*.pem` / `*.key` / `id_rsa`（放行 `.env.example`）。`hyper_check` 固定 `shell: false`，保留头 64KB 加尾 512KB 环形缓冲，取消或超时按进程组整树清理。
+4. **无锁遥测与自适应警戒线**：驾驶舱轮询与回滚均在守护进程全局锁外执行，并按 `(mtime, size)` 缓存 `transcript.jsonl` 解析结果，不会拖慢并发 MCP 请求。上下文警戒线按模型自动适配：`128k` 模型 `96k / 115k`，`200k` 模型 `140k / 175k`，`1M` 模型在 `200k` 阶梯计费悬崖前标出 `180k / 280k`。
 
 ---
 

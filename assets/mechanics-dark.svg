@@ -1,0 +1,191 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1100" height="456" viewBox="0 0 1100 456" fill="none">
+  <rect width="1100" height="456" rx="16" fill="#0B0F17" stroke="#1E293B" stroke-width="1.5"/>
+  <text x="28" y="34" fill="#64748B" font-size="11" font-weight="700" letter-spacing="1.4" font-family="ui-monospace,Menlo,monospace">CORE MECHANICS · PACKING · ATOMIC WAL · ZERO-TRUST SANDBOX · ADAPTIVE TELEMETRY</text>
+
+  <!-- ==================== 01 · SINGLE-PASS SEMANTIC PACK ==================== -->
+  <g transform="translate(28, 52)">
+    <rect width="514" height="184" rx="12" fill="#111827" stroke="#1E293B"/>
+    <rect x="16" y="16" width="26" height="18" rx="5" fill="#0C2438" stroke="#38BDF8" stroke-opacity="0.5"/>
+    <text x="29" y="29" text-anchor="middle" fill="#38BDF8" font-size="10.5" font-weight="700" font-family="ui-monospace,Menlo,monospace">01</text>
+    <text x="50" y="29" fill="#F8FAFC" font-size="13" font-weight="700" font-family="system-ui,sans-serif">Single-Pass Semantic Pack</text>
+    <text x="498" y="29" text-anchor="end" fill="#38BDF8" font-size="10.5" font-weight="600" font-family="ui-monospace,Menlo,monospace">hyper_pack</text>
+
+    <!-- Left 3 parallel inputs -->
+    <rect x="16" y="48" width="142" height="26" rx="6" fill="#0B1120" stroke="#1E293B"/>
+    <circle cx="28" cy="61" r="3" fill="#38BDF8"/>
+    <text x="37" y="65" fill="#E2E8F0" font-size="10.5" font-family="ui-monospace,Menlo,monospace">Embedded ripgrep</text>
+
+    <rect x="16" y="80" width="142" height="26" rx="6" fill="#0B1120" stroke="#1E293B"/>
+    <circle cx="28" cy="93" r="3" fill="#A78BFA"/>
+    <text x="37" y="97" fill="#E2E8F0" font-size="10.5" font-family="ui-monospace,Menlo,monospace">7 Tree-sitter AST</text>
+
+    <rect x="16" y="112" width="142" height="26" rx="6" fill="#0B1120" stroke="#1E293B"/>
+    <circle cx="28" cy="125" r="3" fill="#F59E0B"/>
+    <text x="37" y="129" fill="#E2E8F0" font-size="10.5" font-family="ui-monospace,Menlo,monospace">1-hop + gix hot</text>
+
+    <!-- Converging arrows -->
+    <path d="M158 61H174V93H190M158 93H190M158 125H174V93" stroke="#38BDF8" stroke-width="1.5" stroke-opacity="0.8"/>
+    <polygon points="196,93 188,89 188,97" fill="#38BDF8"/>
+
+    <!-- Center packer -->
+    <rect x="198" y="56" width="136" height="74" rx="8" fill="#0F172A" stroke="#38BDF8" stroke-opacity="0.55"/>
+    <text x="266" y="77" text-anchor="middle" fill="#F8FAFC" font-size="11" font-weight="700" font-family="ui-monospace,Menlo,monospace">Rank &amp; Slice</text>
+    <text x="266" y="95" text-anchor="middle" fill="#94A3B8" font-size="9.5" font-family="ui-monospace,Menlo,monospace">Top symbols inlined</text>
+    <text x="266" y="110" text-anchor="middle" fill="#94A3B8" font-size="9.5" font-family="ui-monospace,Menlo,monospace">+ BLAKE3 file etags</text>
+    <text x="266" y="123" text-anchor="middle" fill="#38BDF8" font-size="9" font-family="ui-monospace,Menlo,monospace">Daemon true LRU</text>
+
+    <!-- Arrow to output -->
+    <path d="M334 93H356" stroke="#22C55E" stroke-width="1.5"/>
+    <polygon points="362,93 354,89 354,97" fill="#22C55E"/>
+
+    <!-- Right output badge -->
+    <rect x="364" y="56" width="134" height="74" rx="8" fill="#0A1F1C" stroke="#22C55E" stroke-opacity="0.6"/>
+    <text x="431" y="80" text-anchor="middle" fill="#34D399" font-size="13.5" font-weight="700" font-family="ui-monospace,Menlo,monospace">&lt;= 8.5 KB</text>
+    <text x="431" y="98" text-anchor="middle" fill="#E2E8F0" font-size="10" font-weight="600" font-family="ui-monospace,Menlo,monospace">1 Turn Inline</text>
+    <text x="431" y="115" text-anchor="middle" fill="#6EE7B7" font-size="9.5" font-family="ui-monospace,Menlo,monospace">No 10KB disk spill</text>
+
+    <!-- Bottom metric strip -->
+    <rect x="16" y="148" width="482" height="24" rx="6" fill="#0B1120"/>
+    <text x="28" y="164" fill="#94A3B8" font-size="10" font-family="ui-monospace,Menlo,monospace">Warm LRU: <tspan fill="#38BDF8" font-weight="700">14ms</tspan>  ·  Cold scan: <tspan fill="#E2E8F0" font-weight="700">58ms</tspan>  ·  Replaces <tspan fill="#34D399" font-weight="700">5 serial turns -> 1</tspan></text>
+  </g>
+
+  <!-- ==================== 02 · 3-PHASE ATOMIC WAL ==================== -->
+  <g transform="translate(558, 52)">
+    <rect width="514" height="184" rx="12" fill="#111827" stroke="#1E293B"/>
+    <rect x="16" y="16" width="26" height="18" rx="5" fill="#0A291E" stroke="#22C55E" stroke-opacity="0.5"/>
+    <text x="29" y="29" text-anchor="middle" fill="#34D399" font-size="10.5" font-weight="700" font-family="ui-monospace,Menlo,monospace">02</text>
+    <text x="50" y="29" fill="#F8FAFC" font-size="13" font-weight="700" font-family="system-ui,sans-serif">3-Phase Atomic WAL</text>
+    <text x="498" y="29" text-anchor="end" fill="#34D399" font-size="10.5" font-weight="600" font-family="ui-monospace,Menlo,monospace">hyper_edit + WAL</text>
+
+    <!-- Phase 1 -->
+    <rect x="16" y="48" width="108" height="52" rx="7" fill="#0B1120" stroke="#334155"/>
+    <text x="70" y="67" text-anchor="middle" fill="#38BDF8" font-size="10.5" font-weight="700" font-family="ui-monospace,Menlo,monospace">1. Lock + CAS</text>
+    <text x="70" y="83" text-anchor="middle" fill="#94A3B8" font-size="9.5" font-family="ui-monospace,Menlo,monospace">flock · ETag</text>
+    <text x="70" y="95" text-anchor="middle" fill="#64748B" font-size="9" font-family="ui-monospace,Menlo,monospace">BOM/CRLF kept</text>
+
+    <path d="M124 74H138" stroke="#64748B" stroke-width="1.5"/>
+    <polygon points="143,74 136,70 136,78" fill="#64748B"/>
+
+    <!-- Phase 2 -->
+    <rect x="144" y="48" width="108" height="52" rx="7" fill="#0B1120" stroke="#34D399" stroke-opacity="0.55"/>
+    <text x="198" y="67" text-anchor="middle" fill="#34D399" font-size="10.5" font-weight="700" font-family="ui-monospace,Menlo,monospace">2. WAL fsync</text>
+    <text x="198" y="83" text-anchor="middle" fill="#94A3B8" font-size="9.5" font-family="ui-monospace,Menlo,monospace">Pre-image bytes</text>
+    <text x="198" y="95" text-anchor="middle" fill="#64748B" font-size="9" font-family="ui-monospace,Menlo,monospace">BLAKE3 journal</text>
+
+    <path d="M252 74H266" stroke="#64748B" stroke-width="1.5"/>
+    <polygon points="271,74 264,70 264,78" fill="#64748B"/>
+
+    <!-- Phase 3 -->
+    <rect x="272" y="48" width="110" height="52" rx="7" fill="#0B1120" stroke="#34D399" stroke-opacity="0.55"/>
+    <text x="327" y="67" text-anchor="middle" fill="#34D399" font-size="10.5" font-weight="700" font-family="ui-monospace,Menlo,monospace">3. Stage Swap</text>
+    <text x="327" y="83" text-anchor="middle" fill="#94A3B8" font-size="9.5" font-family="ui-monospace,Menlo,monospace">Same-dir temp</text>
+    <text x="327" y="95" text-anchor="middle" fill="#64748B" font-size="9" font-family="ui-monospace,Menlo,monospace">Atomic rename</text>
+
+    <path d="M382 74H396" stroke="#34D399" stroke-width="1.5"/>
+    <polygon points="401,74 394,70 394,78" fill="#34D399"/>
+
+    <!-- Post-check & Undo -->
+    <rect x="402" y="48" width="96" height="52" rx="7" fill="#0A1F1C" stroke="#22C55E" stroke-opacity="0.6"/>
+    <text x="450" y="69" text-anchor="middle" fill="#34D399" font-size="10.5" font-weight="700" font-family="ui-monospace,Menlo,monospace">&lt;1ms AST</text>
+    <text x="450" y="86" text-anchor="middle" fill="#E2E8F0" font-size="9.5" font-family="ui-monospace,Menlo,monospace">1-Click Undo</text>
+
+    <!-- ENOSPC safe-abort branch -->
+    <path d="M327 100V123H318" stroke="#F87171" stroke-width="1.4" stroke-dasharray="3 3"/>
+    <polygon points="313,123 319,120 319,126" fill="#F87171"/>
+    <rect x="16" y="110" width="296" height="26" rx="6" fill="#231218" stroke="#F87171" stroke-opacity="0.5"/>
+    <text x="164" y="127" text-anchor="middle" fill="#FCA5A5" font-size="9.5" font-family="ui-monospace,Menlo,monospace">ENOSPC / Err -> drop temp · file untouched</text>
+
+    <rect x="342" y="110" width="156" height="26" rx="6" fill="#0B1120" stroke="#1E293B"/>
+    <text x="420" y="127" text-anchor="middle" fill="#94A3B8" font-size="9.5" font-family="ui-monospace,Menlo,monospace">PostToolUse auto-WAL</text>
+
+    <!-- Bottom metric strip -->
+    <rect x="16" y="148" width="482" height="24" rx="6" fill="#0B1120"/>
+    <text x="28" y="164" fill="#94A3B8" font-size="10" font-family="ui-monospace,Menlo,monospace">Verified native <tspan fill="#E2E8F0" font-weight="700">edit_file / write_file</tspan> also logged · <tspan fill="#34D399" font-weight="700">Zero partial writes</tspan></text>
+  </g>
+
+  <!-- ==================== 03 · COMPILE-TIME ZERO-TRUST SANDBOX ==================== -->
+  <g transform="translate(28, 252)">
+    <rect width="514" height="184" rx="12" fill="#111827" stroke="#1E293B"/>
+    <rect x="16" y="16" width="26" height="18" rx="5" fill="#2A1912" stroke="#F59E0B" stroke-opacity="0.55"/>
+    <text x="29" y="29" text-anchor="middle" fill="#FBBF24" font-size="10.5" font-weight="700" font-family="ui-monospace,Menlo,monospace">03</text>
+    <text x="50" y="29" fill="#F8FAFC" font-size="13" font-weight="700" font-family="system-ui,sans-serif">Compile-Time Zero-Trust Sandbox</text>
+    <text x="498" y="29" text-anchor="end" fill="#F87171" font-size="10.5" font-weight="600" font-family="ui-monospace,Menlo,monospace">ENFORCED</text>
+
+    <!-- 2x2 Security Boundary Cells -->
+    <rect x="16" y="48" width="235" height="56" rx="8" fill="#0B1120" stroke="#1E293B"/>
+    <text x="28" y="67" fill="#FBBF24" font-size="11" font-weight="700" font-family="ui-monospace,Menlo,monospace">Physically Read-Only Git</text>
+    <text x="28" y="83" fill="#94A3B8" font-size="9.5" font-family="ui-monospace,Menlo,monospace">gix without write-ref / net code</text>
+    <text x="28" y="96" fill="#64748B" font-size="9.5" font-family="ui-monospace,Menlo,monospace">Zero git CLI subprocesses</text>
+
+    <rect x="263" y="48" width="235" height="56" rx="8" fill="#0B1120" stroke="#1E293B"/>
+    <text x="275" y="67" fill="#38BDF8" font-size="11" font-weight="700" font-family="ui-monospace,Menlo,monospace">Strict realpath Jail</text>
+    <text x="275" y="83" fill="#94A3B8" font-size="9.5" font-family="ui-monospace,Menlo,monospace">Blocks ../ &amp; symlink escapes</text>
+    <text x="275" y="96" fill="#64748B" font-size="9.5" font-family="ui-monospace,Menlo,monospace">Rejects dangling dir symlinks</text>
+
+    <rect x="16" y="114" width="235" height="56" rx="8" fill="#0B1120" stroke="#F87171" stroke-opacity="0.45"/>
+    <text x="28" y="133" fill="#F87171" font-size="11" font-weight="700" font-family="ui-monospace,Menlo,monospace">Secret Shield (Default ON)</text>
+    <text x="28" y="149" fill="#94A3B8" font-size="9.5" font-family="ui-monospace,Menlo,monospace">Blocks .env *.pem *.key id_rsa</text>
+    <text x="28" y="162" fill="#64748B" font-size="9.5" font-family="ui-monospace,Menlo,monospace">Allows .env.example templates</text>
+
+    <rect x="263" y="114" width="235" height="56" rx="8" fill="#0B1120" stroke="#1E293B"/>
+    <text x="275" y="133" fill="#34D399" font-size="11" font-weight="700" font-family="ui-monospace,Menlo,monospace">shell: false · Tree Kill</text>
+    <text x="275" y="149" fill="#94A3B8" font-size="9.5" font-family="ui-monospace,Menlo,monospace">Head 64K + Tail 512K ring buf</text>
+    <text x="275" y="162" fill="#64748B" font-size="9.5" font-family="ui-monospace,Menlo,monospace">setsid / taskkill /T on cancel</text>
+  </g>
+
+  <!-- ==================== 04 · LOCK-FREE TELEMETRY & GUARDLINES ==================== -->
+  <g transform="translate(558, 252)">
+    <rect width="514" height="184" rx="12" fill="#111827" stroke="#1E293B"/>
+    <rect x="16" y="16" width="26" height="18" rx="5" fill="#1E1736" stroke="#A78BFA" stroke-opacity="0.55"/>
+    <text x="29" y="29" text-anchor="middle" fill="#A78BFA" font-size="10.5" font-weight="700" font-family="ui-monospace,Menlo,monospace">04</text>
+    <text x="50" y="29" fill="#F8FAFC" font-size="13" font-weight="700" font-family="system-ui,sans-serif">Lock-Free Telemetry &amp; Guardlines</text>
+    <text x="498" y="29" text-anchor="end" fill="#A78BFA" font-size="10.5" font-weight="600" font-family="ui-monospace,Menlo,monospace">0 MCP STALL</text>
+
+    <!-- Top pipeline: transcript -> cache -> UI -->
+    <rect x="16" y="48" width="142" height="38" rx="7" fill="#0B1120" stroke="#1E293B"/>
+    <text x="87" y="64" text-anchor="middle" fill="#E2E8F0" font-size="10.5" font-weight="600" font-family="ui-monospace,Menlo,monospace">transcript.jsonl</text>
+    <text x="87" y="78" text-anchor="middle" fill="#64748B" font-size="9" font-family="ui-monospace,Menlo,monospace">(mtime, size) cached</text>
+
+    <path d="M158 67H180" stroke="#A78BFA" stroke-width="1.5"/>
+    <polygon points="186,67 178,63 178,71" fill="#A78BFA"/>
+
+    <rect x="188" y="48" width="144" height="38" rx="7" fill="#0B1120" stroke="#A78BFA" stroke-opacity="0.5"/>
+    <text x="260" y="64" text-anchor="middle" fill="#A78BFA" font-size="10.5" font-weight="700" font-family="ui-monospace,Menlo,monospace">spawn_blocking</text>
+    <text x="260" y="78" text-anchor="middle" fill="#94A3B8" font-size="9" font-family="ui-monospace,Menlo,monospace">Outside state mutex</text>
+
+    <path d="M332 67H354" stroke="#38BDF8" stroke-width="1.5"/>
+    <polygon points="360,67 352,63 352,71" fill="#38BDF8"/>
+
+    <rect x="362" y="48" width="136" height="38" rx="7" fill="#0F172A" stroke="#38BDF8" stroke-opacity="0.5"/>
+    <text x="430" y="64" text-anchor="middle" fill="#38BDF8" font-size="10.5" font-weight="700" font-family="ui-monospace,Menlo,monospace">Sidecar Deck</text>
+    <text x="430" y="78" text-anchor="middle" fill="#94A3B8" font-size="9" font-family="ui-monospace,Menlo,monospace">2.5s poll · 60s bar</text>
+
+    <!-- Bottom Model-Aware Guardline Bars -->
+    <rect x="16" y="98" width="482" height="72" rx="8" fill="#0B1120" stroke="#1E293B"/>
+    <text x="28" y="116" fill="#94A3B8" font-size="9.5" font-weight="700" letter-spacing="0.6" font-family="ui-monospace,Menlo,monospace">MODEL-ADAPTIVE CONTEXT GUARDLINES (YELLOW / RED)</text>
+
+    <!-- 128k bar -->
+    <text x="28" y="135" fill="#E2E8F0" font-size="10" font-family="ui-monospace,Menlo,monospace">128k</text>
+    <rect x="66" y="127" width="120" height="8" rx="4" fill="#1E293B"/>
+    <rect x="66" y="127" width="90" height="8" rx="4" fill="#34D399"/>
+    <rect x="156" y="127" width="18" height="8" fill="#FBBF24"/>
+    <rect x="174" y="127" width="12" height="8" rx="3" fill="#F87171"/>
+    <text x="196" y="135" fill="#94A3B8" font-size="9.5" font-family="ui-monospace,Menlo,monospace">96k / 115k</text>
+
+    <!-- 200k bar -->
+    <text x="272" y="135" fill="#E2E8F0" font-size="10" font-family="ui-monospace,Menlo,monospace">200k</text>
+    <rect x="310" y="127" width="96" height="8" rx="4" fill="#1E293B"/>
+    <rect x="310" y="127" width="67" height="8" rx="4" fill="#34D399"/>
+    <rect x="377" y="127" width="17" height="8" fill="#FBBF24"/>
+    <rect x="394" y="127" width="12" height="8" rx="3" fill="#F87171"/>
+    <text x="414" y="135" fill="#94A3B8" font-size="9.5" font-family="ui-monospace,Menlo,monospace">140k / 175k</text>
+
+    <!-- 1M bar -->
+    <text x="28" y="157" fill="#38BDF8" font-size="10" font-weight="700" font-family="ui-monospace,Menlo,monospace">1M</text>
+    <rect x="66" y="149" width="230" height="8" rx="4" fill="#1E293B"/>
+    <rect x="66" y="149" width="136" height="8" rx="4" fill="#38BDF8"/>
+    <rect x="202" y="149" width="56" height="8" fill="#FBBF24"/>
+    <rect x="258" y="149" width="38" height="8" rx="3" fill="#F87171"/>
+    <text x="306" y="157" fill="#E2E8F0" font-size="9.5" font-family="ui-monospace,Menlo,monospace">180k / 280k <tspan fill="#FBBF24">(&lt;200k 2x cliff)</tspan></text>
+  </g>
+</svg>

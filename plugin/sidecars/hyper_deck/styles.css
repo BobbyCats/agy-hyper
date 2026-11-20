@@ -529,7 +529,7 @@ button:focus-visible, select:focus-visible, input:focus-visible {
   white-space: nowrap;
 }
 
-/* OpenAI Platform-style Horizontal Segmented Warmth Bar */
+/* Horizontal Segmented Warmth Bar */
 .warmth-title-group {
   display: inline-flex;
   align-items: center;
@@ -739,7 +739,7 @@ button:focus-visible, select:focus-visible, input:focus-visible {
   line-height: 1.5;
 }
 
-/* Modal-style Flush Bottom-Bordered Underline Tabs */
+/* Flush Bottom-Bordered Underline Tabs */
 .pro-tabs {
   display: flex;
   align-items: center;
