@@ -1,0 +1,36 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Run unit & security chaos tests
+        run: cargo test --workspace --all-targets
+      - name: Check sidecar syntax (Node ESM)
+        run: |
+          node --check plugin/sidecars/hyper_deck/main.mjs
+          node --check plugin/sidecars/hyper_deck/app.js
+          node --check plugin/sidecars/hyper_deck/modules/api.js
+          node --check plugin/sidecars/hyper_deck/modules/charts.js
+          node --check plugin/sidecars/hyper_deck/modules/render.js
+      - name: Verify install.sh syntax & piped stdin safety
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          bash -n install.sh
+          # Guard against `set -u` unbound BASH_SOURCE[0] when executed via `curl ... | bash`
+          bash -c 'set -euo pipefail; SCRIPT_SRC="${BASH_SOURCE[0]:-}"; [[ -z "$SCRIPT_SRC" ]]'
+      - name: Verify release build
+        run: cargo build --release

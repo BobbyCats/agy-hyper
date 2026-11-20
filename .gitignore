@@ -1,0 +1,9 @@
+/target
+/dist
+Cargo.lock
+*.sock
+.DS_Store
+.local/
+plugin/bin/
+node_modules/
+*.log

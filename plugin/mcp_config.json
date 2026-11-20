@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "core": {
+      "command": "./bin/agy-hyper",
+      "args": ["mcp"]
+    }
+  }
+}

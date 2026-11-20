@@ -1,0 +1,21 @@
+{
+  "name": "agy-hyper",
+  "displayName": "AGY Hyper",
+  "version": "0.1.0",
+  "description": "Zero-dependency Rust acceleration engine, crash-safe WAL atomic edits, Tree-sitter semantic packing, and live native telemetry cockpit for Antigravity.",
+  "logo": "assets/logo.svg",
+  "author": {
+    "name": "BobbyCats",
+    "url": "https://github.com/BobbyCats"
+  },
+  "homepage": "https://github.com/BobbyCats/agy-hyper",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/BobbyCats/agy-hyper"
+  },
+  "suggestedPrompts": [
+    "Open the AGY Hyper Cockpit to inspect live session speed, cache warmth, and undo timeline",
+    "Pack semantic context for this repository and pinpoint where authentication is wired",
+    "Run a controlled A/B latency waterfall benchmark on my recent Antigravity sessions"
+  ]
+}

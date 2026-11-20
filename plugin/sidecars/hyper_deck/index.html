@@ -1,0 +1,296 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>AGY Hyper Deck</title>
+  <script src="/preload.js"></script>
+  <link rel="stylesheet" href="/styles.css">
+  <!-- INLINE_LOCALES -->
+</head>
+<body>
+  <div class="shell">
+    <!-- Compact Native Header -->
+    <header class="topbar">
+      <div class="brand">
+        <span class="brand-mark" aria-hidden="true">
+          <svg width="22" height="22" viewBox="0 0 128 128" fill="none">
+            <rect x="8" y="8" width="112" height="112" rx="28" fill="#0A0D14" stroke="currentColor" stroke-opacity="0.24" stroke-width="3"/>
+            <path d="M38 37L63 64L38 91H52L77 64L52 37H38Z" fill="#F8FAFC"/>
+            <path d="M61 37L86 64L61 91H75L100 64L75 37H61Z" fill="#38BDF8"/>
+            <rect x="26" y="62" width="15" height="4" rx="2" fill="#38BDF8"/>
+          </svg>
+        </span>
+        <div class="brand-copy">
+          <div class="brand-title-row">
+            <span class="brand-name" data-i18n="app.title">AGY Hyper</span>
+            <span id="version-pill" class="mono-tag">v0.1.0</span>
+          </div>
+          <div class="brand-sub">
+            <span id="daemon-dot" class="pulse-dot"></span>
+            <span id="daemon-label" data-i18n="app.connecting">Connecting…</span>
+          </div>
+        </div>
+      </div>
+
+      <div class="topbar-actions">
+        <div class="lang-switch" role="group" aria-label="Language">
+          <button type="button" class="lang-btn" data-lang="en">EN</button>
+          <button type="button" class="lang-btn" data-lang="zh-CN">中</button>
+          <button type="button" class="lang-btn" data-lang="ja">日</button>
+        </div>
+        <div class="mode-switch" role="tablist" aria-label="View density">
+          <button id="btn-mode-simple" type="button" class="mode-btn active" role="tab" aria-selected="true" data-i18n="mode.simple">Simple</button>
+          <button id="btn-mode-pro" type="button" class="mode-btn" role="tab" aria-selected="false" data-i18n="mode.pro">Pro</button>
+        </div>
+        <button id="btn-theme" type="button" class="icon-btn hidden" title="Toggle theme" aria-label="Toggle theme">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
+            <circle cx="12" cy="12" r="4"/>
+            <path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M6.34 17.66l-1.41 1.41M19.07 4.93l-1.41 1.41"/>
+          </svg>
+        </button>
+      </div>
+    </header>
+
+    <!-- Primary Session Selector Strip -->
+    <div class="session-bar">
+      <svg class="inline-ico" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
+        <polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/>
+      </svg>
+      <select id="session-select" class="session-select" aria-label="Active session">
+        <option value="" data-i18n="app.session_latest">Active session</option>
+      </select>
+      <span id="health-chip" class="status-pill ok" data-i18n="pulse.healthy">Healthy</span>
+    </div>
+
+    <!-- Floating Toast -->
+    <div id="toast" class="toast hidden" role="status" aria-live="polite"></div>
+
+    <!-- ================= SIMPLE MODE ================= -->
+    <main id="view-simple" class="stack">
+      <!-- Interactive KPI-Tab Hero Telemetry Surface -->
+      <section class="panel panel-flush">
+        <div class="kpi-tabs" role="tablist" aria-label="Primary telemetry">
+          <button type="button" class="kpi-tab active" role="tab" aria-selected="true" data-herotab="context">
+            <span class="kpi-lbl" data-i18n="kpi.context">Context</span>
+            <strong id="s-ctx" class="kpi-num">—</strong>
+          </button>
+          <button type="button" class="kpi-tab" role="tab" aria-selected="false" data-herotab="latency">
+            <span class="kpi-lbl" data-i18n="kpi.turn_p50">Turn P50</span>
+            <strong id="s-p50" class="kpi-num">—</strong>
+          </button>
+          <button type="button" class="kpi-tab" role="tab" aria-selected="false" data-herotab="cache">
+            <span class="kpi-lbl" data-i18n="kpi.cache_hit">Cache Hit</span>
+            <strong id="s-cache" class="kpi-num accent">—</strong>
+          </button>
+          <button type="button" class="kpi-tab" role="tab" aria-selected="false" data-herotab="saved" id="s-saved-cell">
+            <span class="kpi-lbl" data-i18n="kpi.est_saved">Est. Saved</span>
+            <strong id="s-saved" class="kpi-num ok">0.0s</strong>
+          </button>
+        </div>
+
+        <div class="hero-chart-area">
+          <div class="hero-chart-head">
+            <span id="hero-chart-title" class="chart-caption" data-i18n="hero.tab_context">Context Window Trajectory</span>
+            <span id="hero-chart-meta" class="mono-readout">—</span>
+          </div>
+          <div id="chart-hero" class="chart-hero"></div>
+        </div>
+
+        <!-- Telemetry Breakdown Table -->
+        <div id="hero-breakdown" class="breakdown-list"></div>
+      </section>
+
+      <!-- Compact Horizontal 60s Prompt Cache Warmth Meter -->
+      <section class="panel">
+        <div class="panel-head tight">
+          <div class="warmth-title-group">
+            <h2 class="panel-title" data-i18n="pulse.heading">Prompt Cache Warmth</h2>
+            <span id="warmth-state-pill" class="status-pill ok" data-i18n="pulse.warm">WARM</span>
+          </div>
+          <strong id="warmth-clock" class="mono-readout">60s / 60s</strong>
+        </div>
+
+        <div class="meter-track" role="progressbar" aria-valuemin="0" aria-valuemax="60" aria-valuenow="0" id="warmth-meter">
+          <div id="warmth-fill" class="meter-fill ok" style="width: 0%"></div>
+          <span class="meter-tick" style="left: 25%" title="15s"></span>
+        </div>
+
+        <div id="cliff-alert" class="inline-alert hidden"></div>
+
+        <div class="panel-foot">
+          <span id="cache-hint" class="foot-note" data-i18n="pulse.hint_warm">Prompt cache is hot — next turn skips full prefill.</span>
+          <button id="btn-copy-compact" type="button" class="btn-ghost" data-i18n="pulse.copy_compact">Copy /compact</button>
+        </div>
+      </section>
+
+      <!-- Safety Mode & One-Click WAL Undo -->
+      <section class="panel">
+        <div class="panel-head">
+          <h2 class="panel-title">
+            <svg class="inline-ico" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/>
+            </svg>
+            <span data-i18n="shield.heading">Safety Mode &amp; Instant Undo</span>
+          </h2>
+          <span class="mono-tag" data-i18n="shield.zero_trust">Zero-Trust</span>
+        </div>
+
+        <div class="seg-3" role="radiogroup" aria-label="Safety Profile">
+          <button type="button" class="seg-btn" data-profile="safe">
+            <strong data-i18n="shield.safe_title">Safe</strong>
+            <span data-i18n="shield.safe_desc">Presets only</span>
+          </button>
+          <button type="button" class="seg-btn" data-profile="balanced">
+            <strong data-i18n="shield.balanced_title">Balanced</strong>
+            <span data-i18n="shield.balanced_desc">Fast &amp; guarded</span>
+          </button>
+          <button type="button" class="seg-btn" data-profile="hyper">
+            <strong data-i18n="shield.hyper_title">Hyper</strong>
+            <span data-i18n="shield.hyper_desc">Tier-2 pre-warm</span>
+          </button>
+        </div>
+
+        <div class="shield-strip">
+          <span class="shield-item"><i class="dot-ok"></i><span data-i18n="shield.jail">Workspace Jail</span></span>
+          <span id="pill-secret" class="shield-item"><i class="dot-ok"></i><span data-i18n="shield.secret">Secret Shield</span></span>
+          <span class="shield-item"><i class="dot-ok"></i><span data-i18n="shield.noshell">No Shell Exec</span></span>
+        </div>
+
+        <div class="hairline"></div>
+
+        <div class="subhead-row">
+          <h3 class="sub-title" data-i18n="shield.undo_heading">Recent AI File Edits</h3>
+          <span id="tx-count-badge" class="mono-tag">0 tx</span>
+        </div>
+        <div id="simple-tx-list" class="tx-list"></div>
+      </section>
+    </main>
+
+    <!-- ================= PRO MODE ================= -->
+    <main id="view-pro" class="stack hidden">
+      <!-- Pro Section Tabs -->
+      <nav class="pro-tabs" role="tablist">
+        <button type="button" class="pro-tab active" data-protab="waterfall" data-i18n="tabs.waterfall">Waterfall</button>
+        <button type="button" class="pro-tab" data-protab="context" data-i18n="tabs.context">Context</button>
+        <button type="button" class="pro-tab" data-protab="engine" data-i18n="tabs.engine">Engine</button>
+        <button type="button" class="pro-tab" data-protab="security" data-i18n="tabs.security">WAL &amp; Audit</button>
+      </nav>
+
+      <!-- Pro Tab 1: Interactive ECharts Waterfall + Breakdown -->
+      <section id="protab-waterfall" class="panel panel-flush">
+        <div class="panel-body">
+          <div class="panel-head">
+            <h2 class="panel-title" data-i18n="waterfall.heading">Turn-by-Turn Execution Waterfall</h2>
+            <div class="legend-inline">
+              <span><i class="sw sw-llm"></i><span data-i18n="waterfall.llm">LLM</span></span>
+              <span><i class="sw sw-hyper"></i><span data-i18n="waterfall.hyper">Hyper</span></span>
+              <span><i class="sw sw-std"></i><span data-i18n="waterfall.std">Tool</span></span>
+            </div>
+          </div>
+
+          <div class="kpi-strip-4">
+            <div class="mini-kpi"><span data-i18n="kpi.turn_p50">Turn P50</span><strong id="wf-p50">—</strong></div>
+            <div class="mini-kpi"><span data-i18n="kpi.p90_turn">P90 Turn</span><strong id="wf-p90">—</strong></div>
+            <div class="mini-kpi"><span data-i18n="kpi.paired_tps">Paired TPS</span><strong id="wf-tps">—</strong></div>
+            <div class="mini-kpi"><span data-i18n="kpi.llm_p50">LLM P50</span><strong id="wf-llm">—</strong></div>
+          </div>
+
+          <div id="chart-waterfall" class="chart-waterfall"></div>
+        </div>
+        <div id="wf-breakdown" class="breakdown-list"></div>
+      </section>
+
+      <!-- Pro Tab 2: Full Context & Cache Hit Dual-Axis Chart + Breakdown -->
+      <section id="protab-context" class="panel panel-flush hidden">
+        <div class="panel-body">
+          <div class="panel-head">
+            <h2 class="panel-title" data-i18n="context_pro.heading">Context Growth &amp; Cache Hit Efficiency</h2>
+            <span id="ctx-pro-summary" class="mono-readout">—</span>
+          </div>
+          <div id="chart-ctx-pro" class="chart-ctx-pro"></div>
+        </div>
+        <div id="ctx-breakdown" class="breakdown-list"></div>
+      </section>
+
+      <!-- Pro Tab 3: Rust Daemon, In-Memory AST/Pack Cache & Tool Mix -->
+      <section id="protab-engine" class="panel hidden">
+        <div class="panel-head">
+          <h2 class="panel-title" data-i18n="engine.heading">Rust Daemon &amp; In-Memory Cache</h2>
+          <span id="eng-pid" class="mono-tag">PID —</span>
+        </div>
+
+        <div class="spec-grid">
+          <div class="spec-cell"><span data-i18n="engine.rtt">UDS RTT</span><strong id="eng-rtt">—</strong></div>
+          <div class="spec-cell"><span data-i18n="engine.rss">Daemon RSS</span><strong id="eng-rss">—</strong></div>
+          <div class="spec-cell"><span data-i18n="engine.uptime">Uptime</span><strong id="eng-uptime">—</strong></div>
+          <div class="spec-cell"><span data-i18n="engine.ast_cache">AST Cache</span><strong id="eng-ast">0</strong></div>
+          <div class="spec-cell"><span data-i18n="engine.pack_cache">Pack Hits</span><strong id="eng-pack">0%</strong></div>
+          <div class="spec-cell"><span data-i18n="engine.prewarm">Pre-warmed</span><strong id="eng-prewarm">0</strong></div>
+        </div>
+
+        <div class="hairline"></div>
+        <h3 class="sub-title" data-i18n="engine.tools_heading">Tool Call Mix</h3>
+        <div id="tools-bars" class="prop-list"></div>
+
+        <div class="hairline"></div>
+        <h3 class="sub-title" data-i18n="engine.controls_heading">Live Engine Controls</h3>
+        <div class="toggle-list">
+          <label class="toggle-row">
+            <div>
+              <strong data-i18n="engine.tog_prewarm_title">Tier-2 Speculative Pre-warm</strong>
+              <small data-i18n="engine.tog_prewarm_desc">Debounced background read-only check keyed by workspace revision</small>
+            </div>
+            <input id="tog-prewarm" type="checkbox" data-toggle="prewarm_tier2">
+          </label>
+          <label class="toggle-row">
+            <div>
+              <strong data-i18n="engine.tog_secret_title">Secret File Shield</strong>
+              <small data-i18n="engine.tog_secret_desc">Block .env, *.pem, *.key, id_rsa across search and edits</small>
+            </div>
+            <input id="tog-secret" type="checkbox" data-toggle="block_secret_files">
+          </label>
+          <label class="toggle-row">
+            <div>
+              <strong data-i18n="engine.tog_argv_title">Allow Safe-List Argv Checks</strong>
+              <small data-i18n="engine.tog_argv_desc">Permit allowlisted shell-free tool commands</small>
+            </div>
+            <input id="tog-argv" type="checkbox" data-toggle="allow_custom_argv_checks">
+          </label>
+          <label class="toggle-row">
+            <div>
+              <strong data-i18n="engine.tog_pill_title">SessionStart Launch Pill</strong>
+              <small data-i18n="engine.tog_pill_desc">Show one-line Hyper Deck quick link on new chats</small>
+            </div>
+            <input id="tog-pill" type="checkbox" data-toggle="enable_ui_pill">
+          </label>
+        </div>
+
+        <div class="hairline"></div>
+        <h3 class="sub-title" data-i18n="engine.workspaces_heading">Watched Workspaces (FSEvents)</h3>
+        <div id="eng-workspaces" class="ws-list"></div>
+      </section>
+
+      <!-- Pro Tab 4: WAL Ledger + Zero-Trust Audit -->
+      <section id="protab-security" class="panel hidden">
+        <div class="panel-head">
+          <h2 class="panel-title" data-i18n="security.wal_heading">BLAKE3 WAL Transaction Ledger</h2>
+          <span class="status-pill ok" data-i18n="security.enospc_safe">ENOSPC-Safe</span>
+        </div>
+        <div id="pro-wal-list" class="tx-list"></div>
+
+        <div class="hairline"></div>
+        <div class="panel-head">
+          <h2 class="panel-title" data-i18n="security.audit_heading">Zero-Trust Security Audit Stream</h2>
+          <span id="audit-blocked-chip" class="mono-tag">0 blocked</span>
+        </div>
+        <div id="pro-audit-list" class="audit-list"></div>
+      </section>
+    </main>
+  </div>
+
+  <script src="/i18next.min.js"></script>
+  <script src="/echarts-core.min.js"></script>
+  <script type="module" src="/app.js"></script>
+</body>
+</html>

@@ -1,0 +1,19 @@
+pub mod ast;
+pub mod bench;
+pub mod config;
+pub mod context_pack;
+pub mod diag;
+pub mod git;
+pub mod jail;
+pub mod json_util;
+pub mod native_capture;
+pub mod runner;
+pub mod search;
+pub mod sessions;
+pub mod transcript;
+pub mod tx_edit;
+pub mod wal;
+
+pub fn version() -> &'static str {
+    env!("CARGO_PKG_VERSION")
+}

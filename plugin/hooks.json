@@ -1,0 +1,31 @@
+{
+  "agy-hyper-lifecycle": {
+    "enabled": true,
+    "SessionStart": [
+      {
+        "type": "command",
+        "command": "./bin/agy-hyper hook session-start",
+        "timeout": 4
+      }
+    ],
+    "PreInvocation": [
+      {
+        "type": "command",
+        "command": "./bin/agy-hyper hook pre-invocation",
+        "timeout": 3
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "edit_file|write_file|run_command|call_mcp_tool|mcp_agy-hyper.*hyper_edit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "./bin/agy-hyper hook post-tool-use",
+            "timeout": 2
+          }
+        ]
+      }
+    ]
+  }
+}

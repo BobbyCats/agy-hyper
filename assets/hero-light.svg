@@ -1,0 +1,90 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="340" viewBox="0 0 1200 340" fill="none">
+  <defs>
+    <linearGradient id="bgL" x1="0" y1="0" x2="1200" y2="340" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#FFFFFF"/>
+      <stop offset="100%" stop-color="#F4F7FA"/>
+    </linearGradient>
+    <linearGradient id="accentL" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#F8FAFC"/>
+      <stop offset="55%" stop-color="#38BDF8"/>
+      <stop offset="100%" stop-color="#0284C7"/>
+    </linearGradient>
+    <pattern id="gridL" width="32" height="32" patternUnits="userSpaceOnUse">
+      <path d="M 32 0 L 0 0 0 32" fill="none" stroke="#CBD5E1" stroke-width="0.6" stroke-opacity="0.5"/>
+    </pattern>
+  </defs>
+
+  <rect width="1200" height="340" rx="20" fill="url(#bgL)"/>
+  <rect width="1200" height="340" rx="20" fill="url(#gridL)"/>
+  <rect x="0.75" y="0.75" width="1198.5" height="338.5" rx="19.25" stroke="#CBD5E1" stroke-width="1.5"/>
+
+  <path d="M26 40V26H40M1174 40V26H1160M26 300V314H40M1174 300V314H1160" stroke="#0284C7" stroke-opacity="0.45" stroke-width="1.5" stroke-linecap="round"/>
+
+  <g transform="translate(56, 74)">
+    <rect x="0" y="0" width="84" height="84" rx="20" fill="#0F172A" stroke="#0284C7" stroke-opacity="0.5" stroke-width="1.75"/>
+    <path d="M24 22L44 42L24 62H35.5L55.5 42L35.5 22H24Z" fill="#F8FAFC"/>
+    <path d="M42 22L62 42L42 62H53.5L73.5 42L53.5 22H42Z" fill="url(#accentL)"/>
+    <rect x="14" y="40.5" width="12" height="3" rx="1.5" fill="#38BDF8"/>
+  </g>
+
+  <text x="164" y="114" fill="#0F172A" font-size="48" font-weight="800" letter-spacing="-1.5" font-family="system-ui,-apple-system,'Segoe UI',sans-serif">AGY HYPER</text>
+  <rect x="458" y="83" width="66" height="24" rx="12" fill="#0284C7" fill-opacity="0.1" stroke="#0284C7" stroke-opacity="0.35"/>
+  <text x="491" y="99" text-anchor="middle" fill="#0284C7" font-size="12" font-weight="700" font-family="ui-monospace,SFMono-Regular,Menlo,monospace">v0.1.0</text>
+  <text x="164" y="148" fill="#475569" font-size="17" font-weight="500" font-family="system-ui,-apple-system,sans-serif">Stop paying the 6-second TTFT tax. Turn Antigravity into a native Rust cockpit.</text>
+
+  <g transform="translate(56, 196)" font-family="ui-monospace,SFMono-Regular,Menlo,monospace" font-size="12" font-weight="600">
+    <rect x="0" y="0" width="136" height="30" rx="8" fill="#FFFFFF" stroke="#CBD5E1"/>
+    <circle cx="14" cy="15" r="3.5" fill="#16A34A"/>
+    <text x="25" y="19" fill="#0F172A">Rust UDS &lt;1ms</text>
+
+    <rect x="148" y="0" width="144" height="30" rx="8" fill="#FFFFFF" stroke="#CBD5E1"/>
+    <circle cx="162" cy="15" r="3.5" fill="#0284C7"/>
+    <text x="173" y="19" fill="#0F172A">Tree-sitter AST</text>
+
+    <rect x="304" y="0" width="132" height="30" rx="8" fill="#FFFFFF" stroke="#CBD5E1"/>
+    <circle cx="318" cy="15" r="3.5" fill="#7C3AED"/>
+    <text x="329" y="19" fill="#0F172A">BLAKE3 WAL</text>
+
+    <rect x="448" y="0" width="148" height="30" rx="8" fill="#FFFFFF" stroke="#CBD5E1"/>
+    <circle cx="462" cy="15" r="3.5" fill="#D97706"/>
+    <text x="473" y="19" fill="#0F172A">gix Read-Only</text>
+  </g>
+
+  <text x="56" y="274" fill="#64748B" font-size="12.5" font-family="ui-monospace,SFMono-Regular,Menlo,monospace">Zero rg/Python/Node hook deps · Native Sidecar Aux Pane UI · ENOSPC-proof atomic rollback · MIT</text>
+
+  <g transform="translate(690, 56)">
+    <rect x="0" y="0" width="454" height="228" rx="14" fill="#FFFFFF" stroke="#CBD5E1" stroke-width="1.5"/>
+    <text x="20" y="30" fill="#64748B" font-size="10.5" font-weight="700" letter-spacing="1.2" font-family="ui-monospace,Menlo,monospace">EXPLORATION TURN BUDGET (REAL PHYSICS)</text>
+    <line x1="20" y1="42" x2="434" y2="42" stroke="#E2E8F0"/>
+
+    <text x="20" y="68" fill="#475569" font-size="12" font-weight="600" font-family="system-ui,sans-serif">Stock Agent (5 turns · serial checks)</text>
+    <text x="434" y="68" text-anchor="end" fill="#DC2626" font-size="12" font-weight="700" font-family="ui-monospace,Menlo,monospace">~38.4s</text>
+    <g transform="translate(20, 78)">
+      <rect x="0" y="0" width="64" height="14" rx="3" fill="#94A3B8"/>
+      <rect x="67" y="0" width="16" height="14" rx="3" fill="#F59E0B"/>
+      <rect x="86" y="0" width="64" height="14" rx="3" fill="#94A3B8"/>
+      <rect x="153" y="0" width="16" height="14" rx="3" fill="#F59E0B"/>
+      <rect x="172" y="0" width="64" height="14" rx="3" fill="#94A3B8"/>
+      <rect x="239" y="0" width="16" height="14" rx="3" fill="#F59E0B"/>
+      <rect x="258" y="0" width="64" height="14" rx="3" fill="#94A3B8"/>
+      <rect x="325" y="0" width="16" height="14" rx="3" fill="#F59E0B"/>
+      <rect x="344" y="0" width="70" height="14" rx="3" fill="#94A3B8"/>
+    </g>
+    <text x="20" y="109" fill="#64748B" font-size="10.5" font-family="ui-monospace,Menlo,monospace">5 × 6.1s TTFT floor + serial safety gates + 10KB disk spill</text>
+
+    <text x="20" y="144" fill="#0F172A" font-size="12" font-weight="700" font-family="system-ui,sans-serif">AGY Hyper (1 semantic hyper_pack turn)</text>
+    <text x="434" y="144" text-anchor="end" fill="#0284C7" font-size="12" font-weight="700" font-family="ui-monospace,Menlo,monospace">~6.2s</text>
+    <g transform="translate(20, 154)">
+      <rect x="0" y="0" width="64" height="16" rx="3" fill="#4F46E5"/>
+      <rect x="67" y="0" width="6" height="16" rx="2" fill="#0284C7"/>
+      <rect x="80" y="0" width="334" height="16" rx="3" fill="#0284C7" fill-opacity="0.08" stroke="#0284C7" stroke-opacity="0.35" stroke-dasharray="4 4"/>
+      <text x="247" y="12" text-anchor="middle" fill="#0284C7" font-size="10.5" font-weight="700" font-family="ui-monospace,Menlo,monospace">32.2s DEAD TIME ELIMINATED</text>
+    </g>
+
+    <g transform="translate(20, 196)" font-size="10.5" font-family="ui-monospace,Menlo,monospace" fill="#475569">
+      <rect x="0" y="-8" width="9" height="9" rx="2" fill="#4F46E5"/><text x="14" y="0">TTFT + LLM</text>
+      <rect x="102" y="-8" width="9" height="9" rx="2" fill="#0284C7"/><text x="116" y="0">Rust &lt;15ms</text>
+      <rect x="206" y="-8" width="9" height="9" rx="2" fill="#F59E0B"/><text x="220" y="0">Serial Safety Gate</text>
+    </g>
+  </g>
+</svg>
