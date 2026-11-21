@@ -15,7 +15,7 @@
   <rect x="44" y="192" width="198" height="72" rx="7" fill="#FFFFFF" stroke="#0284C7" stroke-opacity="0.5"/>
   <text x="56" y="212" fill="#0F172A" font-size="11.5" font-weight="700" font-family="ui-monospace,Menlo,monospace">Sidecar Aux Pane UI</text>
   <text x="56" y="228" fill="#475569" font-size="10" font-family="system-ui,sans-serif">Simple Mode + Pro Flamegraph</text>
-  <text x="56" y="244" fill="#16A34A" font-size="10" font-family="ui-monospace,Menlo,monospace">60s Cache Bar · 1-Click Undo</text>
+  <text x="56" y="244" fill="#16A34A" font-size="10" font-family="ui-monospace,Menlo,monospace">240s Cache · Usage · 1-Click Undo</text>
 
   <path d="M258 115H306M258 163H306M258 228H306" stroke="#0284C7" stroke-width="1.75" stroke-dasharray="4 3"/>
   <polygon points="312,115 304,111 304,119" fill="#0284C7"/>
