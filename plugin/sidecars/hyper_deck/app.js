@@ -14,8 +14,13 @@
   let pollInFlight = false;
   let pollSeq = 0;
 
+  function selectSession(convId) {
+    state.selectedConvId = convId || '';
+    poll(true);
+  }
+
   function render() {
-    if (state.lastSnap) renderSnapshot(state.lastSnap, state, triggerRollback);
+    if (state.lastSnap) renderSnapshot(state.lastSnap, state, triggerRollback, selectSession);
   }
 
   function resizeVisibleCharts() {
@@ -194,8 +199,11 @@
     b.addEventListener('click', () => setProTab(b.dataset.protab))
   );
   $('session-select').addEventListener('change', (e) => {
-    state.selectedConvId = e.target.value;
-    poll(true);
+    selectSession(e.target.value);
+  });
+  $('btn-back-parent').addEventListener('click', () => {
+    const rootId = state.lastSnap?.session_tree?.root_conversation_id || '';
+    selectSession(rootId);
   });
 
   document.querySelectorAll('.seg-btn[data-profile]').forEach((btn) => {

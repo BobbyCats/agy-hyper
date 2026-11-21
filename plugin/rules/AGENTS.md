@@ -12,11 +12,13 @@ You have the `agy-hyper` native Rust MCP engine active (sub-millisecond local UD
    - Use `hyper_edit` as your default editor for source and config files inside the workspace (both single-file and multi-file edits): pass `expected_etag` for CAS safety or `symbol` for surgical AST block replacement. Every commit writes a crash-safe BLAKE3 WAL snapshot (`tx_id`) for 1-click Undo and returns inline `<1ms` Tree-sitter syntax verification.
    - Reserve built-in `write_file` / `edit_file` for Antigravity artifact files outside the workspace or binary files (verified native workspace edits are also auto-captured into the WAL ledger via `PostToolUse`).
    - To undo any edit cleanly, call `hyper_tx(action="rollback", tx_id="...")`.
-4. **Safe Verification**:
-   - Use `hyper_check(preset="...")` (e.g. `cargo:check`, `pkg:test`, `py:pytest`) instead of slow shell retries; `hyper_check` preserves head+tail fatal errors without dropping stderr and stores oversized logs in a 1ms drill handle (`h_xxxx`).
-5. **Context & Cache Hygiene**:
+4. **Cache-Preserving Sync Verification (`hyper_check`)**:
+   - For builds, typechecks, and tests taking up to 60s, prefer `hyper_check(preset="...")` (e.g. `cargo:check`, `pkg:test`, `pkg:<pkg>:test`, `py:pytest`) or `hyper_check(argv=[...])` over `run_command`.
+   - `run_command` backgrounds commands past 10s; yielding a turn to wait for background completion risks prompt-cache resets on wake-up. `hyper_check` stays synchronous inside the active tool loop, preserves head+tail fatal errors without dropping stderr, and stores oversized logs in a 1ms drill handle (`h_xxxx`).
+5. **Context, Subagent & Cache Hygiene**:
    - Respect `[AGY Hyper Guard]` / `[AGY Hyper Redline Guard]` watermark signals: offload broad multi-file scans to `research` subagents and suggest `/compact` when approaching 280k tokens.
-   - When the user asks to view live telemetry, cache warmth, or rollback history, surface `[Open Hyper Deck](sidecar://agy-hyper/hyper_deck/)`.
+   - Avoid spawning short-lived subagents for targeted lookups that `hyper_pack` or `hyper_search` resolves in 1 warm-cache turn; reuse an existing subagent via `send_message` for close follow-ups.
+   - When the user asks to view live telemetry, cache warmth, subagent status, or rollback history, surface `[Open Hyper Deck](sidecar://agy-hyper/hyper_deck/)`.
 
 ## Compact Tool Schemas (Inline — No Extra Schema-Read Turn Required)
 

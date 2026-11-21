@@ -3,10 +3,18 @@
   const { $, escapeHtml, fmtRelTime, fmtSec, t } = root.api;
   const { renderFullContextChart, renderHeroChart, renderWaterfallChart } = root.charts;
 
+  function fmtTokens(n) {
+    const v = Number(n || 0);
+    if (v >= 1_000_000) return `${(v / 1_000_000).toFixed(2)}M`;
+    if (v >= 1_000) return `${(v / 1_000).toFixed(1)}k`;
+    return String(v);
+  }
+
   function renderWarmthMeter(snap) {
     if (!snap) return;
     const p = snap.pulse;
-    const warmWin = snap.config?.cache_warm_window_secs || 60;
+    const warmWin = snap.config?.cache_warm_window_secs || 240;
+    const coolThreshold = Math.max(15, Math.floor(warmWin * 0.5));
     let remaining = warmWin;
     if (p?.last_planner_epoch_ms) {
       const elapsed = Math.max(0, Math.floor((Date.now() - p.last_planner_epoch_ms) / 1000));
@@ -16,9 +24,13 @@
     }
 
     const pct = Math.max(0, Math.min(100, Math.round((remaining / warmWin) * 100)));
-    const state = remaining === 0 ? 'err' : remaining <= 15 ? 'warn' : 'ok';
-    const stateLabel = remaining === 0 ? t('pulse.cold') : remaining <= 15 ? t('pulse.cooling') : t('pulse.warm');
-    const hintTxt = remaining === 0 ? t('pulse.hint_cold') : remaining <= 15 ? t('pulse.hint_cooling') : t('pulse.hint_warm');
+    const state = remaining === 0 ? 'err' : remaining <= coolThreshold ? 'warn' : 'ok';
+    const stateLabel = remaining === 0 ? t('pulse.cold') : remaining <= coolThreshold ? t('pulse.cooling') : t('pulse.warm');
+    const hintTxt = remaining === 0
+      ? t('pulse.hint_cold', { secs: warmWin })
+      : remaining <= coolThreshold
+        ? t('pulse.hint_cooling')
+        : t('pulse.hint_warm');
 
     $('warmth-clock').textContent = remaining === 0 ? `0s / ${warmWin}s` : `${remaining}s / ${warmWin}s`;
     const pill = $('warmth-state-pill');
@@ -28,7 +40,9 @@
     const fill = $('warmth-fill');
     fill.className = `meter-fill ${state}`;
     fill.style.width = `${remaining === 0 ? 4 : pct}%`;
-    $('warmth-meter').setAttribute('aria-valuenow', String(remaining));
+    const meter = $('warmth-meter');
+    meter.setAttribute('aria-valuemax', String(warmWin));
+    meter.setAttribute('aria-valuenow', String(remaining));
     $('cache-hint').textContent = hintTxt;
   }
 
@@ -97,22 +111,48 @@
     });
   }
 
-  function renderSessionSelect(sessions, selectedConvId, activeConvId) {
+  function renderSessionSelect(sessions, tree, selectedConvId, activeConvId) {
     const sel = $('session-select');
     const currentVal = selectedConvId || activeConvId || '';
-    const opts = [
-      `<option value="">${escapeHtml(t('app.session_latest'))}</option>`,
-      ...(sessions || []).map((s) => {
-        const rawTitle = (s.title || s.preview || s.conversation_id.slice(0, 8)).trim();
-        const ws = (s.workspace || '').trim();
-        const combined = ws && !rawTitle.toLowerCase().includes(ws.toLowerCase()) ? `${ws} · ${rawTitle}` : rawTitle;
-        const shortName = combined.length > 40 ? `${combined.slice(0, 39).trimEnd()}…` : combined;
-        const age = s.mtime_ms ? fmtRelTime(s.mtime_ms) : '';
-        const label = age ? `${shortName} · ${age}` : shortName;
-        const selected = s.conversation_id === currentVal ? ' selected' : '';
-        return `<option value="${escapeHtml(s.conversation_id)}"${selected}>${escapeHtml(label)}</option>`;
-      }),
-    ];
+    const treeSubs = tree?.subagents || [];
+    const rootId = tree?.root_conversation_id || '';
+    const seen = new Set();
+    const opts = [`<option value="">${escapeHtml(t('app.session_latest'))}</option>`];
+
+    const pushSubOption = (sub) => {
+      if (seen.has(sub.conversation_id)) return;
+      seen.add(sub.conversation_id);
+      const role = sub.agent_name || 'sub';
+      const rawTitle = (sub.title || sub.conversation_id.slice(0, 8)).trim();
+      const shortName = rawTitle.length > 26 ? `${rawTitle.slice(0, 25).trimEnd()}…` : rawTitle;
+      const ctx = sub.total_tokens > 0 ? `${(sub.total_tokens / 1000).toFixed(0)}k` : '—';
+      const selected = sub.conversation_id === currentVal ? ' selected' : '';
+      opts.push(
+        `<option value="${escapeHtml(sub.conversation_id)}"${selected}>${escapeHtml(`↳ [${role}] ${shortName} · ${ctx}`)}</option>`
+      );
+    };
+
+    for (const s of sessions || []) {
+      seen.add(s.conversation_id);
+      const rawTitle = (s.title || s.preview || s.conversation_id.slice(0, 8)).trim();
+      const ws = (s.workspace || '').trim();
+      const combined = ws && !rawTitle.toLowerCase().includes(ws.toLowerCase()) ? `${ws} · ${rawTitle}` : rawTitle;
+      const shortName = combined.length > 36 ? `${combined.slice(0, 35).trimEnd()}…` : combined;
+      const subTag = s.subagent_count > 0 ? ` · ${t('subagents.sub_badge', { count: s.subagent_count })}` : '';
+      const age = s.mtime_ms ? fmtRelTime(s.mtime_ms) : '';
+      const label = age ? `${shortName}${subTag} · ${age}` : `${shortName}${subTag}`;
+      const selected = s.conversation_id === currentVal ? ' selected' : '';
+      opts.push(`<option value="${escapeHtml(s.conversation_id)}"${selected}>${escapeHtml(label)}</option>`);
+
+      if (s.conversation_id === rootId && treeSubs.length) {
+        for (const sub of treeSubs) pushSubOption(sub);
+      }
+    }
+
+    if (treeSubs.length) {
+      for (const sub of treeSubs) pushSubOption(sub);
+    }
+
     const nextHtml = opts.join('');
     if (sel.dataset.rendered !== nextHtml) {
       sel.innerHTML = nextHtml;
@@ -120,11 +160,80 @@
     }
   }
 
-  function renderSnapshot(snap, state, onRollback) {
+  function renderSubagentStrip(tree, activeConvId, onSelectSession) {
+    const strip = $('subagent-strip');
+    if (!strip) return;
+    if (!tree || !tree.subagents?.length) {
+      strip.classList.add('hidden');
+      return;
+    }
+    strip.classList.remove('hidden');
+
+    $('subagent-heading').textContent = t('subagents.heading', { count: tree.subagent_count });
+    const actPill = $('subagent-active-pill');
+    if (tree.active_subagents > 0) {
+      actPill.textContent = t('subagents.active_badge', { count: tree.active_subagents });
+      actPill.classList.remove('hidden');
+    } else {
+      actPill.classList.add('hidden');
+    }
+
+    const redPill = $('subagent-red-pill');
+    if (tree.redline_subagents > 0) {
+      redPill.textContent = t('subagents.redline_badge', { count: tree.redline_subagents });
+      redPill.classList.remove('hidden');
+    } else {
+      redPill.classList.add('hidden');
+    }
+
+    $('btn-back-parent').classList.toggle('hidden', !tree.selected_is_subagent);
+    $('subagent-tree-meta').textContent = t('subagents.tree_meta', {
+      turns: tree.combined_turns || 0,
+      tokens: fmtTokens(tree.combined_tokens || 0),
+      cache: Math.round((tree.combined_cache_hit_ratio || 0) * 100),
+    });
+
+    const list = $('subagent-list');
+    list.innerHTML = tree.subagents
+      .map((sub) => {
+        const isSel = sub.conversation_id === activeConvId;
+        const role = sub.agent_name || 'sub';
+        const title = sub.title || `#${sub.conversation_id.slice(0, 8)}`;
+        const ctx = sub.total_tokens > 0 ? `${(sub.total_tokens / 1000).toFixed(1)}k` : '—';
+        const cachePct = `${Math.round((sub.cache_hit_ratio || 0) * 100)}%`;
+        const hyperTxt = sub.hyper_tool_calls > 0 ? ` · ⚡${sub.hyper_tool_calls}` : '';
+        const hCls = sub.health === 'red' ? 'err' : sub.health === 'yellow' ? 'warn' : 'ok';
+        const hLbl = sub.health === 'red' ? 'RED' : sub.health === 'yellow' ? 'WARN' : 'OK';
+        return `
+          <button type="button" class="subagent-row${isSel ? ' selected' : ''}" data-subconv="${escapeHtml(sub.conversation_id)}">
+            <span class="subagent-row-main">
+              <i class="subagent-dot${sub.active ? ' live' : ''}"></i>
+              <span class="subagent-role">${escapeHtml(role)}</span>
+              <span class="subagent-title" title="${escapeHtml(title)}">${escapeHtml(title)}</span>
+            </span>
+            <span class="subagent-stats">
+              <span>${escapeHtml(ctx)}</span>
+              <span>${escapeHtml(cachePct)}${escapeHtml(hyperTxt)}</span>
+              <span class="status-pill ${hCls}">${hLbl}</span>
+            </span>
+          </button>`;
+      })
+      .join('');
+
+    list.querySelectorAll('.subagent-row[data-subconv]').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        if (typeof onSelectSession === 'function') onSelectSession(btn.dataset.subconv);
+      });
+    });
+  }
+
+  function renderSnapshot(snap, state, onRollback, onSelectSession) {
     const cfg = snap.config || {};
     const eng = snap.engine || {};
     const pulse = snap.pulse || null;
     const bench = snap.benchmark || null;
+    const tree = snap.session_tree || null;
+    const activeConvId = pulse?.conversation_id || bench?.conversation_id || '';
 
     $('version-pill').textContent = `v${eng.version || snap.version || '0.1.0'}`;
     const isUds = snap.transport === 'uds-daemon';
@@ -133,7 +242,8 @@
       ? t('app.daemon_online', { rtt: snap.rpc_rtt_ms ?? 0 })
       : t('app.daemon_fallback', { rtt: snap.rpc_rtt_ms ?? 0 });
 
-    renderSessionSelect(snap.recent_sessions, state.selectedConvId, pulse?.conversation_id || bench?.conversation_id || '');
+    renderSessionSelect(snap.recent_sessions, tree, state.selectedConvId, activeConvId);
+    renderSubagentStrip(tree, activeConvId, onSelectSession);
 
     const hChip = $('health-chip');
     hChip.className = 'status-pill';

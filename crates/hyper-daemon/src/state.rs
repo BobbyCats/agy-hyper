@@ -1,5 +1,6 @@
 use crate::protocol::{
     AuditEvent, CockpitSnapshot, DrillOutput, EngineStatus, HandleStored, PrewarmedCheck,
+    SessionTreeSummary, SubagentSnapshot,
 };
 use hyper_core::bench::{analyze_transcript, SessionBenchmark};
 use hyper_core::config::{truncate_utf8_bytes, HyperConfig, Profile};
@@ -8,10 +9,14 @@ use hyper_core::context_pack::{
 };
 use hyper_core::jail::WorkspaceJail;
 use hyper_core::runner::{discover_presets, run_check, CheckRequest};
-use hyper_core::sessions::{discover_primary_transcript, discover_session_summaries};
-use hyper_core::transcript::{inspect_transcript_tail, resolve_transcript_path};
+use hyper_core::sessions::{
+    collect_descendant_sessions, discover_primary_transcript, discover_session_summaries,
+    resolve_root_conversation_id,
+};
+use hyper_core::transcript::{inspect_transcript_tail, resolve_transcript_path, HealthLevel};
 use hyper_core::wal::{list_transactions, rollback_transaction, RollbackResult};
-use notify::{Event, RecommendedWatcher, RecursiveMode, Watcher};
+use notify::event::ModifyKind;
+use notify::{Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, VecDeque};
 use std::fs;
@@ -68,7 +73,7 @@ impl BenchCache {
             }
         }
         let fresh = analyze_transcript(path).ok()?;
-        if self.entries.len() >= 16 {
+        if self.entries.len() >= 64 {
             if let Some(evict) = self.entries.keys().next().cloned() {
                 self.entries.remove(&evict);
             }
@@ -88,6 +93,7 @@ pub struct DaemonState {
     watchers: HashMap<String, RecommendedWatcher>,
     prewarm_cache: Arc<Mutex<HashMap<(String, String), PrewarmedCheck>>>,
     prewarm_scheduled_rev: Arc<Mutex<HashMap<String, u64>>>,
+    last_check_preset: Arc<Mutex<HashMap<String, String>>>,
     pub bench_cache: Arc<Mutex<BenchCache>>,
     ast_cache: AstOutlineCache,
     pack_cache: HashMap<String, (u64, u64, ContextPackResult)>,
@@ -200,6 +206,7 @@ impl DaemonState {
             watchers: HashMap::new(),
             prewarm_cache: Arc::new(Mutex::new(HashMap::new())),
             prewarm_scheduled_rev: Arc::new(Mutex::new(HashMap::new())),
+            last_check_preset: Arc::new(Mutex::new(HashMap::new())),
             bench_cache: Arc::new(Mutex::new(BenchCache::default())),
             ast_cache: AstOutlineCache::default(),
             pack_cache: HashMap::new(),
@@ -411,18 +418,11 @@ impl DaemonState {
         let ws_key = canonical.clone();
         if let Ok(mut watcher) = notify::recommended_watcher(move |res: notify::Result<Event>| {
             if let Ok(ev) = res {
-                let ignore_noise = ev.paths.iter().all(|p| {
-                    let norm = p.to_string_lossy().replace('\\', "/");
-                    norm.contains("/.git/")
-                        || norm.contains("/target/")
-                        || norm.contains("/node_modules/")
-                        || norm.contains("/.agy-hyper.")
-                        || norm.contains("/.DS_Store")
-                        || norm.contains("/dist/")
-                        || norm.contains("/.next/")
-                        || norm.contains("/__pycache__/")
-                        || norm.contains("/.cache/")
-                });
+                if !is_content_mutation_event(&ev.kind) {
+                    return;
+                }
+                let ignore_noise = ev.paths.is_empty()
+                    || ev.paths.iter().all(|p| is_noisy_watch_path(p));
                 if !ignore_noise {
                     if let Ok(mut guard) = revs_arc.lock() {
                         let e = guard.entry(ws_key.clone()).or_insert(1);
@@ -455,14 +455,36 @@ impl DaemonState {
         rev
     }
 
+    pub fn record_check_target(&mut self, workspace: &str, preset: &str) {
+        let canonical = fs::canonicalize(workspace)
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|_| workspace.to_string());
+        if let Ok(mut map) = self.last_check_preset.lock() {
+            if map.len() >= 32 && !map.contains_key(&canonical) {
+                if let Some(old_k) = map.keys().next().cloned() {
+                    map.remove(&old_k);
+                }
+            }
+            map.insert(canonical, preset.to_string());
+        }
+    }
+
     pub fn schedule_tier2_prewarm(&self, canonical_ws: &str, target_rev: u64) {
         if !self.config.prewarm_tier2 {
             return;
         }
         let ws_path = PathBuf::from(canonical_ws);
-        let Some(preset) = discover_presets(&ws_path)
-            .into_iter()
-            .find(|p| p.read_only_safe)
+        let presets = discover_presets(&ws_path);
+        let preferred_id = self
+            .last_check_preset
+            .lock()
+            .ok()
+            .and_then(|m| m.get(canonical_ws).cloned());
+        let Some(preset) = preferred_id
+            .as_deref()
+            .and_then(|id| presets.iter().find(|p| p.id == id && p.read_only_safe))
+            .or_else(|| presets.iter().find(|p| p.read_only_safe))
+            .cloned()
         else {
             return;
         };
@@ -630,20 +652,150 @@ pub fn build_cockpit_snapshot(
     conversation_id: Option<&str>,
     transcript_path: Option<&str>,
 ) -> CockpitSnapshot {
+    let all_sessions = discover_session_summaries(60);
     let tpath = resolve_transcript_path(transcript_path, conversation_id)
+        .or_else(|| {
+            all_sessions
+                .iter()
+                .find(|s| !s.is_subagent)
+                .or_else(|| all_sessions.first())
+                .map(|s| PathBuf::from(&s.transcript_path))
+        })
         .or_else(discover_primary_transcript);
 
-    let pulse = tpath
-        .as_deref()
-        .and_then(|p| inspect_transcript_tail(p, &config));
-    let benchmark = tpath.as_deref().and_then(|p| {
+    let analyze_path = |p: &Path| -> Option<SessionBenchmark> {
         if let Some(cache) = bench_cache {
             cache.lock().ok().and_then(|mut c| c.analyze_cached(p))
         } else {
             analyze_transcript(p).ok()
         }
+    };
+
+    let pulse = tpath
+        .as_deref()
+        .and_then(|p| inspect_transcript_tail(p, &config));
+    let benchmark = tpath.as_deref().and_then(analyze_path);
+
+    let selected_id = pulse
+        .as_ref()
+        .map(|p| p.conversation_id.clone())
+        .or_else(|| conversation_id.filter(|s| !s.trim().is_empty()).map(String::from));
+
+    let session_tree = selected_id.as_deref().map(|sel_id| {
+        let root_id = resolve_root_conversation_id(sel_id, &all_sessions);
+        let selected_meta = all_sessions.iter().find(|s| s.conversation_id == sel_id);
+        let selected_is_subagent = root_id != sel_id
+            || selected_meta.is_some_and(|s| s.is_subagent);
+        let parent_conversation_id = selected_meta
+            .and_then(|s| s.parent_conversation_id.clone())
+            .or_else(|| (root_id != sel_id).then(|| root_id.clone()));
+
+        let root_bench = if root_id == sel_id {
+            benchmark.clone()
+        } else {
+            all_sessions
+                .iter()
+                .find(|s| s.conversation_id == root_id)
+                .and_then(|s| analyze_path(Path::new(&s.transcript_path)))
+        };
+
+        let mut combined_turns = root_bench.as_ref().map(|b| b.total_turns).unwrap_or(0);
+        let mut combined_input = root_bench.as_ref().map(|b| b.total_input_tokens).unwrap_or(0);
+        let mut combined_cache = root_bench
+            .as_ref()
+            .map(|b| b.total_cache_read_tokens)
+            .unwrap_or(0);
+        let mut combined_hyper = root_bench.as_ref().map(|b| b.hyper_tool_calls).unwrap_or(0);
+        let mut combined_tools = root_bench.as_ref().map(|b| b.total_tool_calls).unwrap_or(0);
+
+        let descendants = collect_descendant_sessions(&root_id, &all_sessions);
+        let mut subagents = Vec::with_capacity(descendants.len());
+        let mut active_subagents = 0usize;
+        let mut redline_subagents = 0usize;
+
+        for child in descendants {
+            let cp = Path::new(&child.transcript_path);
+            let child_pulse = inspect_transcript_tail(cp, &config);
+            let child_bench = analyze_path(cp);
+
+            let health = child_pulse
+                .as_ref()
+                .map(|p| p.health)
+                .unwrap_or(HealthLevel::Green);
+            if child.active {
+                active_subagents += 1;
+            }
+            if health == HealthLevel::Red {
+                redline_subagents += 1;
+            }
+
+            let c_in = child_bench.as_ref().map(|b| b.total_input_tokens).unwrap_or(0);
+            let c_cache = child_bench
+                .as_ref()
+                .map(|b| b.total_cache_read_tokens)
+                .unwrap_or(0);
+            let c_turns = child_bench.as_ref().map(|b| b.total_turns).unwrap_or(0);
+            let c_hyper = child_bench.as_ref().map(|b| b.hyper_tool_calls).unwrap_or(0);
+            let c_tools = child_bench.as_ref().map(|b| b.total_tool_calls).unwrap_or(0);
+
+            combined_turns += c_turns;
+            combined_input += c_in;
+            combined_cache += c_cache;
+            combined_hyper += c_hyper;
+            combined_tools += c_tools;
+
+            subagents.push(SubagentSnapshot {
+                conversation_id: child.conversation_id,
+                parent_conversation_id: child.parent_conversation_id,
+                agent_name: child.agent_name,
+                title: child.title,
+                nesting_depth: child.nesting_depth,
+                active: child.active,
+                mtime_ms: child.mtime_ms,
+                model: child_pulse.as_ref().and_then(|p| p.model.clone()),
+                health,
+                health_reason: child_pulse
+                    .as_ref()
+                    .map(|p| p.health_reason.clone())
+                    .unwrap_or_else(|| "healthy".into()),
+                total_tokens: child_pulse.as_ref().map(|p| p.total_tokens).unwrap_or(0),
+                cache_hit_ratio: child_bench
+                    .as_ref()
+                    .map(|b| b.cache_hit_ratio)
+                    .or_else(|| child_pulse.as_ref().map(|p| p.cache_hit_ratio))
+                    .unwrap_or(0.0),
+                max_step: child_pulse.as_ref().map(|p| p.max_step).unwrap_or(0),
+                total_turns: c_turns,
+                cumulative_tokens: c_in + c_cache,
+                hyper_tool_calls: c_hyper,
+                total_tool_calls: c_tools,
+            });
+        }
+
+        let combined_tokens = combined_input + combined_cache;
+        let combined_cache_hit_ratio = if combined_tokens > 0 {
+            combined_cache as f64 / combined_tokens as f64
+        } else {
+            0.0
+        };
+
+        SessionTreeSummary {
+            root_conversation_id: root_id,
+            selected_is_subagent,
+            parent_conversation_id,
+            subagent_count: subagents.len(),
+            active_subagents,
+            redline_subagents,
+            combined_turns,
+            combined_tokens,
+            combined_hyper_calls: combined_hyper,
+            combined_total_tools: combined_tools,
+            combined_cache_hit_ratio,
+            subagents,
+        }
     });
-    let recent_sessions = discover_session_summaries(12)
+
+    let recent_sessions = all_sessions
         .into_iter()
         .filter(|s| !s.is_subagent)
         .take(8)
@@ -656,9 +808,72 @@ pub fn build_cockpit_snapshot(
         pulse,
         benchmark,
         recent_sessions,
+        session_tree,
         transactions,
         recent_events,
     }
+}
+
+pub(crate) fn is_content_mutation_event(kind: &EventKind) -> bool {
+    matches!(
+        kind,
+        EventKind::Create(_)
+            | EventKind::Remove(_)
+            | EventKind::Modify(ModifyKind::Data(_) | ModifyKind::Name(_) | ModifyKind::Any)
+    )
+}
+
+pub(crate) fn is_noisy_watch_path(path: &Path) -> bool {
+    let norm = path.to_string_lossy().replace('\\', "/");
+    const IGNORED_SEGMENTS: &[&str] = &[
+        "/.git/",
+        "/target/",
+        "/node_modules/",
+        "/dist/",
+        "/build/",
+        "/.next/",
+        "/.nuxt/",
+        "/.vite/",
+        "/.turbo/",
+        "/.parcel-cache/",
+        "/__pycache__/",
+        "/.pytest_cache/",
+        "/.mypy_cache/",
+        "/.ruff_cache/",
+        "/.cache/",
+        "/coverage/",
+        "/playwright-report/",
+        "/test-results/",
+        "/.playwright/",
+        "/.venv/",
+        "/venv/",
+        "/tmp/",
+        "/output/",
+        "/out/",
+    ];
+    if IGNORED_SEGMENTS.iter().any(|seg| norm.contains(seg)) {
+        return true;
+    }
+    let fname = path
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or("");
+    if fname.starts_with(".agy-hyper.") || fname == ".DS_Store" {
+        return true;
+    }
+    const IGNORED_SUFFIXES: &[&str] = &[
+        ".swp",
+        ".swo",
+        ".tmp",
+        ".log",
+        ".db-wal",
+        ".db-shm",
+        ".sqlite-wal",
+        ".sqlite-shm",
+        ".pid",
+        ".lock",
+    ];
+    IGNORED_SUFFIXES.iter().any(|suf| fname.ends_with(suf))
 }
 
 pub fn execute_rollback_unlocked(tx_id: &str, force: bool) -> Result<RollbackResult, String> {
@@ -715,4 +930,26 @@ fn current_rss_mb() -> f64 {
         }
     }
     0.0
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use notify::event::{AccessKind, CreateKind, DataChange, MetadataKind};
+
+    #[test]
+    fn watch_filters_ignore_access_metadata_and_build_artifacts() {
+        assert!(!is_content_mutation_event(&EventKind::Access(AccessKind::Any)));
+        assert!(!is_content_mutation_event(&EventKind::Modify(ModifyKind::Metadata(MetadataKind::Any))));
+        assert!(is_content_mutation_event(&EventKind::Modify(ModifyKind::Data(DataChange::Content))));
+        assert!(is_content_mutation_event(&EventKind::Create(CreateKind::File)));
+
+        assert!(is_noisy_watch_path(Path::new("/repo/.vite/deps/chunk.js")));
+        assert!(is_noisy_watch_path(Path::new("/repo/playwright-report/index.html")));
+        assert!(is_noisy_watch_path(Path::new("/repo/test-results/trace.zip")));
+        assert!(is_noisy_watch_path(Path::new("/repo/data/app.db-wal")));
+        assert!(is_noisy_watch_path(Path::new("/repo/logs/server.log")));
+        assert!(!is_noisy_watch_path(Path::new("/repo/src/main.rs")));
+        assert!(!is_noisy_watch_path(Path::new("/repo/apps/web/src/App.tsx")));
+    }
 }

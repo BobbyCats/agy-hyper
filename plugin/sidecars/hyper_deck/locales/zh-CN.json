@@ -45,7 +45,16 @@
     "row_hyper_share": "Hyper 接管率",
     "row_peak_ctx": "本会话峰值水位",
     "row_batched": "累计合并轮次",
+    "row_cache_breaks": "短间隔缓存归零",
     "turns_unit": "{{count}} 轮"
+  },
+  "subagents": {
+    "heading": "子代理树 ({{count}})",
+    "active_badge": "{{count}} 运行中",
+    "redline_badge": "{{count}} 红线",
+    "back_parent": "← 返回主窗",
+    "tree_meta": "整树: {{turns}} 轮 · {{tokens}} · 缓存 {{cache}}%",
+    "sub_badge": "{{count}} 子代理"
   },
   "pulse": {
     "heading": "Prompt 缓存保鲜窗口",
@@ -53,11 +62,11 @@
     "warming": "接近警戒线",
     "redline": "触顶 · 建议 /compact",
     "warm": "热缓存",
-    "cooling": "即将变冷",
+    "cooling": "衰减区间",
     "cold": "已冷却",
-    "hint_warm": "Prompt 缓存正热，现在发下一句可跳过全量重算。",
-    "hint_cooling": "缓存快凉了，几秒内继续提问可保住高速响应。",
-    "hint_cold": "停顿超 60 秒缓存已冷，把接下来要做的事合并成一句发更省时。",
+    "hint_warm": "Prompt 缓存正热，保持连续循环（测试优先用同步 hyper_check）可跳过全量重算。",
+    "hint_cooling": "进入缓存衰减期，合并后续工具调用可减少前缀失效。",
+    "hint_cold": "停顿超 {{secs}} 秒缓存已冷，把接下来要做的事合并成一句发更省时。",
     "context_label": "记忆占用",
     "copy_compact": "复制 /compact",
     "copied_short": "✓ 已复制",

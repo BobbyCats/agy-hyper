@@ -2,7 +2,10 @@ use anyhow::Result;
 use hyper_core::config::HyperConfig;
 use hyper_core::git::quick_head;
 use hyper_core::runner::discover_presets;
-use hyper_core::transcript::{inspect_transcript_tail, resolve_transcript_path, HealthLevel};
+use hyper_core::sessions::is_subagent_conversation;
+use hyper_core::transcript::{
+    inspect_transcript_tail, resolve_transcript_path, HealthLevel, TranscriptPulse,
+};
 use hyper_daemon::client::ensure_and_send;
 use hyper_daemon::protocol::DaemonRequest;
 use serde::{Deserialize, Serialize};
@@ -19,41 +22,64 @@ fn read_stdin_json() -> Value {
     serde_json::from_str(&raw).unwrap_or_else(|_| json!({}))
 }
 
-/// Sub-5ms cache-friendly `SessionStart` hook:
-/// - Zero cold `git` subprocess forks (uses pure-Rust `gix::quick_head`)
-/// - Discovers workspace check presets
-/// - Warm-attaches workspace watcher in Daemon
-/// - Surfaces a sleek 1-line Hyper Deck sidecar pill for users
-pub fn run_session_start() -> Result<()> {
-    let payload = read_stdin_json();
-    let cfg = HyperConfig::load();
-
-    let ws_str = payload
+fn extract_workspace_str(payload: &Value) -> &str {
+    payload
         .get("workspacePaths")
         .and_then(Value::as_array)
         .and_then(|arr| arr.first())
         .and_then(Value::as_str)
         .or_else(|| payload.get("cwd").and_then(Value::as_str))
-        .unwrap_or("");
+        .unwrap_or("")
+}
 
+fn is_code_workspace(ws: &Path) -> bool {
+    if !ws.is_dir() {
+        return false;
+    }
+    const MARKERS: &[&str] = &[
+        "Cargo.toml",
+        "package.json",
+        "pyproject.toml",
+        "go.mod",
+        "Makefile",
+        "CMakeLists.txt",
+        "pom.xml",
+        "build.gradle",
+        "build.gradle.kts",
+        "requirements.txt",
+        "Gemfile",
+        "composer.json",
+        "src",
+        "crates",
+        "packages",
+        "apps",
+    ];
+    MARKERS.iter().any(|m| ws.join(m).exists())
+}
+
+fn build_session_start_payload(ws_str: &str, cfg: &HyperConfig, attach_watcher: bool) -> Value {
     let mut summary_parts = vec![format!(
         "[AGY Hyper v{} · profile={}]",
         hyper_core::version(),
         cfg.profile.as_str()
     )];
 
+    let mut code_ws = false;
     if !ws_str.is_empty() {
         let ws = Path::new(ws_str);
         if ws.is_dir() {
-            let _ = ensure_and_send(&DaemonRequest::WatchWorkspace {
-                workspace: ws_str.to_string(),
-            });
-            if let Some((branch, oid)) = quick_head(ws) {
-                summary_parts.push(format!("git={}@{}", branch, oid));
+            if attach_watcher {
+                let _ = ensure_and_send(&DaemonRequest::WatchWorkspace {
+                    workspace: ws_str.to_string(),
+                });
+            }
+            code_ws = is_code_workspace(ws);
+            if let Some((branch, _)) = quick_head(ws) {
+                summary_parts.push(format!("branch={}", branch));
             }
             let presets: Vec<String> = discover_presets(ws)
                 .into_iter()
-                .take(6)
+                .take(8)
                 .map(|p| p.id)
                 .collect();
             if !presets.is_empty() {
@@ -62,33 +88,39 @@ pub fn run_session_start() -> Result<()> {
         }
     }
 
-    summary_parts.push(
-        "Default to hyper_pack (AST+ripgrep+git), hyper_search, hyper_edit (default editor for workspace files: WAL+ETag+Tree-sitter), hyper_check (preset), hyper_tx (rollback/drill). Keep inline responses <=8.5KB."
-            .into(),
-    );
+    if code_ws {
+        summary_parts.push(
+            "Use hyper_pack (AST+ripgrep+git), hyper_search, hyper_edit (atomic WAL+ETag+Tree-sitter), and hyper_check (sync <=60s to preserve prompt cache) for workspace code tasks."
+                .into(),
+        );
+    } else {
+        summary_parts.push("Telemetry and context guard active.".into());
+    }
+
+    if cfg.enable_ui_pill {
+        summary_parts.push("Cockpit: [Open Hyper Deck](sidecar://agy-hyper/hyper_deck/).".into());
+    }
 
     let sys_text = summary_parts.join(" ");
-    let step = if cfg.enable_ui_pill {
-        json!({
-            "systemMessage": {
-                "systemMessage": sys_text,
-                "metadata": {
-                    "user_markdown": format!(
-                        "⚡ **AGY Hyper** (`{}`) ready · [Open Hyper Deck](sidecar://agy-hyper/hyper_deck/)",
-                        cfg.profile.as_str()
-                    )
-                }
-            }
-        })
-    } else {
-        json!({
+    json!({
+        "injectSteps": [{
             "systemMessage": {
                 "systemMessage": sys_text
             }
-        })
-    };
+        }]
+    })
+}
 
-    println!("{}", serde_json::to_string(&json!({ "injectSteps": [step] }))?);
+/// Prefix-stable `SessionStart` hook:
+/// - Zero cold `git` subprocess forks (uses pure-Rust `gix::quick_head`)
+/// - Discovers workspace check presets and attaches the daemon watcher
+/// - Emits a schema-safe `systemMessage` step without volatile metadata fields
+pub fn run_session_start() -> Result<()> {
+    let payload = read_stdin_json();
+    let cfg = HyperConfig::load();
+    let ws_str = extract_workspace_str(&payload);
+    let out = build_session_start_payload(ws_str, &cfg, true);
+    println!("{}", serde_json::to_string(&out)?);
     Ok(())
 }
 
@@ -100,62 +132,12 @@ struct GuardState {
     last_health: Option<HealthLevel>,
 }
 
-/// Sub-2ms native Rust `PreInvocation` context, cache-cliff & timeout guard.
-/// Zero interpreter startup overhead + 60s Prompt Cache Warmth & model-aware guardlines.
-pub fn run_pre_invocation() -> Result<()> {
-    let payload = read_stdin_json();
-    let cfg = HyperConfig::load();
-
-    let conv_id = payload
-        .get("conversationId")
-        .and_then(Value::as_str)
-        .unwrap_or("");
-    let explicit_tpath = payload.get("transcriptPath").and_then(Value::as_str);
-
-    let Some(tpath) = resolve_transcript_path(explicit_tpath, Some(conv_id)) else {
-        println!("{{}}");
-        return Ok(());
-    };
-
-    let Some(pulse) = inspect_transcript_tail(&tpath, &cfg) else {
-        println!("{{}}");
-        return Ok(());
-    };
-
-    if pulse.health == HealthLevel::Green {
-        println!("{{}}");
-        return Ok(());
-    }
-
-    // Throttle warnings to at most once every 10 steps unless escalating to Red or a stream timeout fired
-    let state_dir = HyperConfig::data_dir().join("guard_state");
-    let safe_id = hyper_core::config::sanitize_id(conv_id).unwrap_or("default");
-    let state_file: PathBuf = state_dir.join(format!("{}.json", safe_id));
-    let prev: GuardState = fs::read_to_string(&state_file)
-        .ok()
-        .and_then(|s| serde_json::from_str(&s).ok())
-        .unwrap_or_default();
-
-    let step_i64 = pulse.max_step as i64;
-    let escalated_to_red =
-        pulse.health == HealthLevel::Red && prev.last_health != Some(HealthLevel::Red);
-    if (step_i64 - prev.last_warned_step) < 10 && pulse.recent_timeouts == 0 && !escalated_to_red {
-        println!("{{}}");
-        return Ok(());
-    }
-
-    let _ = fs::create_dir_all(&state_dir);
-    let _ = fs::write(
-        &state_file,
-        serde_json::to_vec(&GuardState {
-            last_warned_step: step_i64,
-            total_tokens: pulse.total_tokens,
-            last_health: Some(pulse.health),
-        })
-        .unwrap_or_default(),
-    );
-    prune_guard_state(&state_dir, 50);
-
+fn build_guard_payload(
+    pulse: &TranscriptPulse,
+    cfg: &HyperConfig,
+    is_subagent: bool,
+    is_code_ws: bool,
+) -> Value {
     let total_k = (pulse.total_tokens as f64 / 1000.0 * 10.0).round() / 10.0;
     let effective_red = if pulse.effective_red_tokens > 0 {
         pulse.effective_red_tokens
@@ -187,70 +169,155 @@ pub fn run_pre_invocation() -> Result<()> {
             format!(" · {}", tags.join(", "))
         };
 
-        let user_md = format!(
-            "> ⚡ **[AGY Hyper · Context Redline]** **`{}k / {}k` tokens · step `{}`** (cache `{}%`{}{}). Offload heavy reads to subagents and run **`/compact`** after this turn · [Open Hyper Deck](sidecar://agy-hyper/hyper_deck/)",
-            total_k, red_k, pulse.max_step, cache_pct, model_tag, extra
-        );
-        let sys_msg = format!(
-            "[AGY Hyper Redline Guard] Reason={} · context={}k/{}k tokens (step {}, cache {}%{}{}). Strictly: (1) use hyper_pack/hyper_search or delegate multi-file scans to research subagent; (2) keep outputs concise; (3) persist key progress and remind the user to run `/compact` at the end of this turn.",
-            pulse.health_reason, total_k, red_k, pulse.max_step, cache_pct, model_tag, extra
-        );
+        let sys_msg = if is_subagent {
+            format!(
+                "[AGY Hyper Redline Guard · Subagent] Reason={} · context={}k/{}k tokens (step {}, cache {}%{}{}). Strictly: (1) stop broad file scans; (2) finish active edits and run concise sync verification via hyper_check if needed; (3) return a compact result via send_message to the parent agent immediately.",
+                pulse.health_reason, total_k, red_k, pulse.max_step, cache_pct, model_tag, extra
+            )
+        } else if is_code_ws {
+            format!(
+                "[AGY Hyper Redline Guard] Reason={} · context={}k/{}k tokens (step {}, cache {}%{}{}). Strictly: (1) use hyper_pack/hyper_search or delegate multi-file scans to research subagent; (2) keep outputs concise and use sync hyper_check (<=60s) to avoid background wakeup cache resets; (3) persist key progress and remind the user to run `/compact` at the end of this turn.",
+                pulse.health_reason, total_k, red_k, pulse.max_step, cache_pct, model_tag, extra
+            )
+        } else {
+            format!(
+                "[AGY Hyper Redline Guard] Reason={} · context={}k/{}k tokens (step {}, cache {}%{}{}). Strictly: (1) avoid redundant full-file reads and keep outputs concise; (2) persist key findings and remind the user to run `/compact` at the end of this turn.",
+                pulse.health_reason, total_k, red_k, pulse.max_step, cache_pct, model_tag, extra
+            )
+        };
 
-        println!(
-            "{}",
-            serde_json::to_string(&json!({
-                "injectSteps": [{
-                    "systemMessage": {
-                        "systemMessage": sys_msg,
-                        "metadata": { "user_markdown": user_md }
-                    }
-                }]
-            }))?
-        );
-        return Ok(());
+        return json!({
+            "injectSteps": [{
+                "systemMessage": {
+                    "systemMessage": sys_msg
+                }
+            }]
+        });
     }
 
-    // Yellow: silent model-only hint with exact trigger reason (zero false context-size wording)
     let mut hints = Vec::new();
     if pulse.health_reason == "proxy_reset" {
-        hints.push(format!("{} recent TCP proxy reset(s) detected — keep tool outputs compact", pulse.recent_resets));
+        hints.push(format!(
+            "{} recent TCP proxy reset(s) detected — keep tool outputs compact",
+            pulse.recent_resets
+        ));
     }
     if pulse.health_reason == "stream_timeout" {
-        hints.push(format!("{} recent stream timeout(s) detected", pulse.recent_timeouts));
+        hints.push(format!(
+            "{} recent stream timeout(s) detected",
+            pulse.recent_timeouts
+        ));
     }
     if pulse.multimodal_cliff_risk {
         hints.push("multimodal image context >180k detected (avoid attaching redundant images)".into());
     }
     if pulse.cache_is_cold {
-        hints.push("prompt cache >60s cold (batch next actions into 1 turn to re-warm)".into());
+        hints.push(format!(
+            "prompt cache >{}s cold (batch next actions into 1 turn to re-warm)",
+            cfg.cache_warm_window_secs
+        ));
     }
     let hint_suffix = if hints.is_empty() {
         String::new()
     } else {
         format!(" Notes: {}.", hints.join("; "))
     };
+
     let sys_msg = if pulse.health_reason == "proxy_reset" || pulse.health_reason == "stream_timeout" {
         format!(
             "[AGY Hyper Guard] Transient transport warning ({}) at {}k/{}k tokens (step {}, cache {}%{}).{}",
             pulse.health_reason, total_k, red_k, pulse.max_step, cache_pct, model_tag, hint_suffix
         )
+    } else if is_subagent {
+        format!(
+            "[AGY Hyper Guard · Subagent] Context at {}k/{}k tokens (step {}, cache {}%{}). Keep reads targeted, batch edits, and prepare to report back via send_message before {}k.{}",
+            total_k, red_k, pulse.max_step, cache_pct, model_tag, red_k, hint_suffix
+        )
+    } else if is_code_ws {
+        format!(
+            "[AGY Hyper Guard] Context at {}k/{}k tokens (step {}, cache {}%{}). Prefer hyper_pack/hyper_edit batching, sync hyper_check (<=60s), and research subagents for broad reads to stay under {}k.{}",
+            total_k, red_k, pulse.max_step, cache_pct, model_tag, red_k, hint_suffix
+        )
     } else {
         format!(
-            "[AGY Hyper Guard] Context at {}k/{}k tokens (step {}, cache {}%{}). Prefer hyper_pack/hyper_edit batching and research subagents for broad reads to stay under {}k.{}",
+            "[AGY Hyper Guard] Context at {}k/{}k tokens (step {}, cache {}%{}). Keep tool outputs concise and batch reads to stay under {}k.{}",
             total_k, red_k, pulse.max_step, cache_pct, model_tag, red_k, hint_suffix
         )
     };
 
-    println!(
-        "{}",
-        serde_json::to_string(&json!({
-            "injectSteps": [{
-                "systemMessage": {
-                    "systemMessage": sys_msg
-                }
-            }]
-        }))?
+    json!({
+        "injectSteps": [{
+            "systemMessage": {
+                "systemMessage": sys_msg
+            }
+        }]
+    })
+}
+
+/// Sub-2ms native Rust `PreInvocation` context, cache-cliff & timeout guard.
+pub fn run_pre_invocation() -> Result<()> {
+    let payload = read_stdin_json();
+    let cfg = HyperConfig::load();
+
+    let conv_id = payload
+        .get("conversationId")
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    let explicit_tpath = payload.get("transcriptPath").and_then(Value::as_str);
+
+    let Some(tpath) = resolve_transcript_path(explicit_tpath, Some(conv_id)) else {
+        println!("{{}}");
+        return Ok(());
+    };
+
+    let Some(pulse) = inspect_transcript_tail(&tpath, &cfg) else {
+        println!("{{}}");
+        return Ok(());
+    };
+
+    if pulse.health == HealthLevel::Green {
+        println!("{{}}");
+        return Ok(());
+    }
+
+    let state_dir = HyperConfig::data_dir().join("guard_state");
+    let safe_id = hyper_core::config::sanitize_id(conv_id).unwrap_or("default");
+    let state_file: PathBuf = state_dir.join(format!("{}.json", safe_id));
+    let prev: GuardState = fs::read_to_string(&state_file)
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_default();
+
+    let step_i64 = pulse.max_step as i64;
+    let escalated_to_red =
+        pulse.health == HealthLevel::Red && prev.last_health != Some(HealthLevel::Red);
+    let min_step_gap = if pulse.recent_timeouts > 0 { 4 } else { 10 };
+    if (step_i64 - prev.last_warned_step) < min_step_gap && !escalated_to_red {
+        println!("{{}}");
+        return Ok(());
+    }
+
+    let _ = fs::create_dir_all(&state_dir);
+    let _ = fs::write(
+        &state_file,
+        serde_json::to_vec(&GuardState {
+            last_warned_step: step_i64,
+            total_tokens: pulse.total_tokens,
+            last_health: Some(pulse.health),
+        })
+        .unwrap_or_default(),
     );
+    prune_guard_state(&state_dir, 50);
+
+    let ws_str = extract_workspace_str(&payload);
+    let code_ws = if ws_str.is_empty() {
+        false
+    } else {
+        is_code_workspace(Path::new(ws_str))
+    };
+    let is_subagent = is_subagent_conversation(conv_id);
+    let out = build_guard_payload(&pulse, &cfg, is_subagent, code_ws);
+    println!("{}", serde_json::to_string(&out)?);
     Ok(())
 }
 
@@ -381,5 +448,79 @@ fn prune_guard_state(dir: &Path, max_files: usize) {
     let excess = files.len() - max_files;
     for (_, old) in files.into_iter().take(excess) {
         let _ = fs::remove_file(old);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sample_pulse(health: HealthLevel, reason: &str, tokens: u64) -> TranscriptPulse {
+        TranscriptPulse {
+            conversation_id: "conv-1".into(),
+            transcript_path: "/tmp/transcript.jsonl".into(),
+            model: Some("gemini-4-neon-xhigh".into()),
+            model_context_limit: 1_000_000,
+            pricing_cliff_tokens: 200_000,
+            effective_yellow_tokens: 180_000,
+            effective_red_tokens: 280_000,
+            max_step: 120,
+            steps_since_compact: 120,
+            total_tokens: tokens,
+            input_tokens: 10_000,
+            cache_read_tokens: tokens.saturating_sub(10_000),
+            output_tokens: 500,
+            cache_hit_ratio: 0.92,
+            recent_timeouts: 0,
+            recent_resets: 0,
+            media_items_recent: 0,
+            last_planner_epoch_ms: None,
+            seconds_since_last_planner: Some(15),
+            cache_warm_remaining_secs: 225,
+            cache_is_cold: false,
+            multimodal_cliff_risk: false,
+            health,
+            health_reason: reason.into(),
+        }
+    }
+
+    #[test]
+    fn hook_payloads_omit_metadata_and_adapt_to_subagent_and_workspace() {
+        let cfg = HyperConfig::default();
+        let ss = build_session_start_payload("", &cfg, false);
+        let ss_step = &ss["injectSteps"][0]["systemMessage"];
+        assert!(ss_step.get("metadata").is_none());
+        assert!(ss_step["systemMessage"].as_str().unwrap().contains("AGY Hyper"));
+
+        let red = sample_pulse(HealthLevel::Red, "token_red", 295_000);
+        let red_main = build_guard_payload(&red, &cfg, false, true);
+        let red_main_step = &red_main["injectSteps"][0]["systemMessage"];
+        assert!(red_main_step.get("metadata").is_none());
+        assert!(red_main_step["systemMessage"].as_str().unwrap().contains("/compact"));
+
+        let red_sub = build_guard_payload(&red, &cfg, true, true);
+        let red_sub_txt = red_sub["injectSteps"][0]["systemMessage"]["systemMessage"]
+            .as_str()
+            .unwrap();
+        assert!(red_sub_txt.contains("send_message"));
+        assert!(!red_sub_txt.contains("/compact"));
+
+        let yellow = sample_pulse(HealthLevel::Yellow, "token_yellow", 195_000);
+        let non_code = build_guard_payload(&yellow, &cfg, false, false);
+        let non_code_txt = non_code["injectSteps"][0]["systemMessage"]["systemMessage"]
+            .as_str()
+            .unwrap();
+        assert!(!non_code_txt.contains("hyper_pack"));
+
+        let notes_dir = std::env::temp_dir().join(format!(
+            "agy-hyper-hooks-test-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&notes_dir);
+        fs::create_dir_all(notes_dir.join(".git")).unwrap();
+        assert!(!is_code_workspace(&notes_dir));
+        fs::write(notes_dir.join("Cargo.toml"), "[package]\n").unwrap();
+        assert!(is_code_workspace(&notes_dir));
+        let _ = fs::remove_dir_all(&notes_dir);
     }
 }

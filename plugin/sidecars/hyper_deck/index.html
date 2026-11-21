@@ -63,6 +63,20 @@
       <span id="health-chip" class="status-pill ok" data-i18n="pulse.healthy">Healthy</span>
     </div>
 
+    <!-- Linked Subagent Tree Strip -->
+    <section id="subagent-strip" class="subagent-panel hidden" aria-label="Subagents">
+      <div class="subagent-head">
+        <div class="subagent-head-left">
+          <span id="subagent-heading" class="sub-title">Subagents</span>
+          <span id="subagent-active-pill" class="status-pill ok hidden"></span>
+          <span id="subagent-red-pill" class="status-pill err hidden"></span>
+        </div>
+        <button id="btn-back-parent" type="button" class="btn-ghost btn-xs hidden" data-i18n="subagents.back_parent">← Parent</button>
+      </div>
+      <div id="subagent-tree-meta" class="subagent-meta"></div>
+      <div id="subagent-list" class="subagent-list"></div>
+    </section>
+
     <!-- Floating Toast -->
     <div id="toast" class="toast hidden" role="status" aria-live="polite"></div>
 
@@ -101,19 +115,19 @@
         <div id="hero-breakdown" class="breakdown-list"></div>
       </section>
 
-      <!-- Compact Horizontal 60s Prompt Cache Warmth Meter -->
+      <!-- Compact Horizontal Prompt Cache Warmth Meter -->
       <section class="panel">
         <div class="panel-head tight">
           <div class="warmth-title-group">
             <h2 class="panel-title" data-i18n="pulse.heading">Prompt Cache Warmth</h2>
             <span id="warmth-state-pill" class="status-pill ok" data-i18n="pulse.warm">WARM</span>
           </div>
-          <strong id="warmth-clock" class="mono-readout">60s / 60s</strong>
+          <strong id="warmth-clock" class="mono-readout">240s / 240s</strong>
         </div>
 
-        <div class="meter-track" role="progressbar" aria-valuemin="0" aria-valuemax="60" aria-valuenow="0" id="warmth-meter">
+        <div class="meter-track" role="progressbar" aria-valuemin="0" aria-valuemax="240" aria-valuenow="0" id="warmth-meter">
           <div id="warmth-fill" class="meter-fill ok" style="width: 0%"></div>
-          <span class="meter-tick" style="left: 25%" title="15s"></span>
+          <span class="meter-tick" style="left: 50%" title="50%"></span>
         </div>
 
         <div id="cliff-alert" class="inline-alert hidden"></div>

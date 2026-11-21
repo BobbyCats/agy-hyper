@@ -388,6 +388,12 @@ fn handle_check(
     }
 
     let req: CheckRequest = serde_json::from_value(args)?;
+    if let Some(preset_id) = &req.preset {
+        let _ = ensure_and_send(&DaemonRequest::RecordCheckTarget {
+            workspace: jail.root().display().to_string(),
+            preset: preset_id.clone(),
+        });
+    }
     if cfg.prewarm_tier2 {
         if let Some(preset_id) = &req.preset {
             if let Ok(DaemonResponse::Ok { data }) = ensure_and_send(&DaemonRequest::LookupPrewarm {
@@ -653,7 +659,7 @@ fn tool_definitions() -> Value {
         },
         {
             "name": "hyper_check",
-            "description": "Safe shell-free preset/argv verification runner with head+tail ring buffer, error digest, cancellation process-tree cleanup, and LRU spill handles.",
+            "description": "Synchronous shell-free preset/argv verification runner (<=60s in-loop to preserve prompt cache) with head+tail ring buffer, error digest, process-tree cleanup, and LRU spill handles.",
             "annotations": { "readOnlyHint": false, "destructiveHint": false, "idempotentHint": false, "openWorldHint": false },
             "inputSchema": {
                 "type": "object",

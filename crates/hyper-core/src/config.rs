@@ -8,7 +8,7 @@ pub const DEFAULT_YELLOW_TOKENS: u64 = 180_000;
 pub const DEFAULT_RED_TOKENS: u64 = 280_000;
 pub const DEFAULT_YELLOW_STEPS: u64 = 160;
 pub const DEFAULT_RED_STEPS: u64 = 300;
-pub const DEFAULT_CACHE_WARM_SECS: u64 = 60;
+pub const DEFAULT_CACHE_WARM_SECS: u64 = 240;
 pub const DEFAULT_MULTIMODAL_CLIFF_TOKENS: u64 = 180_000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

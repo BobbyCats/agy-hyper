@@ -50,6 +50,8 @@ pub struct SessionBenchmark {
     pub total_cache_read_tokens: u64,
     pub total_output_tokens: u64,
     pub cache_hit_ratio: f64,
+    #[serde(default)]
+    pub cache_break_turns: usize,
     pub hyper_tool_calls: usize,
     pub total_tool_calls: usize,
     #[serde(default)]
@@ -193,6 +195,9 @@ pub fn analyze_transcript(path: &Path) -> Result<SessionBenchmark> {
     let mut total_output = 0u64;
     let mut hyper_tool_calls = 0usize;
     let mut total_tool_calls = 0usize;
+    let mut cache_break_turns = 0usize;
+    let mut prev_planner_ms: Option<i64> = None;
+    let mut prev_planner_total: u64 = 0;
 
     const MAX_VALID_SPAN_MS: i64 = 180_000;
 
@@ -203,6 +208,22 @@ pub fn analyze_transcript(path: &Path) -> Result<SessionBenchmark> {
             continue;
         }
         let planner = &steps[i];
+
+        let cur_total = planner.input_tokens + planner.cache_read_tokens;
+        if let Some(prev_ms) = prev_planner_ms {
+            let gap_ms = planner.ts_ms.saturating_sub(prev_ms);
+            if prev_planner_total >= 50_000
+                && cur_total >= 50_000
+                && gap_ms <= 120_000
+                && (planner.cache_read_tokens as f64 / cur_total as f64) < 0.15
+            {
+                cache_break_turns += 1;
+            }
+        }
+        if cur_total > 0 {
+            prev_planner_ms = Some(planner.ts_ms);
+            prev_planner_total = cur_total;
+        }
 
         total_input += planner.input_tokens;
         total_cache += planner.cache_read_tokens;
@@ -322,6 +343,7 @@ pub fn analyze_transcript(path: &Path) -> Result<SessionBenchmark> {
         total_cache_read_tokens: total_cache,
         total_output_tokens: total_output,
         cache_hit_ratio,
+        cache_break_turns,
         hyper_tool_calls,
         total_tool_calls,
         hyper_adoption_ratio,
@@ -512,6 +534,22 @@ mod tests {
         assert!((b.hyper_adoption_ratio - 0.50).abs() < 0.01);
         assert!((b.effective_tps - 50.0).abs() < 0.01);
         assert!((b.cache_hit_ratio - 0.90).abs() < 0.01);
+        assert_eq!(b.cache_break_turns, 0);
+    }
+
+    #[test]
+    fn detects_short_gap_cache_break_turns() {
+        let dir = tempdir().unwrap();
+        let p = dir.path().join("transcript.jsonl");
+        let data = concat!(
+            "{\"step_index\":1,\"type\":\"PLANNER_RESPONSE\",\"created_at\":\"2026-11-20T10:00:00Z\",\"input_tokens\":5000,\"cache_read_tokens\":195000,\"output_tokens\":100,\"tool_calls\":[{\"name\":\"run_command\"}]}\n",
+            "{\"step_index\":2,\"type\":\"GENERIC\",\"created_at\":\"2026-11-20T10:00:05Z\",\"content\":\"Created At: 2026-11-20T10:00:05Z\\nCompleted At: 2026-11-20T10:00:06Z\\nOK\"}\n",
+            "{\"step_index\":3,\"type\":\"PLANNER_RESPONSE\",\"created_at\":\"2026-11-20T10:00:25Z\",\"input_tokens\":202000,\"cache_read_tokens\":0,\"output_tokens\":80,\"tool_calls\":[{\"name\":\"read_file\"}]}\n",
+            "{\"step_index\":4,\"type\":\"GENERIC\",\"created_at\":\"2026-11-20T10:00:27Z\",\"content\":\"Created At: 2026-11-20T10:00:27Z\\nCompleted At: 2026-11-20T10:00:28Z\\nOK\"}\n"
+        );
+        fs::write(&p, data).unwrap();
+        let b = analyze_transcript(&p).unwrap();
+        assert_eq!(b.cache_break_turns, 1);
     }
 
     #[test]

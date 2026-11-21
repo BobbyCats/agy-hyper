@@ -183,11 +183,15 @@
         return tot > 0 ? Math.round((x.cache_read_tokens / tot) * 100) : 0;
       });
 
-      renderBreakdown($('hero-breakdown'), [
+      const cacheBreaks = snap.benchmark?.cache_break_turns || 0;
+      const cacheRows = [
         { color: pal.ok, label: t('pulse.series_cached'), value: `${(cachedTok / 1000).toFixed(1)}k` },
         { color: pal.accent, label: t('pulse.series_fresh'), value: `${(freshTok / 1000).toFixed(1)}k` },
-        { color: pal.indigo, label: t('engine.ast_cache'), value: `${eng.ast_cache_entries || 0} files` },
-      ]);
+        cacheBreaks > 0
+          ? { color: pal.err, label: t('hero.row_cache_breaks'), value: String(cacheBreaks) }
+          : { color: pal.indigo, label: t('engine.ast_cache'), value: `${eng.ast_cache_entries || 0} files` },
+      ];
+      renderBreakdown($('hero-breakdown'), cacheRows);
 
       if (!chart) return;
       if (!turns.length) { chart.clear(); return; }

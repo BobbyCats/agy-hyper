@@ -277,6 +277,10 @@ fn handle_line(
                 None => DaemonResponse::ok(serde_json::Value::Null),
             }
         }
+        DaemonRequest::RecordCheckTarget { workspace, preset } => {
+            guard.record_check_target(&workspace, &preset);
+            DaemonResponse::ok(serde_json::json!({ "recorded": true }))
+        }
         DaemonRequest::PackContext { workspace, request } => {
             match guard.pack_context(&workspace, &request) {
                 Ok((pack, cache_hit)) => DaemonResponse::ok(serde_json::json!({

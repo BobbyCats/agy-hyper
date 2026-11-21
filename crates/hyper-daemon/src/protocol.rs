@@ -2,7 +2,7 @@ use hyper_core::bench::SessionBenchmark;
 use hyper_core::config::HyperConfig;
 use hyper_core::context_pack::ContextPackRequest;
 use hyper_core::sessions::SessionSummary;
-use hyper_core::transcript::TranscriptPulse;
+use hyper_core::transcript::{HealthLevel, TranscriptPulse};
 use hyper_core::wal::{RollbackResult, WalManifest};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -48,6 +48,10 @@ pub enum DaemonRequest {
         workspace: String,
     },
     LookupPrewarm {
+        workspace: String,
+        preset: String,
+    },
+    RecordCheckTarget {
         workspace: String,
         preset: String,
     },
@@ -130,12 +134,56 @@ pub struct PrewarmedCheck {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SubagentSnapshot {
+    pub conversation_id: String,
+    #[serde(default)]
+    pub parent_conversation_id: Option<String>,
+    #[serde(default)]
+    pub agent_name: String,
+    pub title: String,
+    pub nesting_depth: u32,
+    pub active: bool,
+    pub mtime_ms: u64,
+    #[serde(default)]
+    pub model: Option<String>,
+    pub health: HealthLevel,
+    #[serde(default)]
+    pub health_reason: String,
+    pub total_tokens: u64,
+    pub cache_hit_ratio: f64,
+    pub max_step: u64,
+    pub total_turns: usize,
+    pub cumulative_tokens: u64,
+    pub hyper_tool_calls: usize,
+    pub total_tool_calls: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SessionTreeSummary {
+    pub root_conversation_id: String,
+    pub selected_is_subagent: bool,
+    #[serde(default)]
+    pub parent_conversation_id: Option<String>,
+    pub subagent_count: usize,
+    pub active_subagents: usize,
+    pub redline_subagents: usize,
+    pub combined_turns: usize,
+    pub combined_tokens: u64,
+    pub combined_hyper_calls: usize,
+    pub combined_total_tools: usize,
+    pub combined_cache_hit_ratio: f64,
+    pub subagents: Vec<SubagentSnapshot>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CockpitSnapshot {
     pub engine: EngineStatus,
     pub config: HyperConfig,
     pub pulse: Option<TranscriptPulse>,
     pub benchmark: Option<SessionBenchmark>,
     pub recent_sessions: Vec<SessionSummary>,
+    #[serde(default)]
+    pub session_tree: Option<SessionTreeSummary>,
     pub transactions: Vec<WalManifest>,
     pub recent_events: Vec<AuditEvent>,
 }

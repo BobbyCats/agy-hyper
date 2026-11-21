@@ -16,6 +16,16 @@ pub struct SessionSummary {
     pub size_bytes: u64,
     pub is_subagent: bool,
     #[serde(default)]
+    pub parent_conversation_id: Option<String>,
+    #[serde(default)]
+    pub nesting_depth: u32,
+    #[serde(default)]
+    pub agent_name: String,
+    #[serde(default)]
+    pub active: bool,
+    #[serde(default)]
+    pub subagent_count: usize,
+    #[serde(default)]
     pub title: String,
     #[serde(default)]
     pub workspace: String,
@@ -27,11 +37,16 @@ struct DbSessionMeta {
     title: String,
     workspace: String,
     is_subagent: bool,
+    parent_conversation_id: Option<String>,
+    nesting_depth: u32,
+    agent_name: String,
+    not_fully_idle: bool,
+    killed: bool,
 }
 
 #[derive(Debug, Default)]
 struct CachedTitleIndex {
-    stamp: (u128, u64),
+    stamp: (u128, u64, u128, u64),
     entries: HashMap<String, DbSessionMeta>,
 }
 
@@ -134,7 +149,20 @@ fn load_antigravity_title_index() -> HashMap<String, DbSessionMeta> {
         .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
         .map(|d| d.as_nanos())
         .unwrap_or(0);
-    let stamp = (mtime_ns, meta.len());
+    let wal_path = PathBuf::from(format!("{}-wal", db.display()));
+    let (wal_mtime_ns, wal_len) = fs::metadata(&wal_path)
+        .ok()
+        .map(|wm| {
+            let mt = wm
+                .modified()
+                .ok()
+                .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+                .map(|d| d.as_nanos())
+                .unwrap_or(0);
+            (mt, wm.len())
+        })
+        .unwrap_or((0, 0));
+    let stamp = (mtime_ns, meta.len(), wal_mtime_ns, wal_len);
 
     let lock = CACHE.get_or_init(|| Mutex::new(CachedTitleIndex::default()));
     if let Ok(guard) = lock.lock() {
@@ -143,36 +171,70 @@ fn load_antigravity_title_index() -> HashMap<String, DbSessionMeta> {
         }
     }
 
-    let sql = "SELECT conversation_id, replace(replace(title, char(9), ' '), char(10), ' '), replace(workspace_uris, char(9), ' '), nesting_depth, parent_conversation_id FROM conversation_summaries ORDER BY last_modified_time DESC LIMIT 200;";
-    let Ok(out) = Command::new("sqlite3")
-        .args(["-readonly", "-separator", "\t"])
-        .arg(&db)
-        .arg(sql)
-        .output()
-    else {
+    let sql_joined = "SELECT s.conversation_id, replace(replace(coalesce(s.title, ''), char(9), ' '), char(10), ' '), replace(coalesce(s.workspace_uris, ''), char(9), ' '), coalesce(s.nesting_depth, 0), coalesce(nullif(s.parent_conversation_id, ''), p.parent_id, ''), coalesce(s.agent_name, ''), coalesce(s.not_fully_idle, 0), coalesce(s.killed, 0) FROM conversation_summaries s LEFT JOIN conversation_parents p ON p.conversation_id = s.conversation_id ORDER BY s.last_modified_time DESC LIMIT 300;";
+    let sql_fallback = "SELECT conversation_id, replace(replace(coalesce(title, ''), char(9), ' '), char(10), ' '), replace(coalesce(workspace_uris, ''), char(9), ' '), coalesce(nesting_depth, 0), coalesce(parent_conversation_id, ''), coalesce(agent_name, ''), coalesce(not_fully_idle, 0), coalesce(killed, 0) FROM conversation_summaries ORDER BY last_modified_time DESC LIMIT 300;";
+
+    let immutable_uri = format!(
+        "file:{}?immutable=1",
+        db.display().to_string().replace('?', "%3F").replace('#', "%23")
+    );
+    let run_query = |sql: &str| {
+        let ro = Command::new("sqlite3")
+            .args(["-readonly", "-cmd", ".timeout 500", "-separator", "\t"])
+            .arg(&db)
+            .arg(sql)
+            .output();
+        if let Ok(o) = ro {
+            if o.status.success() {
+                return Some(o);
+            }
+        }
+        if wal_len == 0 {
+            if let Ok(o) = Command::new("sqlite3")
+                .args(["-cmd", ".timeout 500", "-separator", "\t"])
+                .arg(&immutable_uri)
+                .arg(sql)
+                .output()
+            {
+                if o.status.success() {
+                    return Some(o);
+                }
+            }
+        }
+        None
+    };
+
+    let Some(out) = run_query(sql_joined).or_else(|| run_query(sql_fallback)) else {
         return HashMap::new();
     };
-    if !out.status.success() {
-        return HashMap::new();
-    }
 
     let mut entries = HashMap::new();
     for line in String::from_utf8_lossy(&out.stdout).lines() {
         let cols: Vec<&str> = line.split('\t').collect();
-        if cols.len() < 5 {
+        if cols.len() < 8 {
             continue;
         }
         let cid = cols[0].trim();
         if cid.is_empty() {
             continue;
         }
-        let nesting_depth: i64 = cols[3].trim().parse().unwrap_or(0);
+        let nesting_depth: u32 = cols[3].trim().parse::<i64>().unwrap_or(0).max(0) as u32;
+        let parent_raw = cols[4].trim();
+        let parent_conversation_id = (!parent_raw.is_empty()).then(|| parent_raw.to_string());
+        let agent_name = cols[5].trim().to_string();
+        let not_fully_idle = cols[6].trim() == "1";
+        let killed = cols[7].trim() == "1";
         entries.insert(
             cid.to_string(),
             DbSessionMeta {
                 title: cols[1].trim().to_string(),
                 workspace: extract_workspace_basename(cols[2].trim(), Some(&home)),
-                is_subagent: nesting_depth > 0 || !cols[4].trim().is_empty(),
+                is_subagent: nesting_depth > 0 || parent_conversation_id.is_some(),
+                parent_conversation_id,
+                nesting_depth,
+                agent_name,
+                not_fully_idle,
+                killed,
             },
         );
     }
@@ -184,11 +246,25 @@ fn load_antigravity_title_index() -> HashMap<String, DbSessionMeta> {
     entries
 }
 
+pub fn is_subagent_conversation(conv_id: &str) -> bool {
+    let trimmed = conv_id.trim();
+    if trimmed.is_empty() {
+        return false;
+    }
+    load_antigravity_title_index()
+        .get(trimmed)
+        .is_some_and(|m| m.is_subagent)
+}
+
 pub fn discover_session_summaries(limit: usize) -> Vec<SessionSummary> {
     let Some(home) = dirs::home_dir() else {
         return Vec::new();
     };
     let db_index = load_antigravity_title_index();
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
     let mut found: Vec<(std::time::SystemTime, u64, PathBuf)> = Vec::new();
     for product in ["antigravity", "antigravity-ide", "antigravity-cli"] {
         let brain = home.join(".gemini").join(product).join("brain");
@@ -209,7 +285,7 @@ pub fn discover_session_summaries(limit: usize) -> Vec<SessionSummary> {
         }
     }
     found.sort_by(|a, b| b.0.cmp(&a.0));
-    found
+    let mut summaries: Vec<SessionSummary> = found
         .into_iter()
         .take(limit.clamp(1, 200))
         .map(|(mtime, size_bytes, p)| {
@@ -221,35 +297,137 @@ pub fn discover_session_summaries(limit: usize) -> Vec<SessionSummary> {
                 .and_then(|s| s.to_str())
                 .unwrap_or("unknown")
                 .to_string();
+            let mtime_ms = mtime
+                .duration_since(UNIX_EPOCH)
+                .map(|d| d.as_millis() as u64)
+                .unwrap_or(0);
+            let recently_written = now_ms.saturating_sub(mtime_ms) <= 45_000;
 
-            let (is_subagent, workspace, title) = if let Some(dbm) = db_index.get(&conv_id) {
+            let (
+                is_subagent,
+                parent_conversation_id,
+                nesting_depth,
+                agent_name,
+                active,
+                workspace,
+                title,
+            ) = if let Some(dbm) = db_index.get(&conv_id) {
                 let raw_t = if !dbm.title.is_empty() {
                     dbm.title.clone()
                 } else {
                     sniff_session_header(&p, size_bytes).1
                 };
+                let fallback_title = if dbm.is_subagent && raw_t.is_empty() {
+                    if !dbm.agent_name.is_empty() {
+                        format!(
+                            "{} #{}",
+                            dbm.agent_name,
+                            &conv_id[..conv_id.len().min(8)]
+                        )
+                    } else {
+                        format!("subagent #{}", &conv_id[..conv_id.len().min(8)])
+                    }
+                } else {
+                    sanitize_session_title(&raw_t, &dbm.workspace, &conv_id)
+                };
                 (
                     dbm.is_subagent,
+                    dbm.parent_conversation_id.clone(),
+                    dbm.nesting_depth,
+                    dbm.agent_name.clone(),
+                    (dbm.not_fully_idle && !dbm.killed) || recently_written,
                     dbm.workspace.clone(),
-                    sanitize_session_title(&raw_t, &dbm.workspace, &conv_id),
+                    fallback_title,
                 )
             } else {
                 let (heur_sub, sniffed) = sniff_session_header(&p, size_bytes);
-                (heur_sub, String::new(), sanitize_session_title(&sniffed, "", &conv_id))
+                (
+                    heur_sub,
+                    None,
+                    u32::from(heur_sub),
+                    String::new(),
+                    recently_written,
+                    String::new(),
+                    sanitize_session_title(&sniffed, "", &conv_id),
+                )
             };
 
             SessionSummary {
                 conversation_id: conv_id,
                 transcript_path: p.display().to_string(),
-                mtime_ms: mtime.duration_since(UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0),
+                mtime_ms,
                 size_bytes,
                 is_subagent,
+                parent_conversation_id,
+                nesting_depth,
+                agent_name,
+                active,
+                subagent_count: 0,
                 preview: title.clone(),
                 title,
                 workspace,
             }
         })
-        .collect()
+        .collect();
+
+    let mut counts: HashMap<String, usize> = HashMap::new();
+    for s in &summaries {
+        if s.is_subagent {
+            let root = resolve_root_conversation_id(&s.conversation_id, &summaries);
+            if root != s.conversation_id {
+                *counts.entry(root).or_insert(0) += 1;
+            }
+        }
+    }
+    for s in &mut summaries {
+        if let Some(&cnt) = counts.get(&s.conversation_id) {
+            s.subagent_count = cnt;
+        }
+    }
+    summaries
+}
+
+pub fn resolve_root_conversation_id(conv_id: &str, sessions: &[SessionSummary]) -> String {
+    let parent_by_id: HashMap<&str, Option<&str>> = sessions
+        .iter()
+        .map(|s| {
+            (
+                s.conversation_id.as_str(),
+                s.parent_conversation_id.as_deref(),
+            )
+        })
+        .collect();
+    let mut cur = conv_id;
+    let mut hops = 0usize;
+    while hops < 16 {
+        let Some(Some(parent)) = parent_by_id.get(cur) else {
+            break;
+        };
+        if parent.is_empty() || *parent == cur {
+            break;
+        }
+        cur = parent;
+        hops += 1;
+    }
+    cur.to_string()
+}
+
+pub fn collect_descendant_sessions(root_id: &str, sessions: &[SessionSummary]) -> Vec<SessionSummary> {
+    let mut out: Vec<SessionSummary> = sessions
+        .iter()
+        .filter(|s| {
+            s.conversation_id != root_id
+                && s.is_subagent
+                && resolve_root_conversation_id(&s.conversation_id, sessions) == root_id
+        })
+        .cloned()
+        .collect();
+    out.sort_by(|a, b| {
+        b.active
+            .cmp(&a.active)
+            .then_with(|| b.mtime_ms.cmp(&a.mtime_ms))
+    });
+    out
 }
 
 fn sniff_session_header(path: &Path, size_bytes: u64) -> (bool, String) {
@@ -306,4 +484,47 @@ pub fn discover_primary_transcript() -> Option<PathBuf> {
         .find(|s| !s.is_subagent)
         .or_else(|| all.first())
         .map(|s| PathBuf::from(&s.transcript_path))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn mk(id: &str, parent: Option<&str>, depth: u32, active: bool, mtime_ms: u64) -> SessionSummary {
+        SessionSummary {
+            conversation_id: id.into(),
+            transcript_path: format!("/tmp/{}/transcript.jsonl", id),
+            mtime_ms,
+            size_bytes: 2048,
+            is_subagent: depth > 0 || parent.is_some(),
+            parent_conversation_id: parent.map(String::from),
+            nesting_depth: depth,
+            agent_name: if depth > 0 { "self".into() } else { String::new() },
+            active,
+            subagent_count: 0,
+            title: id.into(),
+            workspace: "demo".into(),
+            preview: id.into(),
+        }
+    }
+
+    #[test]
+    fn resolves_nested_subagent_trees_and_guards_cycles() {
+        let sessions = vec![
+            mk("root-1", None, 0, false, 100),
+            mk("child-a", Some("root-1"), 1, false, 150),
+            mk("child-b", Some("root-1"), 1, true, 120),
+            mk("grandchild", Some("child-a"), 2, false, 160),
+            mk("cyc-a", Some("cyc-b"), 1, false, 90),
+            mk("cyc-b", Some("cyc-a"), 1, false, 95),
+        ];
+
+        assert_eq!(resolve_root_conversation_id("grandchild", &sessions), "root-1");
+        assert_eq!(resolve_root_conversation_id("root-1", &sessions), "root-1");
+        let _ = resolve_root_conversation_id("cyc-a", &sessions);
+
+        let kids = collect_descendant_sessions("root-1", &sessions);
+        let ids: Vec<&str> = kids.iter().map(|s| s.conversation_id.as_str()).collect();
+        assert_eq!(ids, vec!["child-b", "grandchild", "child-a"]);
+    }
 }

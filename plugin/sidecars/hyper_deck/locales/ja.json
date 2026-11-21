@@ -45,7 +45,16 @@
     "row_hyper_share": "Hyper 採用率",
     "row_peak_ctx": "セッション最大値",
     "row_batched": "統合ターン数",
+    "row_cache_breaks": "短間隔キャッシュ消失",
     "turns_unit": "{{count}} ターン"
+  },
+  "subagents": {
+    "heading": "サブエージェント ({{count}})",
+    "active_badge": "{{count}} 稼働中",
+    "redline_badge": "{{count}} 上限",
+    "back_parent": "← 親セッション",
+    "tree_meta": "ツリー計: {{turns}} ターン · {{tokens}} · {{cache}}%",
+    "sub_badge": "{{count}} サブ"
   },
   "pulse": {
     "heading": "プロンプトキャッシュ保温ウィンドウ",
@@ -53,11 +62,11 @@
     "warming": "注意域",
     "redline": "上限付近 · /compact",
     "warm": "保温中",
-    "cooling": "冷却間近",
+    "cooling": "減衰域",
     "cold": "冷却済",
-    "hint_warm": "キャッシュが温かいため、次の応答で再計算を省略できます。",
-    "hint_cooling": "間もなく冷却します。数秒以内の送信が高速です。",
-    "hint_cold": "60秒超の待機で冷却しました。次の指示をまとめて送信すると効率的です。",
+    "hint_warm": "キャッシュ保温中。同期 hyper_check でループ維持すると再計算を回避できます。",
+    "hint_cooling": "減衰域に入りました。操作をまとめて実行するとキャッシュを維持できます。",
+    "hint_cold": "{{secs}}秒超の待機で冷却しました。次の指示をまとめて送信すると効率的です。",
     "context_label": "使用量",
     "copy_compact": "/compact をコピー",
     "copied_short": "✓ コピー済",

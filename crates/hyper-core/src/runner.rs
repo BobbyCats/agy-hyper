@@ -59,7 +59,8 @@ pub struct CheckRunResult {
 /// Safe executable allowlist for explicit `argv` (always `shell: false` — zero shell injection).
 const SAFE_CHECK_PROGRAMS: &[&str] = &[
     "cargo", "rustc", "rustfmt", "npm", "pnpm", "yarn", "bun", "node", "tsc", "eslint",
-    "biome", "vitest", "jest", "pytest", "python3", "python", "ruff", "mypy", "pyright", "go",
+    "biome", "oxlint", "vitest", "jest", "playwright", "turbo", "nx", "vite", "svelte-check",
+    "astro", "pytest", "python3", "python", "ruff", "mypy", "pyright", "go",
     "golangci-lint", "swift", "xcodebuild", "make", "just", "gradle", "mvn", "dotnet", "zig",
 ];
 
@@ -109,8 +110,12 @@ pub fn discover_presets(root: &Path) -> Vec<CheckPreset> {
                 for script_name in [
                     "typecheck",
                     "type-check",
+                    "check-types",
                     "check",
                     "lint",
+                    "verify:fast",
+                    "verify",
+                    "test:unit",
                     "test",
                     "build",
                     "check:ui",
@@ -118,7 +123,12 @@ pub fn discover_presets(root: &Path) -> Vec<CheckPreset> {
                     if scripts.contains_key(script_name) {
                         let ro = matches!(
                             script_name,
-                            "typecheck" | "type-check" | "check" | "lint" | "check:ui"
+                            "typecheck"
+                                | "type-check"
+                                | "check-types"
+                                | "check"
+                                | "lint"
+                                | "check:ui"
                         );
                         presets.push(CheckPreset {
                             id: format!("pkg:{}", script_name),
@@ -129,6 +139,12 @@ pub fn discover_presets(root: &Path) -> Vec<CheckPreset> {
                         });
                     }
                 }
+            }
+
+            let is_monorepo = root.join("pnpm-workspace.yaml").exists()
+                || val.get("workspaces").is_some();
+            if is_monorepo {
+                discover_monorepo_pkg_presets(root, pm, &mut presets);
             }
         }
     }
@@ -170,6 +186,93 @@ pub fn discover_presets(root: &Path) -> Vec<CheckPreset> {
     }
 
     presets
+}
+
+fn discover_monorepo_pkg_presets(root: &Path, pm: &str, presets: &mut Vec<CheckPreset>) {
+    let mut pkg_dirs = Vec::new();
+    for group in ["packages", "apps"] {
+        let dir = root.join(group);
+        let Ok(entries) = fs::read_dir(&dir) else {
+            continue;
+        };
+        let mut children: Vec<_> = entries.flatten().map(|e| e.path()).collect();
+        children.sort();
+        for p in children {
+            if p.is_dir() && p.join("package.json").is_file() {
+                pkg_dirs.push(p);
+                if pkg_dirs.len() >= 16 {
+                    break;
+                }
+            }
+        }
+        if pkg_dirs.len() >= 16 {
+            break;
+        }
+    }
+
+    for pkg_dir in pkg_dirs {
+        let Ok(raw) = fs::read_to_string(pkg_dir.join("package.json")) else {
+            continue;
+        };
+        let Ok(val) = serde_json::from_str::<serde_json::Value>(&raw) else {
+            continue;
+        };
+        let Some(scripts) = val.get("scripts").and_then(|v| v.as_object()) else {
+            continue;
+        };
+        let Some(dir_name) = pkg_dir.file_name().and_then(|s| s.to_str()) else {
+            continue;
+        };
+        let pkg_name = val
+            .get("name")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.trim().is_empty())
+            .unwrap_or(dir_name);
+        let rel_dir = pkg_dir
+            .strip_prefix(root)
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|_| dir_name.to_string());
+
+        for script_name in ["typecheck", "lint", "test", "build"] {
+            if !scripts.contains_key(script_name) {
+                continue;
+            }
+            let args = match pm {
+                "pnpm" => vec![
+                    "--filter".into(),
+                    pkg_name.into(),
+                    "run".into(),
+                    script_name.into(),
+                ],
+                "yarn" => vec![
+                    "workspace".into(),
+                    pkg_name.into(),
+                    "run".into(),
+                    script_name.into(),
+                ],
+                "bun" => vec![
+                    "--filter".into(),
+                    pkg_name.into(),
+                    "run".into(),
+                    script_name.into(),
+                ],
+                _ => vec![
+                    "--workspace".into(),
+                    rel_dir.clone(),
+                    "run".into(),
+                    script_name.into(),
+                ],
+            };
+            let ro = matches!(script_name, "typecheck" | "lint");
+            presets.push(CheckPreset {
+                id: format!("pkg:{}:{}", dir_name, script_name),
+                program: pm.into(),
+                args,
+                source: format!("{}/package.json", rel_dir),
+                read_only_safe: ro,
+            });
+        }
+    }
 }
 
 /// Execute a check safely with:
@@ -546,5 +649,33 @@ mod tests {
         .unwrap();
         assert!(res.cancelled);
         assert!(res.duration_ms < 2000);
+    }
+
+    #[test]
+    fn discovers_monorepo_workspace_presets() {
+        let dir = tempdir().unwrap();
+        fs::write(dir.path().join("pnpm-lock.yaml"), "lockfileVersion: '9.0'\n").unwrap();
+        fs::write(dir.path().join("pnpm-workspace.yaml"), "packages:\n  - 'packages/*'\n").unwrap();
+        fs::write(
+            dir.path().join("package.json"),
+            r#"{"name":"root","scripts":{"verify:fast":"turbo run test"}}"#,
+        )
+        .unwrap();
+        fs::create_dir_all(dir.path().join("packages/core")).unwrap();
+        fs::write(
+            dir.path().join("packages/core/package.json"),
+            r#"{"name":"@acme/core","scripts":{"typecheck":"tsc --noEmit","test":"vitest run"}}"#,
+        )
+        .unwrap();
+
+        let presets = discover_presets(dir.path());
+        let ids: Vec<&str> = presets.iter().map(|p| p.id.as_str()).collect();
+        assert!(ids.contains(&"pkg:verify:fast"));
+        assert!(ids.contains(&"pkg:core:typecheck"));
+        assert!(ids.contains(&"pkg:core:test"));
+        let tc = presets.iter().find(|p| p.id == "pkg:core:typecheck").unwrap();
+        assert_eq!(tc.program, "pnpm");
+        assert_eq!(tc.args, vec!["--filter", "@acme/core", "run", "typecheck"]);
+        assert!(tc.read_only_safe);
     }
 }

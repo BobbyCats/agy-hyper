@@ -45,7 +45,16 @@
     "row_hyper_share": "Hyper tool share",
     "row_peak_ctx": "Peak context",
     "row_batched": "Turns saved",
+    "row_cache_breaks": "Short-gap cache resets",
     "turns_unit": "{{count}} turns"
+  },
+  "subagents": {
+    "heading": "Subagents ({{count}})",
+    "active_badge": "{{count}} active",
+    "redline_badge": "{{count}} redline",
+    "back_parent": "← Parent",
+    "tree_meta": "Tree: {{turns}} turns · {{tokens}} · {{cache}}% cache",
+    "sub_badge": "{{count}} sub"
   },
   "pulse": {
     "heading": "Prompt Cache Warmth",
@@ -55,9 +64,9 @@
     "warm": "WARM",
     "cooling": "COOLING",
     "cold": "COLD",
-    "hint_warm": "Prompt cache is hot — next turn skips full prefill.",
-    "hint_cooling": "Cooling soon — send next action within seconds to stay warm.",
-    "hint_cold": "Cache cooled (>60s idle). Batch next actions to re-warm.",
+    "hint_warm": "Prompt cache is hot — stay in-loop (prefer sync hyper_check) to skip full prefill.",
+    "hint_cooling": "Entering decay window — keep tool turns batched to preserve prefix cache.",
+    "hint_cold": "Cache cooled (>{{secs}}s idle). Batch next actions into 1 turn to re-warm.",
     "context_label": "Context",
     "copy_compact": "Copy /compact",
     "copied_short": "✓ Copied",
