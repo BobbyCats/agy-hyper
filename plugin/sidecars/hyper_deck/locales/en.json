@@ -47,6 +47,7 @@
     "row_peak_ctx": "Peak context",
     "row_batched": "Turns saved",
     "row_cache_breaks": "Short-gap cache resets",
+    "cache_meta_dual": "Step {{step}}% · Avg {{avg}}%",
     "turns_unit": "{{count}} turns"
   },
   "subagents": {
@@ -67,6 +68,8 @@
   "pulse": {
     "heading": "Prompt Cache Warmth",
     "healthy": "Healthy",
+    "compacted": "Compacted",
+    "compacted_hint": "Context freshly compacted ({{ctx}}k active window)",
     "warming": "Near Limit",
     "redline": "Redline · /compact",
     "warm": "WARM",
@@ -83,6 +86,10 @@
     "cliff_multimodal": "Multimodal >180k cliff active ({{count}} recent image(s)). Avoid extra screenshots to prevent TTFT spikes.",
     "cliff_timeout": "{{count}} recent stream timeout(s) detected. Run /compact to shed context weight.",
     "cliff_reset": "{{count}} transient proxy reset(s) detected — context is fine, keep tool payloads compact.",
+    "cliff_compact_model_switch": "Model switched from {{prev}} around /compact — prefix KV cache recomputing is normal; compact before switching models next time.",
+    "cliff_model_switch": "Model switched from {{prev}} — prefix cache is re-warming on the new model.",
+    "cliff_compacted": "Context compacted — fresh {{ctx}}k window active.",
+    "cache_step_vs_session": "Latest turn: {{step}}% · Session avg: {{avg}}%",
     "series_cached": "Cached",
     "series_fresh": "Uncached",
     "series_hit_rate": "Cache Hit %",

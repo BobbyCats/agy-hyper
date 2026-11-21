@@ -7,8 +7,83 @@ set -euo pipefail
 
 REPO="${AGY_HYPER_REPO:-BobbyCats/agy-hyper}"
 VERSION="${AGY_HYPER_VERSION:-latest}"
-PLUGIN_DIR="${HOME}/.gemini/config/plugins/agy-hyper"
-BIN_LINK="${HOME}/.local/bin/agy-hyper"
+PLUGIN_DIR="${AGY_HYPER_PLUGIN_DIR:-${HOME}/.gemini/config/plugins/agy-hyper}"
+BIN_LINK="${AGY_HYPER_BIN_LINK:-${HOME}/.local/bin/agy-hyper}"
+DATA_DIR="${AGY_HYPER_DATA_DIR:-${HOME}/.gemini/antigravity/agy-hyper}"
+
+ACTION="install"
+PURGE=0
+for arg in "$@"; do
+  case "$arg" in
+    --uninstall) ACTION="uninstall" ;;
+    --purge)     PURGE=1 ;;
+    -h|--help)
+      cat <<'EOF'
+Usage: install.sh [--uninstall [--purge]]
+
+Default:
+  Install or upgrade AGY Hyper (uses local Cargo checkout if run inside repo,
+  otherwise downloads a SHA-256 verified release bundle).
+
+Options:
+  --uninstall   Stop daemon/sidecar and remove plugin files and CLI symlink.
+                Preserves ~/.gemini/antigravity/agy-hyper (config, ledger, WAL).
+  --purge       With --uninstall, also remove ~/.gemini/antigravity/agy-hyper.
+EOF
+      exit 0
+      ;;
+    *)
+      echo "Unknown option: $arg (use --help)" >&2
+      exit 1
+      ;;
+  esac
+done
+
+recycle_sidecar() {
+  # Gracefully recycle our running hyper_deck sidecar (if any) so Antigravity's
+  # restart_policy="always" reloads updated routes/UI immediately without stale 404s.
+  local pid_file="${DATA_DIR}/run/sidecar.pid"
+  if [[ -f "$pid_file" ]]; then
+    local old_pid
+    old_pid="$(cat "$pid_file" 2>/dev/null || true)"
+    if [[ -n "$old_pid" ]] && kill -0 "$old_pid" 2>/dev/null; then
+      if ps -p "$old_pid" -o args= 2>/dev/null | grep -q "main\.mjs"; then
+        kill "$old_pid" 2>/dev/null || true
+      fi
+    fi
+  fi
+}
+
+if [[ "$ACTION" == "uninstall" ]]; then
+  printf "\n⚡ Uninstalling AGY Hyper...\n"
+  if [[ -x "${PLUGIN_DIR}/bin/agy-hyper" ]]; then
+    "${PLUGIN_DIR}/bin/agy-hyper" daemon stop >/dev/null 2>&1 || true
+  elif [[ -x "${BIN_LINK}" ]]; then
+    "${BIN_LINK}" daemon stop >/dev/null 2>&1 || true
+  fi
+  recycle_sidecar
+
+  if [[ -L "$BIN_LINK" || -f "$BIN_LINK" ]]; then
+    rm -f "$BIN_LINK"
+    echo "✓ Removed CLI link: ${BIN_LINK}"
+  fi
+  if [[ -d "$PLUGIN_DIR" ]]; then
+    rm -rf "$PLUGIN_DIR"
+    echo "✓ Removed plugin directory: ${PLUGIN_DIR}"
+  fi
+
+  if [[ "$PURGE" -eq 1 ]]; then
+    if [[ -d "$DATA_DIR" ]]; then
+      rm -rf "$DATA_DIR"
+      echo "✓ Purged runtime state & WAL snapshots: ${DATA_DIR}"
+    fi
+  else
+    echo "ℹ Preserved user config, usage ledger & WAL snapshots at: ${DATA_DIR}"
+    echo "  To remove all state as well, run: rm -rf \"${DATA_DIR}\""
+  fi
+  echo "✓ Uninstall complete."
+  exit 0
+fi
 
 printf "\n⚡ Installing AGY Hyper (%s)...\n" "$VERSION"
 
@@ -28,21 +103,6 @@ esac
 TARGET="${TARGET_ARCH}-${TARGET_OS}"
 TMP_DIR="$(mktemp -d)"
 trap 'rm -rf "$TMP_DIR"' EXIT
-
-recycle_sidecar() {
-  # Gracefully recycle our running hyper_deck sidecar (if any) so Antigravity's
-  # restart_policy="always" reloads updated routes/UI immediately without stale 404s.
-  local pid_file="${AGY_HYPER_DATA_DIR:-${HOME}/.gemini/antigravity/agy-hyper}/run/sidecar.pid"
-  if [[ -f "$pid_file" ]]; then
-    local old_pid
-    old_pid="$(cat "$pid_file" 2>/dev/null || true)"
-    if [[ -n "$old_pid" ]] && kill -0 "$old_pid" 2>/dev/null; then
-      if ps -p "$old_pid" -o args= 2>/dev/null | grep -q "main\.mjs"; then
-        kill "$old_pid" 2>/dev/null || true
-      fi
-    fi
-  fi
-}
 
 # Support local repo install when run from inside a clone (safe under `curl ... | bash` with `set -u`)
 SCRIPT_SRC="${BASH_SOURCE[0]:-}"

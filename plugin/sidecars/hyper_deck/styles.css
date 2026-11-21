@@ -586,6 +586,14 @@ button:focus-visible, select:focus-visible, input:focus-visible {
   background: var(--err-soft);
   color: var(--err);
 }
+.inline-alert.ok {
+  background: var(--ok-soft);
+  color: var(--ok);
+}
+.inline-alert.info {
+  background: var(--accent-soft);
+  color: var(--accent);
+}
 
 .panel-foot {
   margin-top: 9px;

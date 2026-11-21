@@ -1,9 +1,55 @@
 ﻿# AGY Hyper — Zero-Barrier Windows Installer (SHA-256 verified, atomic swap)
+param(
+  [switch]$Uninstall,
+  [switch]$Purge
+)
 $ErrorActionPreference = "Stop"
 
 $Repo = if ($env:AGY_HYPER_REPO) { $env:AGY_HYPER_REPO } else { "BobbyCats/agy-hyper" }
 $Version = if ($env:AGY_HYPER_VERSION) { $env:AGY_HYPER_VERSION } else { "latest" }
-$PluginDir = Join-Path $HOME ".gemini\config\plugins\agy-hyper"
+$PluginDir = if ($env:AGY_HYPER_PLUGIN_DIR) { $env:AGY_HYPER_PLUGIN_DIR } else { Join-Path $HOME ".gemini\config\plugins\agy-hyper" }
+$DataDir = if ($env:AGY_HYPER_DATA_DIR) { $env:AGY_HYPER_DATA_DIR } else { Join-Path $HOME ".gemini\antigravity\agy-hyper" }
+
+if ($Uninstall -or $env:AGY_HYPER_UNINSTALL -eq "1") {
+  Write-Host "`n⚡ Uninstalling AGY Hyper..." -ForegroundColor Cyan
+  $BinDir = Join-Path $PluginDir "bin"
+  $BinExe = Join-Path $BinDir "agy-hyper.exe"
+  if (Test-Path $BinExe) { & $BinExe daemon stop 2>$null | Out-Null }
+
+  $PidFile = Join-Path $DataDir "run\sidecar.pid"
+  if (Test-Path $PidFile) {
+    $OldPid = (Get-Content -Raw $PidFile).Trim()
+    if ($OldPid -match '^\d+$') {
+      Stop-Process -Id ([int]$OldPid) -Force -ErrorAction SilentlyContinue
+    }
+  }
+
+  if (Test-Path $PluginDir) {
+    Remove-Item -Recurse -Force $PluginDir
+    Write-Host "✓ Removed plugin directory: $PluginDir" -ForegroundColor Green
+  }
+
+  $UserPath = [Environment]::GetEnvironmentVariable("Path", "User")
+  if ($UserPath) {
+    $Filtered = ($UserPath -split ';' | Where-Object { $_ -and ($_ -ine $BinDir) }) -join ';'
+    if ($Filtered -ne $UserPath) {
+      [Environment]::SetEnvironmentVariable("Path", $Filtered, "User")
+      Write-Host "✓ Removed $BinDir from User PATH" -ForegroundColor Green
+    }
+  }
+
+  if ($Purge -or $env:AGY_HYPER_PURGE -eq "1") {
+    if (Test-Path $DataDir) {
+      Remove-Item -Recurse -Force $DataDir
+      Write-Host "✓ Purged runtime state & WAL snapshots: $DataDir" -ForegroundColor Green
+    }
+  } else {
+    Write-Host "ℹ Preserved user config, usage ledger & WAL snapshots at: $DataDir" -ForegroundColor Yellow
+    Write-Host "  To remove all state as well, run: Remove-Item -Recurse -Force `"$DataDir`"" -ForegroundColor Yellow
+  }
+  Write-Host "✓ Uninstall complete." -ForegroundColor Cyan
+  exit 0
+}
 $BaseUrl = if ($Version -eq "latest") {
   "https://github.com/$Repo/releases/latest/download"
 } else {

@@ -18,13 +18,46 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Run unit & security chaos tests
         run: cargo test --workspace --all-targets
-      - name: Check sidecar syntax (Node ESM)
+      - name: Check sidecar syntax, i18n parity & inline HTML compilation
+        shell: bash
         run: |
           node --check plugin/sidecars/hyper_deck/main.mjs
           node --check plugin/sidecars/hyper_deck/app.js
           node --check plugin/sidecars/hyper_deck/modules/api.js
           node --check plugin/sidecars/hyper_deck/modules/charts.js
           node --check plugin/sidecars/hyper_deck/modules/render.js
+          node -e '
+            const fs = require("node:fs");
+            const vm = require("node:vm");
+            const path = require("node:path");
+            const base = "plugin/sidecars/hyper_deck";
+            const flat = (o, p = "") => Object.entries(o).flatMap(([k, v]) =>
+              v && typeof v === "object" ? flat(v, p ? `${p}.${k}` : k) : [p ? `${p}.${k}` : k]
+            );
+            const langs = ["en", "zh-CN", "ja"];
+            const sets = langs.map((l) => new Set(flat(JSON.parse(fs.readFileSync(path.join(base, "locales", `${l}.json`), "utf8")))));
+            for (let i = 1; i < sets.length; i++) {
+              const miss = [...sets[0]].filter((k) => !sets[i].has(k));
+              const extra = [...sets[i]].filter((k) => !sets[0].has(k));
+              if (miss.length || extra.length) throw new Error(`Locale mismatch ${langs[i]}: miss=${miss} extra=${extra}`);
+            }
+            let html = fs.readFileSync(path.join(base, "index.html"), "utf8");
+            const css = fs.readFileSync(path.join(base, "styles.css"), "utf8").replace(/<\/style/gi, "<\\/style");
+            html = html.replace("<link rel=\"stylesheet\" href=\"/styles.css\">", () => `<style>${css}</style>`);
+            const locales = Object.fromEntries(langs.map((l) => [l, JSON.parse(fs.readFileSync(path.join(base, "locales", `${l}.json`), "utf8"))]));
+            html = html.replace("<!-- INLINE_LOCALES -->", () => `<script>window.__HYPER_LOCALES__ = ${JSON.stringify(locales).replace(/<\//g, "<\\/")};</script>`);
+            const scripts = ["modules/api.js", "modules/charts.js", "modules/render.js", "app.js"];
+            const inlined = scripts.map((r) => `<script data-module="${r}">\n${fs.readFileSync(path.join(base, r), "utf8").replace(/<\/script/gi, "<\\/script")}\n</script>`).join("\n");
+            html = html.replace("<!-- INLINE_APP_SCRIPTS -->", () => inlined);
+            let checked = 0;
+            for (const m of html.matchAll(/<script\b([^>]*)>([\s\S]*?)<\/script>/gi)) {
+              if (/\bsrc\s*=/.test(m[1])) continue;
+              new vm.Script(m[2]);
+              checked++;
+            }
+            if (checked !== 5) throw new Error(`Expected 5 inline scripts, got ${checked}`);
+            console.log(`Sidecar OK: ${sets[0].size} locale keys x 3, ${checked} inline scripts compiled`);
+          '
       - name: Verify install.sh syntax & piped stdin safety
         if: runner.os != 'Windows'
         shell: bash

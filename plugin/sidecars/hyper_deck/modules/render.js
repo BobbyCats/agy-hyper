@@ -374,7 +374,7 @@
     const tree = snap.session_tree || null;
     const activeConvId = pulse?.conversation_id || bench?.conversation_id || '';
 
-    $('version-pill').textContent = `v${eng.version || snap.version || '0.1.0'}`;
+    $('version-pill').textContent = `v${eng.version || snap.version || '0.2.0'}`;
     const isUds = snap.transport === 'uds-daemon';
     $('daemon-dot').classList.toggle('warn', !isUds);
     $('daemon-label').textContent = isUds
@@ -402,6 +402,10 @@
     } else if (pulse?.health === 'yellow') {
       hChip.classList.add('warn');
       hChip.textContent = t('pulse.warming');
+    } else if (pulse?.recently_compacted && !selectedSub) {
+      hChip.classList.add('ok');
+      hChip.textContent = t('pulse.compacted');
+      hChip.title = t('pulse.compacted_hint', { ctx: ((pulse?.total_tokens || 0) / 1000).toFixed(1) });
     } else {
       hChip.classList.add('ok');
       hChip.textContent = t('pulse.healthy');
@@ -410,11 +414,19 @@
     const totalTok = pulse?.total_tokens || 0;
     $('s-ctx').textContent = totalTok > 0 ? `${(totalTok / 1000).toFixed(1)}k` : '—';
     $('s-p50').textContent = bench?.median_turn_ms ? fmtSec(bench.median_turn_ms) : '—';
-    $('s-cache').textContent = pulse
-      ? `${Math.round((pulse.cache_hit_ratio || 0) * 100)}%`
-      : bench
-        ? `${Math.round((bench.cache_hit_ratio || 0) * 100)}%`
+    const stepHitPct = pulse ? Math.round((pulse.cache_hit_ratio || 0) * 100) : null;
+    const sessHitPct = bench ? Math.round((bench.cache_hit_ratio || 0) * 100) : null;
+    $('s-cache').textContent = stepHitPct !== null
+      ? `${stepHitPct}%`
+      : sessHitPct !== null
+        ? `${sessHitPct}%`
         : '—';
+    const cacheTabEl = $('s-cache')?.closest('.kpi-tab');
+    if (cacheTabEl) {
+      cacheTabEl.title = stepHitPct !== null && sessHitPct !== null
+        ? t('pulse.cache_step_vs_session', { step: stepHitPct, avg: sessHitPct })
+        : '';
+    }
 
     const sessionHyperTurns = bench?.hyper_tool_calls ?? 0;
     const turnsBasis = bench ? sessionHyperTurns : eng.total_turns_saved || 0;
@@ -433,6 +445,15 @@
     } else if (pulse?.health_reason === 'proxy_reset') {
       alertEl.textContent = t('pulse.cliff_reset', { count: pulse.recent_resets || 2 });
       alertEl.className = 'inline-alert';
+    } else if (pulse?.model_switched_from && pulse?.recently_compacted) {
+      alertEl.textContent = t('pulse.cliff_compact_model_switch', { prev: pulse.model_switched_from });
+      alertEl.className = 'inline-alert';
+    } else if (pulse?.model_switched_from && (pulse.cache_hit_ratio || 0) < 0.35) {
+      alertEl.textContent = t('pulse.cliff_model_switch', { prev: pulse.model_switched_from });
+      alertEl.className = 'inline-alert info';
+    } else if (pulse?.recently_compacted && totalTok > 0) {
+      alertEl.textContent = t('pulse.cliff_compacted', { ctx: (totalTok / 1000).toFixed(1) });
+      alertEl.className = 'inline-alert ok';
     } else {
       alertEl.classList.add('hidden');
     }

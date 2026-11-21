@@ -45,6 +45,10 @@ pub struct TranscriptPulse {
     pub cache_warm_remaining_secs: u64,
     pub cache_is_cold: bool,
     pub multimodal_cliff_risk: bool,
+    #[serde(default)]
+    pub recently_compacted: bool,
+    #[serde(default)]
+    pub model_switched_from: Option<String>,
     pub health: HealthLevel,
     #[serde(default)]
     pub health_reason: String,
@@ -107,10 +111,23 @@ fn is_compact_user_input(content: &str) -> bool {
     body.trim() == "/compact"
 }
 
+fn is_user_cancel_error(msg: &str) -> bool {
+    let lower = msg.trim().to_ascii_lowercase();
+    if lower.is_empty() {
+        return false;
+    }
+    lower.contains("context canceled")
+        || lower.contains("canceled by user")
+        || lower.contains("cancelled by user")
+        || lower.contains("aborted by user")
+        || lower.contains("user canceled")
+        || lower.contains("user cancelled")
+}
+
 /// Ultra-fast `<1.5ms` tail reader of Antigravity's `transcript.jsonl`.
 /// Native zero-dependency Rust guard providing:
 /// - Compaction-aware windowing (zero post-`/compact` false-alarm storms!)
-/// - 60s Prompt Cache Warmth countdown
+/// - Prompt Cache Warmth countdown
 /// - >180k Multimodal Image TTFT cliff detection
 /// - Live cache hit ratio & exact token breakdown
 pub fn inspect_transcript_tail(path: &Path, cfg: &HyperConfig) -> Option<TranscriptPulse> {
@@ -178,6 +195,15 @@ pub fn inspect_transcript_tail(path: &Path, cfg: &HyperConfig) -> Option<Transcr
         }
     }
 
+    let mut last_model_before_compact: Option<String> = None;
+    for obj in &parsed[..compact_start_idx] {
+        if obj.get("type").and_then(Value::as_str) == Some("PLANNER_RESPONSE") {
+            if let Some(m) = obj.get("model").and_then(Value::as_str).filter(|s| !s.is_empty()) {
+                last_model_before_compact = Some(m.to_string());
+            }
+        }
+    }
+
     let active_window = &parsed[compact_start_idx..];
 
     let mut max_step = 0u64;
@@ -185,6 +211,9 @@ pub fn inspect_transcript_tail(path: &Path, cfg: &HyperConfig) -> Option<Transcr
     let mut cache_read_tokens = 0u64;
     let mut output_tokens = 0u64;
     let mut model: Option<String> = None;
+    let mut switched_from: Option<String> = None;
+    let mut turns_since_model_switch = 0u32;
+    let mut planner_turns_in_window = 0u32;
     let mut last_planner_epoch_ms: Option<i64> = None;
     let mut media_items_recent = 0u32;
 
@@ -196,7 +225,16 @@ pub fn inspect_transcript_tail(path: &Path, cfg: &HyperConfig) -> Option<Transcr
             media_items_recent += media.len() as u32;
         }
         if obj.get("type").and_then(Value::as_str) == Some("PLANNER_RESPONSE") {
+            planner_turns_in_window = planner_turns_in_window.saturating_add(1);
             if let Some(m) = obj.get("model").and_then(Value::as_str).filter(|s| !s.is_empty()) {
+                if let Some(prev) = model.as_deref() {
+                    if !prev.eq_ignore_ascii_case(m) {
+                        switched_from = Some(prev.to_string());
+                        turns_since_model_switch = 0;
+                    } else {
+                        turns_since_model_switch = turns_since_model_switch.saturating_add(1);
+                    }
+                }
                 model = Some(m.to_string());
             }
             let inp = obj.get("input_tokens").and_then(Value::as_u64).unwrap_or(0);
@@ -221,6 +259,27 @@ pub fn inspect_transcript_tail(path: &Path, cfg: &HyperConfig) -> Option<Transcr
         }
     }
 
+    let recently_compacted = compact_start_idx > 0 && planner_turns_in_window <= 2;
+    let model_switched_from = if recently_compacted {
+        if switched_from.is_some() {
+            switched_from
+        } else if let (Some(prev), Some(curr)) =
+            (last_model_before_compact.as_deref(), model.as_deref())
+        {
+            if !prev.eq_ignore_ascii_case(curr) {
+                Some(prev.to_string())
+            } else {
+                None
+            }
+        } else {
+            None
+        }
+    } else if turns_since_model_switch <= 1 {
+        switched_from
+    } else {
+        None
+    };
+
     let steps_since_compact = if compact_base_step > 0 {
         max_step.saturating_sub(compact_base_step)
     } else {
@@ -237,6 +296,9 @@ pub fn inspect_transcript_tail(path: &Path, cfg: &HyperConfig) -> Option<Transcr
                 .and_then(Value::as_str)
                 .or_else(|| obj.get("content").and_then(Value::as_str))
                 .unwrap_or("");
+            if is_user_cancel_error(err) {
+                continue;
+            }
             if err.contains("stream idle timeout")
                 || err.contains("context deadline exceeded")
                 || err.contains("503")
@@ -338,6 +400,8 @@ pub fn inspect_transcript_tail(path: &Path, cfg: &HyperConfig) -> Option<Transcr
         cache_warm_remaining_secs,
         cache_is_cold,
         multimodal_cliff_risk,
+        recently_compacted,
+        model_switched_from,
         health,
         health_reason: health_reason.to_string(),
     })
@@ -449,5 +513,45 @@ mod tests {
         let pulse2 = inspect_transcript_tail(&p2, &cfg).unwrap();
         assert_eq!(pulse2.health, HealthLevel::Yellow);
         assert_eq!(pulse2.health_reason, "proxy_reset");
+    }
+
+    #[test]
+    fn ignores_user_canceled_errors_in_health_classification() {
+        let dir = tempdir().unwrap();
+        let p = dir.path().join("transcript.jsonl");
+        let content = concat!(
+            "{\"step_index\":1,\"type\":\"ERROR_MESSAGE\",\"error\":\"context canceled: stream idle timeout\"}\n",
+            "{\"step_index\":2,\"type\":\"ERROR_MESSAGE\",\"error\":\"cancelled by user: connection reset by peer\"}\n",
+            "{\"step_index\":3,\"type\":\"ERROR_MESSAGE\",\"error\":\"aborted by user\"}\n",
+            "{\"step_index\":4,\"type\":\"PLANNER_RESPONSE\",\"model\":\"gemini-4-neon-xhigh\",\"input_tokens\":10000,\"cache_read_tokens\":40000,\"output_tokens\":200,\"created_at\":\"2026-11-20T12:00:00Z\"}\n"
+        );
+        fs::write(&p, content).unwrap();
+        let cfg = HyperConfig::default();
+        let pulse = inspect_transcript_tail(&p, &cfg).unwrap();
+        assert_eq!(pulse.recent_timeouts, 0);
+        assert_eq!(pulse.recent_resets, 0);
+        assert_eq!(pulse.health, HealthLevel::Green);
+        assert_eq!(pulse.health_reason, "healthy");
+    }
+
+    #[test]
+    fn detects_recent_compaction_and_cross_model_switch() {
+        let dir = tempdir().unwrap();
+        let p = dir.path().join("transcript.jsonl");
+        let content = concat!(
+            "{\"step_index\":50,\"type\":\"PLANNER_RESPONSE\",\"model\":\"gemini-4-hydrogen-tiered-xhigh\",\"input_tokens\":30000,\"cache_read_tokens\":220000,\"output_tokens\":500,\"created_at\":\"2026-11-20T12:00:00Z\"}\n",
+            "{\"step_index\":51,\"type\":\"USER_INPUT\",\"content\":\"<USER_REQUEST>\\n/compact\\n</USER_REQUEST>\"}\n",
+            "{\"step_index\":52,\"type\":\"PLANNER_RESPONSE\",\"model\":\"gemini-4-carbon-medium\",\"input_tokens\":32000,\"cache_read_tokens\":0,\"output_tokens\":300,\"created_at\":\"2026-11-20T12:01:00Z\"}\n"
+        );
+        fs::write(&p, content).unwrap();
+        let cfg = HyperConfig::default();
+        let pulse = inspect_transcript_tail(&p, &cfg).unwrap();
+        assert!(pulse.recently_compacted);
+        assert_eq!(
+            pulse.model_switched_from.as_deref(),
+            Some("gemini-4-hydrogen-tiered-xhigh")
+        );
+        assert_eq!(pulse.model.as_deref(), Some("gemini-4-carbon-medium"));
+        assert_eq!(pulse.health, HealthLevel::Green);
     }
 }

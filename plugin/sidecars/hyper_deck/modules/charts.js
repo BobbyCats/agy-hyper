@@ -176,8 +176,11 @@
     }
 
     if (heroTab === 'cache') {
+      const sessHitPct = snap.benchmark ? Math.round((snap.benchmark.cache_hit_ratio || 0) * 100) : null;
       $('hero-chart-title').textContent = t('hero.tab_cache');
-      $('hero-chart-meta').textContent = `${hitPct}%`;
+      $('hero-chart-meta').textContent = sessHitPct !== null
+        ? t('hero.cache_meta_dual', { step: hitPct, avg: sessHitPct })
+        : `${hitPct}%`;
       const hitSeries = turns.map((x) => {
         const tot = x.input_tokens + x.cache_read_tokens;
         return tot > 0 ? Math.round((x.cache_read_tokens / tot) * 100) : 0;

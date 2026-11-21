@@ -47,6 +47,7 @@
     "row_peak_ctx": "セッション最大値",
     "row_batched": "統合ターン数",
     "row_cache_breaks": "短間隔キャッシュ消失",
+    "cache_meta_dual": "今回 {{step}}% · 累計 {{avg}}%",
     "turns_unit": "{{count}} ターン"
   },
   "subagents": {
@@ -67,6 +68,8 @@
   "pulse": {
     "heading": "プロンプトキャッシュ保温ウィンドウ",
     "healthy": "正常",
+    "compacted": "圧縮済",
+    "compacted_hint": "コンテキスト圧縮完了（現在 {{ctx}}k）",
     "warming": "注意域",
     "redline": "上限付近 · /compact",
     "warm": "保温中",
@@ -83,6 +86,10 @@
     "cliff_multimodal": "180k 超の画像コンテキスト検出（{{count}}枚）。追加の添付を控えると遅延を防げます。",
     "cliff_timeout": "直近 {{count}} 件のストリームタイムアウト検出。/compact をお勧めします。",
     "cliff_reset": "直近 {{count}} 件の接続リセット検出（コンテキストは正常）。出力を抑えると安定します。",
+    "cliff_compact_model_switch": "/compact 前後に {{prev}} からモデル切替を検出。KV キャッシュ再計算は正常動作です（次回は圧縮後の切替を推奨）。",
+    "cliff_model_switch": "{{prev}} からモデルを切替えました。新しいモデルでプレフィックスキャッシュを再保温中です。",
+    "cliff_compacted": "コンテキストを圧縮しました（現在 {{ctx}}k ウィンドウ）。",
+    "cache_step_vs_session": "最新ターン: {{step}}% · セッション平均: {{avg}}%",
     "series_cached": "キャッシュ",
     "series_fresh": "新規入力",
     "series_hit_rate": "キャッシュ率",

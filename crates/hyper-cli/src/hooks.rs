@@ -479,6 +479,8 @@ mod tests {
             cache_warm_remaining_secs: 225,
             cache_is_cold: false,
             multimodal_cliff_risk: false,
+            recently_compacted: false,
+            model_switched_from: None,
             health,
             health_reason: reason.into(),
         }
