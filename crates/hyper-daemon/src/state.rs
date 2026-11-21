@@ -813,7 +813,7 @@ pub fn build_cockpit_snapshot(
             if child.active {
                 active_subagents += 1;
             }
-            if health == HealthLevel::Red {
+            if is_active_redline(child.active, health) {
                 redline_subagents += 1;
             }
 
@@ -914,6 +914,10 @@ pub fn build_cockpit_snapshot(
         transactions,
         recent_events,
     }
+}
+
+pub(crate) fn is_active_redline(active: bool, health: HealthLevel) -> bool {
+    active && health == HealthLevel::Red
 }
 
 pub(crate) fn is_content_mutation_event(kind: &EventKind) -> bool {
@@ -1053,5 +1057,14 @@ mod tests {
         assert!(is_noisy_watch_path(Path::new("/repo/logs/server.log")));
         assert!(!is_noisy_watch_path(Path::new("/repo/src/main.rs")));
         assert!(!is_noisy_watch_path(Path::new("/repo/apps/web/src/App.tsx")));
+    }
+
+    #[test]
+    fn completed_redline_subagents_do_not_trigger_active_redline_alert() {
+        assert!(is_active_redline(true, HealthLevel::Red));
+        assert!(!is_active_redline(false, HealthLevel::Red));
+        assert!(!is_active_redline(true, HealthLevel::Yellow));
+        assert!(!is_active_redline(true, HealthLevel::Green));
+        assert!(!is_active_redline(false, HealthLevel::Green));
     }
 }

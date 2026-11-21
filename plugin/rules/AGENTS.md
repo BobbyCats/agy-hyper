@@ -17,7 +17,7 @@ You have the `agy-hyper` native Rust MCP engine active (sub-millisecond local UD
    - `run_command` backgrounds commands past 10s; yielding a turn to wait for background completion risks prompt-cache resets on wake-up. `hyper_check` stays synchronous inside the active tool loop, preserves head+tail fatal errors without dropping stderr, and stores oversized logs in a 1ms drill handle (`h_xxxx`).
 5. **Context, Subagent & Cache Hygiene**:
    - Respect `[AGY Hyper Guard]` / `[AGY Hyper Redline Guard]` watermark signals: offload broad multi-file scans to `research` subagents and suggest `/compact` when approaching 280k tokens.
-   - Avoid spawning short-lived subagents for targeted lookups that `hyper_pack` or `hyper_search` resolves in 1 warm-cache turn; reuse an existing subagent via `send_message` for close follow-ups.
+   - Avoid spawning short-lived subagents for targeted lookups that `hyper_pack` or `hyper_search` resolves in 1 warm-cache turn. Reuse an existing subagent via `send_message` only for close, warm follow-ups: once a `self` subagent exceeds ~250k context or has been idle past the 4-minute cache window (subagents cannot run `/compact`), do not wake it—spawn a fresh subagent with a compact handoff summary instead.
    - When the user asks to view live telemetry, cache warmth, subagent status, or rollback history, surface `[Open Hyper Deck](sidecar://agy-hyper/hyper_deck/)`.
 
 ## Compact Tool Schemas (Inline — No Extra Schema-Read Turn Required)

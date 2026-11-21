@@ -171,9 +171,10 @@
       actPill.classList.add('hidden');
     }
 
+    const liveRedlines = (tree.subagents || []).filter((s) => s.active && s.health === 'red').length;
     const redPill = $('subagent-red-pill');
-    if (tree.redline_subagents > 0) {
-      redPill.textContent = t('subagents.redline_badge', { count: tree.redline_subagents });
+    if (liveRedlines > 0) {
+      redPill.textContent = t('subagents.redline_badge', { count: liveRedlines });
       redPill.classList.remove('hidden');
     } else {
       redPill.classList.add('hidden');
@@ -192,22 +193,53 @@
         const isSel = sub.conversation_id === activeConvId;
         const role = sub.agent_name || 'sub';
         const title = sub.title || `#${sub.conversation_id.slice(0, 8)}`;
-        const ctx = sub.total_tokens > 0 ? `${(sub.total_tokens / 1000).toFixed(1)}k` : '—';
-        const cachePct = `${Math.round((sub.cache_hit_ratio || 0) * 100)}%`;
+        const ctxFull = sub.total_tokens > 0 ? `${(sub.total_tokens / 1000).toFixed(1)}k` : '—';
+        const ctxShort = sub.total_tokens > 0
+          ? (sub.total_tokens >= 100000 ? `${Math.round(sub.total_tokens / 1000)}k` : `${(sub.total_tokens / 1000).toFixed(1)}k`)
+          : '—';
+        const cachePctNum = Math.round((sub.cache_hit_ratio || 0) * 100);
+        const cachePct = `${cachePctNum}%`;
         const hyperTxt = sub.hyper_tool_calls > 0 ? ` · ⚡${sub.hyper_tool_calls}` : '';
-        const hCls = sub.health === 'red' ? 'err' : sub.health === 'yellow' ? 'warn' : 'ok';
-        const hLbl = sub.health === 'red' ? 'RED' : sub.health === 'yellow' ? 'WARN' : 'OK';
+        const cumTxt = fmtTokens(sub.cumulative_tokens || 0);
+        const turns = sub.total_turns || 0;
+        const tipKey = sub.active
+          ? 'subagents.row_tooltip_active'
+          : sub.health === 'red'
+            ? 'subagents.row_tooltip_done_peak'
+            : 'subagents.row_tooltip_done';
+        const rowTip = t(tipKey, {
+          ctx: ctxFull,
+          cum: cumTxt,
+          turns,
+          cache: cachePctNum,
+        });
+
+        let statsHtml;
+        if (sub.active) {
+          const hCls = sub.health === 'red' ? 'err' : sub.health === 'yellow' ? 'warn' : 'ok';
+          const hLbl = sub.health === 'red' ? 'RED' : sub.health === 'yellow' ? 'WARN' : 'OK';
+          statsHtml = `
+              <span>${escapeHtml(ctxFull)}</span>
+              <span>${escapeHtml(cachePct)}${escapeHtml(hyperTxt)}</span>
+              <span class="status-pill ${hCls}">${hLbl}</span>`;
+        } else {
+          const pillCls = sub.health === 'red' ? 'muted-peak' : 'muted';
+          const doneLbl = ctxShort !== '—'
+            ? t('subagents.done_ctx', { ctx: ctxShort })
+            : t('subagents.done_pill');
+          statsHtml = `
+              <span>${escapeHtml(cachePct)}${escapeHtml(hyperTxt)}</span>
+              <span class="status-pill ${pillCls}">${escapeHtml(doneLbl)}</span>`;
+        }
+
         return `
-          <button type="button" class="subagent-row${isSel ? ' selected' : ''}" data-subconv="${escapeHtml(sub.conversation_id)}">
+          <button type="button" class="subagent-row${sub.active ? '' : ' done'}${isSel ? ' selected' : ''}" data-subconv="${escapeHtml(sub.conversation_id)}" title="${escapeHtml(rowTip)}">
             <span class="subagent-row-main">
               <i class="subagent-dot${sub.active ? ' live' : ''}"></i>
               <span class="subagent-role">${escapeHtml(role)}</span>
-              <span class="subagent-title" title="${escapeHtml(title)}">${escapeHtml(title)}</span>
+              <span class="subagent-title">${escapeHtml(title)}</span>
             </span>
-            <span class="subagent-stats">
-              <span>${escapeHtml(ctx)}</span>
-              <span>${escapeHtml(cachePct)}${escapeHtml(hyperTxt)}</span>
-              <span class="status-pill ${hCls}">${hLbl}</span>
+            <span class="subagent-stats">${statsHtml}
             </span>
           </button>`;
       })
@@ -353,11 +385,20 @@
     renderSubagentStrip(tree, activeConvId, onSelectSession);
     renderSessionUsageRibbon(snap);
 
+    const selectedSub = tree?.selected_is_subagent
+      ? (tree.subagents || []).find((s) => s.conversation_id === activeConvId) || null
+      : null;
+
     const hChip = $('health-chip');
     hChip.className = 'status-pill';
-    if (pulse?.health === 'red') {
+    hChip.title = '';
+    if (selectedSub && !selectedSub.active) {
+      hChip.classList.add(pulse?.health === 'red' ? 'muted-peak' : 'muted');
+      hChip.textContent = t('subagents.done_pill');
+      if (pulse?.health === 'red') hChip.title = t('subagents.done_peak_hint');
+    } else if (pulse?.health === 'red') {
       hChip.classList.add('err');
-      hChip.textContent = t('pulse.redline');
+      hChip.textContent = selectedSub ? t('subagents.live_redline') : t('pulse.redline');
     } else if (pulse?.health === 'yellow') {
       hChip.classList.add('warn');
       hChip.textContent = t('pulse.warming');

@@ -322,6 +322,15 @@ button:focus-visible, select:focus-visible, input:focus-visible {
   background: var(--err-soft);
   color: var(--err);
 }
+.status-pill.muted {
+  background: var(--track);
+  color: var(--fg-muted);
+}
+.status-pill.muted-peak {
+  background: var(--track);
+  color: var(--fg);
+  border: 1px solid var(--line-strong);
+}
 
 /* Toast */
 .toast {
@@ -1026,6 +1035,9 @@ button:focus-visible, select:focus-visible, input:focus-visible {
 .subagent-row.selected {
   border-color: var(--accent);
   background: var(--accent-soft);
+}
+.subagent-row.done .subagent-title {
+  color: var(--fg-muted);
 }
 
 .subagent-row-main {

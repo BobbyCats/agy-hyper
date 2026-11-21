@@ -54,8 +54,15 @@
     "active_badge": "{{count}} 运行中",
     "redline_badge": "{{count}} 红线",
     "back_parent": "← 返回主窗",
-    "tree_meta": "整树: {{turns}} 轮 · {{tokens}} · 缓存 {{cache}}%",
-    "sub_badge": "{{count}} 子代理"
+    "tree_meta": "整树累计 {{turns}}轮 · {{tokens}} · 缓存{{cache}}% · 行内为单窗",
+    "sub_badge": "{{count}} 子代理",
+    "done_pill": "已结束",
+    "done_ctx": "已结束 · {{ctx}}",
+    "done_peak_hint": "该子代理已结束（历史峰值曾超红线，与主窗口物理隔离）",
+    "live_redline": "红线 · 建议收尾",
+    "row_tooltip_active": "运行中 · 单窗 {{ctx}} · 累计 {{cum}}（{{turns}} 轮）· 缓存 {{cache}}%",
+    "row_tooltip_done": "已结束 · 末轮单窗 {{ctx}} · 累计 {{cum}}（{{turns}} 轮）· 缓存 {{cache}}%",
+    "row_tooltip_done_peak": "已结束（历史峰值超红线）· 末轮单窗 {{ctx}} · 累计 {{cum}}（{{turns}} 轮）· 缓存 {{cache}}%"
   },
   "pulse": {
     "heading": "Prompt 缓存保鲜窗口",

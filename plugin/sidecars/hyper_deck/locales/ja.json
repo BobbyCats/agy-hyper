@@ -54,8 +54,15 @@
     "active_badge": "{{count}} 稼働中",
     "redline_badge": "{{count}} 上限",
     "back_parent": "← 親セッション",
-    "tree_meta": "ツリー計: {{turns}} ターン · {{tokens}} · {{cache}}%",
-    "sub_badge": "{{count}} サブ"
+    "tree_meta": "累計 {{turns}}T · {{tokens}} · {{cache}}% · 行内は単窓",
+    "sub_badge": "{{count}} サブ",
+    "done_pill": "完了",
+    "done_ctx": "完了 · {{ctx}}",
+    "done_peak_hint": "完了済サブエージェント（過去ピークが上限超過・親窓とは隔離）",
+    "live_redline": "上限 · 完了推奨",
+    "row_tooltip_active": "稼働中 · 単窓 {{ctx}} · 累計 {{cum}}（{{turns}} ターン）· キャッシュ {{cache}}%",
+    "row_tooltip_done": "完了 · 最終単窓 {{ctx}} · 累計 {{cum}}（{{turns}} ターン）· キャッシュ {{cache}}%",
+    "row_tooltip_done_peak": "完了（ピーク上限超過）· 最終単窓 {{ctx}} · 累計 {{cum}}（{{turns}} ターン）· キャッシュ {{cache}}%"
   },
   "pulse": {
     "heading": "プロンプトキャッシュ保温ウィンドウ",

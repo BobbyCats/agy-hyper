@@ -54,8 +54,15 @@
     "active_badge": "{{count}} active",
     "redline_badge": "{{count}} redline",
     "back_parent": "← Parent",
-    "tree_meta": "Tree: {{turns}} turns · {{tokens}} · {{cache}}% cache",
-    "sub_badge": "{{count}} sub"
+    "tree_meta": "Tree cum: {{turns}}t · {{tokens}} · {{cache}}% · rows: ctx",
+    "sub_badge": "{{count}} sub",
+    "done_pill": "DONE",
+    "done_ctx": "DONE · {{ctx}}",
+    "done_peak_hint": "Completed subagent (peaked above redline; isolated from parent window)",
+    "live_redline": "Redline · Wrap up",
+    "row_tooltip_active": "Active · window {{ctx}} · cum {{cum}} ({{turns}} turns) · cache {{cache}}%",
+    "row_tooltip_done": "Finished · final window {{ctx}} · cum {{cum}} ({{turns}} turns) · cache {{cache}}%",
+    "row_tooltip_done_peak": "Finished (peaked above redline) · final window {{ctx}} · cum {{cum}} ({{turns}} turns) · cache {{cache}}%"
   },
   "pulse": {
     "heading": "Prompt Cache Warmth",
