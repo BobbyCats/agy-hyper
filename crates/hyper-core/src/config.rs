@@ -1,5 +1,6 @@
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -10,6 +11,36 @@ pub const DEFAULT_YELLOW_STEPS: u64 = 160;
 pub const DEFAULT_RED_STEPS: u64 = 300;
 pub const DEFAULT_CACHE_WARM_SECS: u64 = 240;
 pub const DEFAULT_MULTIMODAL_CLIFF_TOKENS: u64 = 180_000;
+
+pub const SUPPORTED_CURRENCIES: &[&str] = &["USD", "CNY", "JPY", "EUR", "GBP", "HKD", "SGD", "KRW"];
+
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct ModelPriceRate {
+    pub input_per_m: f64,
+    pub cache_read_per_m: f64,
+    pub output_per_m: f64,
+}
+
+pub fn default_currency() -> String {
+    "USD".to_string()
+}
+
+pub fn default_fx_source() -> String {
+    "offline".to_string()
+}
+
+pub fn default_fx_rates() -> BTreeMap<String, f64> {
+    BTreeMap::from([
+        ("CNY".to_string(), 7.25),
+        ("EUR".to_string(), 0.92),
+        ("GBP".to_string(), 0.79),
+        ("HKD".to_string(), 7.78),
+        ("JPY".to_string(), 154.0),
+        ("KRW".to_string(), 1390.0),
+        ("SGD".to_string(), 1.34),
+        ("USD".to_string(), 1.0),
+    ])
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -61,6 +92,16 @@ pub struct HyperConfig {
     pub allow_custom_argv_checks: bool,
     pub max_wal_entries: usize,
     pub enable_ui_pill: bool,
+    #[serde(default = "default_currency")]
+    pub display_currency: String,
+    #[serde(default = "default_fx_rates")]
+    pub fx_rates: BTreeMap<String, f64>,
+    #[serde(default)]
+    pub fx_updated_at_ms: Option<u64>,
+    #[serde(default = "default_fx_source")]
+    pub fx_source: String,
+    #[serde(default)]
+    pub pricing_overrides: BTreeMap<String, ModelPriceRate>,
 }
 
 impl Default for HyperConfig {
@@ -80,6 +121,11 @@ impl Default for HyperConfig {
             allow_custom_argv_checks: true,
             max_wal_entries: 100,
             enable_ui_pill: true,
+            display_currency: default_currency(),
+            fx_rates: default_fx_rates(),
+            fx_updated_at_ms: None,
+            fx_source: default_fx_source(),
+            pricing_overrides: BTreeMap::new(),
         }
     }
 }
@@ -101,6 +147,81 @@ impl HyperConfig {
             "enable_ui_pill" => self.enable_ui_pill = value,
             _ => anyhow::bail!("unknown config toggle '{}'", key),
         }
+        Ok(())
+    }
+
+    pub fn effective_fx_rates(&self) -> BTreeMap<String, f64> {
+        let mut merged = default_fx_rates();
+        for (code, rate) in &self.fx_rates {
+            let norm = code.trim().to_ascii_uppercase();
+            if SUPPORTED_CURRENCIES.contains(&norm.as_str())
+                && rate.is_finite()
+                && *rate > 0.0
+                && *rate < 1_000_000.0
+            {
+                merged.insert(norm, *rate);
+            }
+        }
+        merged.insert("USD".to_string(), 1.0);
+        merged
+    }
+
+    pub fn fx_rate_for(&self, currency: &str) -> (String, f64) {
+        let norm = currency.trim().to_ascii_uppercase();
+        let rates = self.effective_fx_rates();
+        if let Some(&r) = rates.get(&norm) {
+            (norm, r)
+        } else {
+            ("USD".to_string(), 1.0)
+        }
+    }
+
+    pub fn set_currency(&mut self, currency: &str) -> Result<String> {
+        let norm = currency.trim().to_ascii_uppercase();
+        if !SUPPORTED_CURRENCIES.contains(&norm.as_str()) {
+            anyhow::bail!(
+                "unsupported currency '{}' (supported: {})",
+                currency,
+                SUPPORTED_CURRENCIES.join(", ")
+            );
+        }
+        self.display_currency = norm.clone();
+        Ok(norm)
+    }
+
+    pub fn update_fx_rates(
+        &mut self,
+        incoming: BTreeMap<String, f64>,
+        source: &str,
+        updated_at_ms: u64,
+    ) -> Result<()> {
+        let mut merged = self.effective_fx_rates();
+        let mut applied = 0usize;
+        for (code, rate) in incoming {
+            let norm = code.trim().to_ascii_uppercase();
+            if norm == "USD" {
+                continue;
+            }
+            if SUPPORTED_CURRENCIES.contains(&norm.as_str())
+                && rate.is_finite()
+                && rate > 0.0
+                && rate < 1_000_000.0
+            {
+                merged.insert(norm, (rate * 10_000.0).round() / 10_000.0);
+                applied += 1;
+            }
+        }
+        if applied == 0 {
+            anyhow::bail!("no valid currency rates provided");
+        }
+        merged.insert("USD".to_string(), 1.0);
+        self.fx_rates = merged;
+        self.fx_source = match source.trim().to_ascii_lowercase().as_str() {
+            "live" => "live".to_string(),
+            "custom" => "custom".to_string(),
+            _ => "offline".to_string(),
+        };
+        self.fx_updated_at_ms = Some(updated_at_ms);
         Ok(())
     }
 
@@ -130,6 +251,10 @@ impl HyperConfig {
 
     pub fn config_path() -> PathBuf {
         Self::data_dir().join("config.json")
+    }
+
+    pub fn ledger_path() -> PathBuf {
+        Self::data_dir().join("usage_ledger.json")
     }
 
     pub fn load() -> Self {

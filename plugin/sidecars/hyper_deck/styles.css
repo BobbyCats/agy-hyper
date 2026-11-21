@@ -743,19 +743,25 @@ button:focus-visible, select:focus-visible, input:focus-visible {
 .pro-tabs {
   display: flex;
   align-items: center;
-  gap: 4px;
+  gap: 2px;
   border-bottom: 1px solid var(--line);
   padding: 0 2px;
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+.pro-tabs::-webkit-scrollbar {
+  display: none;
 }
 
 .pro-tab {
   position: relative;
   color: var(--fg-muted);
-  font-size: 12px;
+  font-size: 11.5px;
   font-weight: 600;
-  padding: 7px 10px 8px;
+  padding: 7px 8px 8px;
   cursor: pointer;
   white-space: nowrap;
+  flex-shrink: 0;
   transition: color 140ms ease;
 }
 .pro-tab:hover {
@@ -1076,6 +1082,137 @@ button:focus-visible, select:focus-visible, input:focus-visible {
 .btn-xs {
   font-size: 10.5px;
   padding: 2px 8px;
+}
+
+/* Session Cumulative Usage Ribbon (Simple Mode) */
+.usage-ribbon {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  padding: 6px 11px;
+  border-top: 1px solid var(--line);
+  background: var(--field);
+}
+
+.usage-ribbon-main {
+  display: inline-flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  min-width: 0;
+  flex: 1 1 auto;
+  text-align: left;
+  cursor: pointer;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  color: var(--fg);
+}
+.usage-ribbon-main:hover .usage-ribbon-cost {
+  text-decoration: underline;
+}
+
+.usage-ribbon-lbl {
+  font-family: var(--font-sans);
+  font-size: 10.5px;
+  font-weight: 600;
+  color: var(--fg-muted);
+}
+
+.usage-ribbon-tok {
+  color: var(--fg-muted);
+}
+
+.usage-ribbon-cost {
+  font-weight: 700;
+  color: var(--accent);
+}
+
+.usage-ribbon-saved {
+  font-size: 10.5px;
+  font-weight: 600;
+  color: var(--ok);
+}
+
+.ccy-select {
+  border: 1px solid var(--line);
+  background: var(--surface);
+  color: var(--fg);
+  border-radius: 6px;
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  font-weight: 600;
+  padding: 2px 5px;
+  cursor: pointer;
+  flex-shrink: 0;
+}
+
+/* Usage Ledger Tab (Pro Mode) */
+.usage-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 6px 8px;
+  margin-bottom: 10px;
+}
+
+.seg-inline {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px;
+  border-radius: 7px;
+  background: var(--field);
+  border: 1px solid var(--line);
+  gap: 2px;
+}
+
+.win-btn, .metric-btn {
+  color: var(--fg-muted);
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  font-weight: 600;
+  padding: 2px 7px;
+  border-radius: 5px;
+  cursor: pointer;
+  transition: background 140ms ease, color 140ms ease;
+}
+.win-btn.active, .metric-btn.active {
+  background: var(--surface);
+  color: var(--fg);
+}
+
+.usage-fx-controls {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.mini-kpi strong.accent { color: var(--accent); }
+.mini-kpi strong.ok { color: var(--ok); }
+
+.usage-note {
+  margin-bottom: 8px;
+}
+
+.chart-usage {
+  width: 100%;
+  height: 185px;
+}
+
+.prop-row.muted-row .prop-fill {
+  background: var(--hover);
+}
+.prop-row.muted-row .prop-label {
+  color: var(--fg-muted);
+}
+
+.usage-footnote {
+  margin-top: 10px;
+  font-size: 10.5px;
+  line-height: 1.45;
+  color: var(--fg-muted);
 }
 
 @media (max-width: 420px) {

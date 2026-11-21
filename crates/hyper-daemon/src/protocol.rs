@@ -3,9 +3,10 @@ use hyper_core::config::HyperConfig;
 use hyper_core::context_pack::ContextPackRequest;
 use hyper_core::sessions::SessionSummary;
 use hyper_core::transcript::{HealthLevel, TranscriptPulse};
+use hyper_core::usage::SessionUsageSummary;
 use hyper_core::wal::{RollbackResult, WalManifest};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case")]
@@ -65,12 +66,30 @@ pub enum DaemonRequest {
         #[serde(default)]
         transcript_path: Option<String>,
     },
+    UsageSummary {
+        #[serde(default = "default_usage_window")]
+        window: String,
+        #[serde(default)]
+        currency: Option<String>,
+        #[serde(default)]
+        tz_offset_mins: Option<i32>,
+        #[serde(default)]
+        force_sync: bool,
+    },
     SetProfile {
         profile: String,
     },
     SetToggle {
         key: String,
         value: bool,
+    },
+    SetCurrency {
+        currency: String,
+    },
+    UpdateFxRates {
+        rates: BTreeMap<String, f64>,
+        #[serde(default)]
+        source: Option<String>,
     },
     RollbackTx {
         tx_id: String,
@@ -82,6 +101,10 @@ pub enum DaemonRequest {
 
 fn default_drill_limit() -> usize {
     80
+}
+
+fn default_usage_window() -> String {
+    "7d".to_string()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -184,6 +207,8 @@ pub struct CockpitSnapshot {
     pub recent_sessions: Vec<SessionSummary>,
     #[serde(default)]
     pub session_tree: Option<SessionTreeSummary>,
+    #[serde(default)]
+    pub session_usage: Option<SessionUsageSummary>,
     pub transactions: Vec<WalManifest>,
     pub recent_events: Vec<AuditEvent>,
 }

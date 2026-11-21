@@ -113,6 +113,26 @@
 
         <!-- Telemetry Breakdown Table -->
         <div id="hero-breakdown" class="breakdown-list"></div>
+
+        <!-- Session / Tree Cumulative Token & Value Ribbon -->
+        <div id="session-usage-ribbon" class="usage-ribbon hidden">
+          <button id="btn-open-usage" type="button" class="usage-ribbon-main" title="Open Usage Ledger">
+            <span id="s-usage-label" class="usage-ribbon-lbl">Session</span>
+            <span id="s-usage-tokens" class="usage-ribbon-tok">—</span>
+            <span id="s-usage-cost" class="usage-ribbon-cost">—</span>
+            <span id="s-usage-saved" class="usage-ribbon-saved hidden"></span>
+          </button>
+          <select id="simple-currency-select" class="ccy-select" aria-label="Currency">
+            <option value="USD">USD</option>
+            <option value="CNY">CNY</option>
+            <option value="JPY">JPY</option>
+            <option value="EUR">EUR</option>
+            <option value="GBP">GBP</option>
+            <option value="HKD">HKD</option>
+            <option value="SGD">SGD</option>
+            <option value="KRW">KRW</option>
+          </select>
+        </div>
       </section>
 
       <!-- Compact Horizontal Prompt Cache Warmth Meter -->
@@ -187,6 +207,7 @@
       <nav class="pro-tabs" role="tablist">
         <button type="button" class="pro-tab active" data-protab="waterfall" data-i18n="tabs.waterfall">Waterfall</button>
         <button type="button" class="pro-tab" data-protab="context" data-i18n="tabs.context">Context</button>
+        <button type="button" class="pro-tab" data-protab="usage" data-i18n="tabs.usage">Usage</button>
         <button type="button" class="pro-tab" data-protab="engine" data-i18n="tabs.engine">Engine</button>
         <button type="button" class="pro-tab" data-protab="security" data-i18n="tabs.security">WAL &amp; Audit</button>
       </nav>
@@ -225,6 +246,72 @@
           <div id="chart-ctx-pro" class="chart-ctx-pro"></div>
         </div>
         <div id="ctx-breakdown" class="breakdown-list"></div>
+      </section>
+
+      <!-- Pro Tab 3: Incremental Usage & API-Equivalent Value Ledger -->
+      <section id="protab-usage" class="panel hidden">
+        <div class="usage-toolbar">
+          <div class="seg-inline" role="group" aria-label="Time window">
+            <button type="button" class="win-btn" data-uwin="24h">24H</button>
+            <button type="button" class="win-btn active" data-uwin="7d">7D</button>
+            <button type="button" class="win-btn" data-uwin="30d">30D</button>
+            <button type="button" class="win-btn" data-uwin="90d">90D</button>
+          </div>
+          <div class="usage-fx-controls">
+            <select id="usage-currency-select" class="ccy-select" aria-label="Currency">
+              <option value="USD">USD</option>
+              <option value="CNY">CNY</option>
+              <option value="JPY">JPY</option>
+              <option value="EUR">EUR</option>
+              <option value="GBP">GBP</option>
+              <option value="HKD">HKD</option>
+              <option value="SGD">SGD</option>
+              <option value="KRW">KRW</option>
+            </select>
+            <button id="btn-sync-fx" type="button" class="btn-ghost btn-xs" data-i18n="usage.sync_fx">Sync FX</button>
+          </div>
+        </div>
+
+        <div class="kpi-strip-4">
+          <div class="mini-kpi">
+            <span data-i18n="usage.kpi_cost">Est. Value</span>
+            <strong id="u-cost" class="accent">—</strong>
+          </div>
+          <div class="mini-kpi">
+            <span data-i18n="usage.kpi_saved">Cache Saved</span>
+            <strong id="u-saved" class="ok">—</strong>
+          </div>
+          <div class="mini-kpi">
+            <span data-i18n="usage.kpi_tokens">Tokens</span>
+            <strong id="u-tokens">—</strong>
+          </div>
+          <div class="mini-kpi">
+            <span data-i18n="usage.kpi_cache">Cache Hit</span>
+            <strong id="u-cache">—</strong>
+          </div>
+        </div>
+
+        <div id="u-attr-banner" class="inline-alert usage-note hidden"></div>
+
+        <div class="panel-head tight">
+          <span id="usage-chart-title" class="chart-caption" data-i18n="usage.trend_daily">Daily Trend</span>
+          <div class="seg-inline" role="group" aria-label="Chart metric">
+            <button type="button" class="metric-btn active" data-umetric="cost" data-i18n="usage.metric_cost">Value</button>
+            <button type="button" class="metric-btn" data-umetric="tokens" data-i18n="usage.metric_tokens">Tokens</button>
+          </div>
+        </div>
+        <div id="chart-usage" class="chart-usage"></div>
+
+        <div class="hairline"></div>
+        <div class="subhead-row">
+          <h3 class="sub-title" data-i18n="usage.models_heading">By Model</h3>
+          <span id="u-fx-meta" class="mono-tag">USD · Offline</span>
+        </div>
+        <div id="usage-models" class="prop-list"></div>
+
+        <p class="usage-footnote" data-i18n="usage.footnote">
+          API-equivalent reference estimate from local transcripts. Customize rates or FX in ~/.gemini/antigravity/agy-hyper/config.json.
+        </p>
       </section>
 
       <!-- Pro Tab 3: Rust Daemon, In-Memory AST/Pack Cache & Tool Mix -->

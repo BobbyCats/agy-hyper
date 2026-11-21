@@ -92,6 +92,41 @@
     return `${(ms / 1000).toFixed(1)}s`;
   }
 
+  const CURRENCY_SYMBOLS = {
+    USD: '$',
+    CNY: '¥',
+    JPY: '¥',
+    EUR: '€',
+    GBP: '£',
+    HKD: 'HK$',
+    SGD: 'S$',
+    KRW: '₩',
+  };
+
+  function fmtTokens(n) {
+    const v = Number(n || 0);
+    if (v >= 1_000_000_000) return `${(v / 1_000_000_000).toFixed(2)}B`;
+    if (v >= 1_000_000) return `${(v / 1_000_000).toFixed(2)}M`;
+    if (v >= 1_000) return `${(v / 1_000).toFixed(1)}k`;
+    return String(Math.round(v));
+  }
+
+  function fmtCurrency(amount, currency = 'USD') {
+    const code = String(currency || 'USD').toUpperCase();
+    const sym = CURRENCY_SYMBOLS[code] || `${code} `;
+    const val = Number(amount || 0);
+    if (!Number.isFinite(val) || val <= 0) {
+      return code === 'JPY' || code === 'KRW' ? `${sym}0` : `${sym}0.00`;
+    }
+    const zeroDec = code === 'JPY' || code === 'KRW';
+    const digits = zeroDec ? (val < 10 ? 1 : 0) : val < 0.01 ? 3 : 2;
+    const formatted = val.toLocaleString('en-US', {
+      minimumFractionDigits: digits,
+      maximumFractionDigits: digits,
+    });
+    return `${sym}${formatted}`;
+  }
+
   function fmtRelTime(tsMs) {
     if (!tsMs) return '';
     const diffSec = Math.max(0, Math.floor((Date.now() - tsMs) / 1000));
@@ -176,6 +211,8 @@
     initThemeSync,
     showToast,
     fmtSec,
+    fmtTokens,
+    fmtCurrency,
     fmtRelTime,
     escapeHtml,
     renderBreakdown,

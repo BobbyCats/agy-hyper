@@ -286,6 +286,140 @@ async function rollbackTx(txId, force = false) {
   return { ok: true, result };
 }
 
+const SUPPORTED_FX_CODES = ['CNY', 'JPY', 'EUR', 'GBP', 'HKD', 'SGD', 'KRW'];
+
+async function getUsageSummary(windowName = '7d', currency = '', tzOffsetMins = 0, forceSync = false) {
+  const win = String(windowName || '7d');
+  const tz = Number.isFinite(Number(tzOffsetMins)) ? Math.trunc(Number(tzOffsetMins)) : 0;
+  try {
+    const resp = await callDaemon(
+      {
+        op: 'usage_summary',
+        window: win,
+        currency: currency || null,
+        tz_offset_mins: tz,
+        force_sync: Boolean(forceSync),
+      },
+      4500
+    );
+    if (resp?.status === 'ok') return resp.data;
+    if (resp?.status === 'err') return { error: resp.message };
+  } catch {
+    // fallback CLI
+  }
+  const args = ['usage', '--json', '--window', win, '--tz-offset-mins', String(tz)];
+  if (currency) args.push('--currency', String(currency));
+  if (forceSync) args.push('--force-sync');
+  return await runCliJson(args);
+}
+
+async function setCurrency(currency) {
+  const code = String(currency || 'USD').trim().toUpperCase();
+  try {
+    const resp = await callDaemon({ op: 'set_currency', currency: code });
+    if (resp?.status === 'ok') return { ok: true, config: resp.data };
+    if (resp?.status === 'err') return { ok: false, error: resp.message };
+  } catch {
+    // fallback CLI
+  }
+  await new Promise((res, rej) => {
+    execFile(resolveHyperBin(), ['config', 'currency', code], { timeout: 3000 }, (err, _o, e) => {
+      if (err) rej(new Error(e || err.message));
+      else res();
+    });
+  });
+  return { ok: true };
+}
+
+async function fetchJsonWithTimeout(url, timeoutMs = 4500) {
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), timeoutMs);
+  try {
+    const res = await fetch(url, {
+      method: 'GET',
+      headers: { Accept: 'application/json' },
+      signal: ctrl.signal,
+    });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    return await res.json();
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function syncLiveFxRates() {
+  const providers = [
+    {
+      name: 'frankfurter',
+      url: `https://api.frankfurter.dev/v1/latest?base=USD&symbols=${SUPPORTED_FX_CODES.join(',')}`,
+    },
+    {
+      name: 'open-er-api',
+      url: 'https://open.er-api.com/v6/latest/USD',
+    },
+  ];
+
+  let rawRates = null;
+  let providerName = '';
+  let lastErr = 'network unavailable';
+
+  for (const p of providers) {
+    try {
+      const payload = await fetchJsonWithTimeout(p.url, 4500);
+      if (payload && typeof payload.rates === 'object' && payload.rates) {
+        rawRates = payload.rates;
+        providerName = p.name;
+        break;
+      }
+    } catch (e) {
+      lastErr = String(e?.message || e);
+    }
+  }
+
+  if (!rawRates) {
+    return { ok: false, error: `FX sync failed (${lastErr})` };
+  }
+
+  const rates = { USD: 1.0 };
+  let validCount = 0;
+  for (const code of SUPPORTED_FX_CODES) {
+    const val = Number(rawRates[code]);
+    if (Number.isFinite(val) && val > 0 && val < 1_000_000) {
+      rates[code] = Math.round(val * 10000) / 10000;
+      validCount += 1;
+    }
+  }
+  if (validCount === 0) {
+    return { ok: false, error: 'FX provider returned no usable rates' };
+  }
+
+  try {
+    const resp = await callDaemon({ op: 'update_fx_rates', rates, source: 'live' }, 3000);
+    if (resp?.status === 'ok') {
+      return { ok: true, provider: providerName, rates, config: resp.data };
+    }
+    if (resp?.status === 'err') return { ok: false, error: resp.message };
+  } catch {
+    // fallback: persist via config.json atomic write when daemon is cold
+  }
+
+  try {
+    const cfgPath = join(resolveDataDir(), 'config.json');
+    let cur = {};
+    if (existsSync(cfgPath)) {
+      cur = JSON.parse(readFileSync(cfgPath, 'utf8'));
+    }
+    cur.fx_rates = { ...(cur.fx_rates || {}), ...rates };
+    cur.fx_source = 'live';
+    cur.fx_updated_at_ms = Date.now();
+    mkdirSync(resolveDataDir(), { recursive: true });
+    writeFileSync(cfgPath, JSON.stringify(cur, null, 2), { mode: 0o600 });
+    return { ok: true, provider: providerName, rates, config: cur };
+  } catch (e) {
+    return { ok: false, error: String(e?.message || e) };
+  }
+}
+
 function writeNativeClipboard(text) {
   const s = String(text ?? '');
   if (!s || s.length > 256) {
@@ -364,6 +498,35 @@ async function startSidecarNative() {
     }
   }, 'POST');
 
+  app.api('/api/usage', async (data) => {
+    try {
+      return await getUsageSummary(
+        data?.window || '7d',
+        data?.currency || '',
+        data?.tzOffsetMins ?? 0,
+        data?.forceSync === '1' || data?.forceSync === true
+      );
+    } catch (e) {
+      return { error: String(e?.message || e) };
+    }
+  }, 'GET');
+
+  app.api('/api/currency', async (data) => {
+    try {
+      return await setCurrency(data?.currency || 'USD');
+    } catch (e) {
+      return { ok: false, error: String(e?.message || e) };
+    }
+  }, 'POST');
+
+  app.api('/api/fx/sync', async () => {
+    try {
+      return await syncLiveFxRates();
+    } catch (e) {
+      return { ok: false, error: String(e?.message || e) };
+    }
+  }, 'POST');
+
   app.api('/api/clipboard', async (data) => {
     return writeNativeClipboard(data?.text || '');
   }, 'POST');
@@ -436,6 +599,22 @@ function startStandaloneHttp() {
       if (pathname === '/api/rollback' && req.method === 'POST') {
         const body = await readBody(req);
         return sendJson(200, await rollbackTx(body.tx_id || '', Boolean(body.force)));
+      }
+      if (pathname === '/api/usage' && req.method === 'GET') {
+        const rep = await getUsageSummary(
+          url.searchParams.get('window') || '7d',
+          url.searchParams.get('currency') || '',
+          url.searchParams.get('tzOffsetMins') || '0',
+          url.searchParams.get('forceSync') === '1'
+        );
+        return sendJson(200, rep);
+      }
+      if (pathname === '/api/currency' && req.method === 'POST') {
+        const body = await readBody(req);
+        return sendJson(200, await setCurrency(body.currency || 'USD'));
+      }
+      if (pathname === '/api/fx/sync' && req.method === 'POST') {
+        return sendJson(200, await syncLiveFxRates());
       }
       if (pathname === '/api/clipboard' && req.method === 'POST') {
         const body = await readBody(req);

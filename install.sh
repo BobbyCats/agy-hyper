@@ -68,6 +68,9 @@ if [[ -n "$SCRIPT_DIR" && -f "${SCRIPT_DIR}/Cargo.toml" && -d "${SCRIPT_DIR}/plu
   ln -sf "${PLUGIN_DIR}/bin/agy-hyper" "${BIN_LINK}"
   recycle_sidecar
   echo "✓ Installed local build to ${PLUGIN_DIR}"
+  if pgrep -f "agy-hyper mcp" >/dev/null 2>&1; then
+    echo "ℹ Running MCP server detected; reload plugin in Antigravity if you updated MCP tool handlers."
+  fi
   "${PLUGIN_DIR}/bin/agy-hyper" doctor
   exit 0
 fi

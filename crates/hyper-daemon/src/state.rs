@@ -14,11 +14,15 @@ use hyper_core::sessions::{
     resolve_root_conversation_id,
 };
 use hyper_core::transcript::{inspect_transcript_tail, resolve_transcript_path, HealthLevel};
+use hyper_core::usage::{
+    build_session_usage, default_brain_dirs, now_epoch_ms, TokenBucket, UsageLedger, UsageWindow,
+    UsageWindowReport,
+};
 use hyper_core::wal::{list_transactions, rollback_transaction, RollbackResult};
 use notify::event::ModifyKind;
 use notify::{Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, VecDeque};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -84,6 +88,46 @@ impl BenchCache {
     }
 }
 
+#[derive(Debug, Default)]
+pub struct UsageLedgerCache {
+    loaded: bool,
+    ledger: UsageLedger,
+    last_sync: Option<Instant>,
+}
+
+impl UsageLedgerCache {
+    pub fn query_window(
+        &mut self,
+        window: UsageWindow,
+        cfg: &HyperConfig,
+        currency: Option<&str>,
+        tz_offset_mins: i32,
+        force_sync: bool,
+    ) -> UsageWindowReport {
+        let ledger_path = HyperConfig::ledger_path();
+        if !self.loaded {
+            self.ledger = UsageLedger::load_from(&ledger_path);
+            self.loaded = true;
+        }
+        let now_ms = now_epoch_ms();
+        let should_sync = force_sync
+            || self
+                .last_sync
+                .is_none_or(|t| t.elapsed() >= Duration::from_secs(10));
+        let mut scan_ms = 0u64;
+        if should_sync {
+            let outcome = self.ledger.sync_from_dirs(&default_brain_dirs(), now_ms);
+            scan_ms = outcome.scan_ms;
+            if outcome.dirty {
+                let _ = self.ledger.save_to(&ledger_path);
+            }
+            self.last_sync = Some(Instant::now());
+        }
+        self.ledger
+            .query_window(window, cfg, currency, tz_offset_mins, now_ms, scan_ms)
+    }
+}
+
 pub struct DaemonState {
     started_at: Instant,
     config: HyperConfig,
@@ -95,6 +139,7 @@ pub struct DaemonState {
     prewarm_scheduled_rev: Arc<Mutex<HashMap<String, u64>>>,
     last_check_preset: Arc<Mutex<HashMap<String, String>>>,
     pub bench_cache: Arc<Mutex<BenchCache>>,
+    pub usage_cache: Arc<Mutex<UsageLedgerCache>>,
     ast_cache: AstOutlineCache,
     pack_cache: HashMap<String, (u64, u64, ContextPackResult)>,
     pack_seq: u64,
@@ -208,6 +253,7 @@ impl DaemonState {
             prewarm_scheduled_rev: Arc::new(Mutex::new(HashMap::new())),
             last_check_preset: Arc::new(Mutex::new(HashMap::new())),
             bench_cache: Arc::new(Mutex::new(BenchCache::default())),
+            usage_cache: Arc::new(Mutex::new(UsageLedgerCache::default())),
             ast_cache: AstOutlineCache::default(),
             pack_cache: HashMap::new(),
             pack_seq: 0,
@@ -619,6 +665,30 @@ impl DaemonState {
         Ok(self.config.clone())
     }
 
+    pub fn set_currency(&mut self, currency: &str) -> Result<HyperConfig, String> {
+        self.config
+            .set_currency(currency)
+            .map_err(|e| e.to_string())?;
+        self.config.save().map_err(|e| e.to_string())?;
+        Ok(self.config.clone())
+    }
+
+    pub fn update_fx_rates(
+        &mut self,
+        rates: BTreeMap<String, f64>,
+        source: Option<&str>,
+    ) -> Result<HyperConfig, String> {
+        self.config
+            .update_fx_rates(rates, source.unwrap_or("live"), now_ms())
+            .map_err(|e| e.to_string())?;
+        self.config.save().map_err(|e| e.to_string())?;
+        Ok(self.config.clone())
+    }
+
+    pub fn usage_parts(&self) -> (HyperConfig, Arc<Mutex<UsageLedgerCache>>) {
+        (self.config.clone(), self.usage_cache.clone())
+    }
+
     /// Capture lightweight in-memory state in `<10us` so heavy disk/transcript I/O runs lock-free.
     pub fn snapshot_parts(&self) -> (EngineStatus, HyperConfig, Vec<AuditEvent>, Arc<Mutex<BenchCache>>) {
         (
@@ -681,6 +751,7 @@ pub fn build_cockpit_snapshot(
         .map(|p| p.conversation_id.clone())
         .or_else(|| conversation_id.filter(|s| !s.trim().is_empty()).map(String::from));
 
+    let mut tree_model_usage: BTreeMap<String, TokenBucket> = BTreeMap::new();
     let session_tree = selected_id.as_deref().map(|sel_id| {
         let root_id = resolve_root_conversation_id(sel_id, &all_sessions);
         let selected_meta = all_sessions.iter().find(|s| s.conversation_id == sel_id);
@@ -698,6 +769,15 @@ pub fn build_cockpit_snapshot(
                 .find(|s| s.conversation_id == root_id)
                 .and_then(|s| analyze_path(Path::new(&s.transcript_path)))
         };
+
+        if let Some(rb) = &root_bench {
+            for (model, bucket) in &rb.model_usage {
+                tree_model_usage
+                    .entry(model.clone())
+                    .or_default()
+                    .add_assign(bucket);
+            }
+        }
 
         let mut combined_turns = root_bench.as_ref().map(|b| b.total_turns).unwrap_or(0);
         let mut combined_input = root_bench.as_ref().map(|b| b.total_input_tokens).unwrap_or(0);
@@ -717,6 +797,14 @@ pub fn build_cockpit_snapshot(
             let cp = Path::new(&child.transcript_path);
             let child_pulse = inspect_transcript_tail(cp, &config);
             let child_bench = analyze_path(cp);
+            if let Some(cb) = &child_bench {
+                for (model, bucket) in &cb.model_usage {
+                    tree_model_usage
+                        .entry(model.clone())
+                        .or_default()
+                        .add_assign(bucket);
+                }
+            }
 
             let health = child_pulse
                 .as_ref()
@@ -795,6 +883,19 @@ pub fn build_cockpit_snapshot(
         }
     });
 
+    let session_usage = benchmark.as_ref().map(|b| {
+        let sub_count = session_tree
+            .as_ref()
+            .map(|t| t.subagent_count)
+            .unwrap_or(0);
+        let tree_models = if tree_model_usage.is_empty() {
+            &b.model_usage
+        } else {
+            &tree_model_usage
+        };
+        build_session_usage(&config, &b.model_usage, tree_models, sub_count)
+    });
+
     let recent_sessions = all_sessions
         .into_iter()
         .filter(|s| !s.is_subagent)
@@ -809,6 +910,7 @@ pub fn build_cockpit_snapshot(
         benchmark,
         recent_sessions,
         session_tree,
+        session_usage,
         transactions,
         recent_events,
     }

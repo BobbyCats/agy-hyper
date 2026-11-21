@@ -1,18 +1,24 @@
 (() => {
   const { $, apiFetch, copyTextReliable, initThemeSync, showToast, t } = window.HyperDeck.api;
-  const { renderFullContextChart, renderHeroChart, renderWaterfallChart, resizeAllCharts } = window.HyperDeck.charts;
-  const { renderSnapshot, renderWarmthMeter } = window.HyperDeck.render;
+  const { renderFullContextChart, renderHeroChart, renderUsageChart, renderWaterfallChart, resizeAllCharts } = window.HyperDeck.charts;
+  const { renderSnapshot, renderUsageReport, renderWarmthMeter } = window.HyperDeck.render;
 
   const SUPPORTED_LANGS = ['en', 'zh-CN', 'ja'];
   const state = {
     lastSnap: null,
+    lastUsage: null,
     mode: 'simple',
     heroTab: 'context',
     proTab: 'waterfall',
     selectedConvId: '',
+    usageWindow: localStorage.getItem('agy-hyper-uwin') || '7d',
+    usageMetric: localStorage.getItem('agy-hyper-umetric') || 'cost',
   };
   let pollInFlight = false;
   let pollSeq = 0;
+  let usageInFlight = false;
+  let usageSeq = 0;
+  let lastUsageFetchMs = 0;
 
   function selectSession(convId) {
     state.selectedConvId = convId || '';
@@ -21,19 +27,23 @@
 
   function render() {
     if (state.lastSnap) renderSnapshot(state.lastSnap, state, triggerRollback, selectSession);
+    if (state.lastUsage && state.mode === 'pro' && state.proTab === 'usage') {
+      renderUsageReport(state.lastUsage, state);
+    }
   }
 
   function resizeVisibleCharts() {
     requestAnimationFrame(() => {
       resizeAllCharts();
-      if (!state.lastSnap) return;
       try {
-        if (state.mode === 'simple') {
+        if (state.mode === 'simple' && state.lastSnap) {
           renderHeroChart(state.lastSnap, state.heroTab);
-        } else if (state.proTab === 'waterfall') {
+        } else if (state.mode === 'pro' && state.proTab === 'waterfall' && state.lastSnap) {
           renderWaterfallChart(state.lastSnap.benchmark);
-        } else if (state.proTab === 'context') {
+        } else if (state.mode === 'pro' && state.proTab === 'context' && state.lastSnap) {
           renderFullContextChart(state.lastSnap);
+        } else if (state.mode === 'pro' && state.proTab === 'usage' && state.lastUsage) {
+          renderUsageChart(state.lastUsage, state.usageMetric);
         }
       } catch {
         // keep UI interactive
@@ -104,6 +114,9 @@
     $('btn-mode-pro').setAttribute('aria-selected', String(next === 'pro'));
     $('view-simple').classList.toggle('hidden', next !== 'simple');
     $('view-pro').classList.toggle('hidden', next !== 'pro');
+    if (next === 'pro' && state.proTab === 'usage') {
+      pollUsage(false);
+    }
     resizeVisibleCharts();
   }
 
@@ -124,10 +137,89 @@
     document.querySelectorAll('.pro-tab').forEach((btn) => {
       btn.classList.toggle('active', btn.dataset.protab === tab);
     });
-    ['waterfall', 'context', 'engine', 'security'].forEach((name) => {
-      $(`protab-${name}`).classList.toggle('hidden', name !== tab);
+    ['waterfall', 'context', 'usage', 'engine', 'security'].forEach((name) => {
+      const el = $(`protab-${name}`);
+      if (el) el.classList.toggle('hidden', name !== tab);
     });
+    if (tab === 'usage' && state.mode === 'pro') {
+      pollUsage(false);
+    }
     resizeVisibleCharts();
+  }
+
+  async function pollUsage(force = false) {
+    if (state.mode !== 'pro' || state.proTab !== 'usage') return;
+    if (usageInFlight && !force) return;
+    if (!force && state.lastUsage && state.lastUsage.window === state.usageWindow && Date.now() - lastUsageFetchMs < 15000) {
+      renderUsageReport(state.lastUsage, state);
+      return;
+    }
+    const seq = ++usageSeq;
+    usageInFlight = true;
+    try {
+      const q = new URLSearchParams();
+      q.set('window', state.usageWindow);
+      q.set('tzOffsetMins', String(-new Date().getTimezoneOffset()));
+      if (force) q.set('forceSync', '1');
+      const rep = await apiFetch(`/api/usage?${q.toString()}`, { method: 'GET' }).then((r) => r.json());
+      if (seq !== usageSeq) return;
+      if (!rep.error) {
+        state.lastUsage = rep;
+        lastUsageFetchMs = Date.now();
+        renderUsageReport(rep, state);
+      }
+    } catch {
+      // keep previous usage view intact
+    } finally {
+      if (seq === usageSeq) usageInFlight = false;
+    }
+  }
+
+  async function changeCurrency(code) {
+    const r = await apiFetch('/api/currency', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ currency: code }),
+    }).then((x) => x.json()).catch(() => ({ ok: false }));
+    if (r.ok) {
+      showToast(t('usage.toast_currency', { ccy: code }));
+      poll(true);
+      if (state.mode === 'pro' && state.proTab === 'usage') {
+        lastUsageFetchMs = 0;
+        pollUsage(true);
+      }
+    } else {
+      showToast(t('usage.toast_currency_err', { err: r.error || 'error' }));
+    }
+  }
+
+  async function syncLiveFx() {
+    const btn = $('btn-sync-fx');
+    if (!btn || btn.disabled) return;
+    btn.disabled = true;
+    const prev = btn.textContent;
+    btn.textContent = t('usage.syncing_fx');
+    try {
+      const r = await apiFetch('/api/fx/sync', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: '{}',
+      }).then((x) => x.json()).catch(() => ({ ok: false, error: 'network error' }));
+      if (r.ok) {
+        const ccy = state.lastUsage?.currency || state.lastSnap?.config?.display_currency || 'USD';
+        const rate = r.rates?.[ccy] ?? 1;
+        const detail = ccy === 'USD' ? r.provider : `1 USD = ${Number(rate).toFixed(2)} ${ccy}`;
+        showToast(t('usage.toast_fx_ok', { detail }));
+        lastUsageFetchMs = 0;
+        poll(true);
+        pollUsage(true);
+      } else {
+        showToast(t('usage.toast_fx_err', { err: r.error || 'offline' }));
+      }
+    } finally {
+      btn.disabled = false;
+      btn.textContent = prev;
+    }
   }
 
   async function triggerRollback(txId, force = false) {
@@ -206,6 +298,40 @@
     selectSession(rootId);
   });
 
+  $('btn-open-usage')?.addEventListener('click', () => {
+    setProTab('usage');
+    setMode('pro');
+  });
+
+  $('simple-currency-select')?.addEventListener('change', (e) => {
+    changeCurrency(e.target.value);
+  });
+
+  $('usage-currency-select')?.addEventListener('change', (e) => {
+    changeCurrency(e.target.value);
+  });
+
+  $('btn-sync-fx')?.addEventListener('click', () => {
+    syncLiveFx();
+  });
+
+  document.querySelectorAll('.win-btn[data-uwin]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      state.usageWindow = btn.dataset.uwin;
+      localStorage.setItem('agy-hyper-uwin', state.usageWindow);
+      lastUsageFetchMs = 0;
+      pollUsage(false);
+    });
+  });
+
+  document.querySelectorAll('.metric-btn[data-umetric]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      state.usageMetric = btn.dataset.umetric;
+      localStorage.setItem('agy-hyper-umetric', state.usageMetric);
+      if (state.lastUsage) renderUsageReport(state.lastUsage, state);
+    });
+  });
+
   document.querySelectorAll('.seg-btn[data-profile]').forEach((btn) => {
     btn.addEventListener('click', async () => {
       const profile = btn.dataset.profile;
@@ -255,13 +381,17 @@
   if (qs.get('conversationId')) state.selectedConvId = qs.get('conversationId');
   if (qs.get('mode') === 'pro') setMode('pro');
   if (['context', 'latency', 'cache', 'saved'].includes(qs.get('hero'))) setHeroTab(qs.get('hero'));
-  if (['waterfall', 'context', 'engine', 'security'].includes(qs.get('tab'))) setProTab(qs.get('tab'));
+  if (['waterfall', 'context', 'usage', 'engine', 'security'].includes(qs.get('tab'))) setProTab(qs.get('tab'));
 
   initI18n()
     .catch(() => {})
     .finally(() => {
       poll(true);
+      if (state.mode === 'pro' && state.proTab === 'usage') pollUsage(false);
       setInterval(() => poll(false), 2500);
+      setInterval(() => {
+        if (state.mode === 'pro' && state.proTab === 'usage') pollUsage(false);
+      }, 20000);
       setInterval(() => { if (state.lastSnap) renderWarmthMeter(state.lastSnap); }, 1000);
     });
 })();

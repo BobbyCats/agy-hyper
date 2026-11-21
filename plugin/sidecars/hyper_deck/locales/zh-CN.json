@@ -14,6 +14,7 @@
   "tabs": {
     "waterfall": "耗时瀑布",
     "context": "上下文轨迹",
+    "usage": "用量账本",
     "engine": "引擎与缓存",
     "security": "回滚与审计"
   },
@@ -152,5 +153,34 @@
     "blocked_badge": "已拦截 {{count}} 次",
     "blocked_tag": "已拦截",
     "audit_empty": "零信任审计流已就绪，工具调用与越界拦截将实时显示于此。"
+  },
+  "usage": {
+    "ribbon_session": "本会话",
+    "ribbon_tree": "整树 (+{{count}})",
+    "ribbon_saved": "缓存省 ≈ {{val}}",
+    "unattributed_short": "—（未标模型）",
+    "sync_fx": "同步汇率",
+    "syncing_fx": "同步中…",
+    "kpi_cost": "等价估值",
+    "kpi_saved": "缓存节省",
+    "kpi_tokens": "总 Token",
+    "kpi_cache": "缓存命中",
+    "sessions_hint": "{{sessions}} 个会话 · {{turns}} 轮",
+    "trend_hourly": "近 24 小时走势",
+    "trend_daily": "每日走势",
+    "metric_cost": "估值",
+    "metric_tokens": "Token",
+    "models_heading": "按模型分布",
+    "unattributed_row": "未标模型（历史旧日志）",
+    "unattributed_banner": "已标模型占比 {{pct}}%（另有 {{tokens}} 历史无模型 Token 计入总量，不虚估费用）。",
+    "fx_offline": "离线基准",
+    "fx_live": "实时汇率",
+    "fx_custom": "自定义汇率",
+    "empty": "该时间窗口内暂无记录。",
+    "footnote": "按公开 API 参考单价折算的等价估值（默认纯离线，仅手动点击“同步汇率”才联网）。可在 ~/.gemini/antigravity/agy-hyper/config.json 自定义模型单价与汇率。",
+    "toast_currency": "已切换显示货币为 {{ccy}}",
+    "toast_currency_err": "货币切换失败：{{err}}",
+    "toast_fx_ok": "实时汇率已更新（{{detail}}）",
+    "toast_fx_err": "汇率同步失败：{{err}}"
   }
 }

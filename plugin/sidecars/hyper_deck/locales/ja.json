@@ -14,6 +14,7 @@
   "tabs": {
     "waterfall": "ウォーターフォール",
     "context": "コンテキスト",
+    "usage": "使用量",
     "engine": "エンジン",
     "security": "WAL・監査"
   },
@@ -152,5 +153,34 @@
     "blocked_badge": "{{count}} 件遮断",
     "blocked_tag": "遮断",
     "audit_empty": "監査ストリーム待機中。ツール実行と越境ブロックがここに記録されます。"
+  },
+  "usage": {
+    "ribbon_session": "セッション",
+    "ribbon_tree": "ツリー (+{{count}})",
+    "ribbon_saved": "節約 ≈ {{val}}",
+    "unattributed_short": "— (モデル不明)",
+    "sync_fx": "為替同期",
+    "syncing_fx": "同期中…",
+    "kpi_cost": "推定価値",
+    "kpi_saved": "キャッシュ節約",
+    "kpi_tokens": "総トークン",
+    "kpi_cache": "キャッシュ率",
+    "sessions_hint": "{{sessions}} セッション · {{turns}} ターン",
+    "trend_hourly": "24時間推移",
+    "trend_daily": "日別推移",
+    "metric_cost": "金額",
+    "metric_tokens": "トークン",
+    "models_heading": "モデル別内訳",
+    "unattributed_row": "モデル未記録（旧ログ）",
+    "unattributed_banner": "モデル記録率 {{pct}}%（未記録の {{tokens}} はトークン総数に含め、推定金額から除外）。",
+    "fx_offline": "オフライン",
+    "fx_live": "最新為替",
+    "fx_custom": "カスタム為替",
+    "empty": "この期間の記録はまだありません。",
+    "footnote": "ローカルログからの API 換算推定値（自動通信なし）。単価・為替は ~/.gemini/antigravity/agy-hyper/config.json で調整可能です。",
+    "toast_currency": "表示通貨を {{ccy}} に変更しました",
+    "toast_currency_err": "通貨変更失敗: {{err}}",
+    "toast_fx_ok": "最新為替を反映しました（{{detail}}）",
+    "toast_fx_err": "為替同期失敗: {{err}}"
   }
 }

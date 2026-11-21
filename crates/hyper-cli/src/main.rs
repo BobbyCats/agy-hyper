@@ -8,11 +8,13 @@ use hyper_core::bench::{aggregate_sessions, render_waterfall_svg};
 use hyper_core::config::{HyperConfig, Profile};
 use hyper_core::git::quick_head;
 use hyper_core::sessions::discover_transcripts;
+use hyper_core::usage::{default_brain_dirs, now_epoch_ms, UsageLedger, UsageWindow, UsageWindowReport};
 use hyper_core::wal::{list_transactions, rollback_transaction};
 use hyper_daemon::client::{ensure_and_send, send_request, spawn_daemon_detached};
 use hyper_daemon::protocol::{DaemonRequest, DaemonResponse, EngineStatus};
 use hyper_daemon::server::{run_daemon_server, socket_path};
 use hyper_daemon::state::build_cockpit_snapshot;
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -77,6 +79,19 @@ enum Commands {
         #[arg(long)]
         transcript_path: Option<String>,
     },
+    /// Query incremental token and API-equivalent cost ledger (24h | 7d | 30d | 90d)
+    Usage {
+        #[arg(long, default_value = "7d")]
+        window: String,
+        #[arg(long)]
+        currency: Option<String>,
+        #[arg(long, default_value_t = 0)]
+        tz_offset_mins: i32,
+        #[arg(long)]
+        force_sync: bool,
+        #[arg(long)]
+        json: bool,
+    },
     /// Launch the standalone Hyper Deck web cockpit in your browser
     Ui {
         #[arg(long, default_value_t = 47821)]
@@ -128,6 +143,16 @@ enum ConfigAction {
         key: String,
         value: bool,
     },
+    Currency {
+        /// USD | CNY | JPY | EUR | GBP | HKD | SGD | KRW
+        code: String,
+    },
+    Fx {
+        /// Currency code (e.g. CNY, JPY, EUR)
+        code: String,
+        /// Units per 1 USD (e.g. 7.25)
+        rate: f64,
+    },
 }
 
 fn main() -> Result<()> {
@@ -153,6 +178,13 @@ fn main() -> Result<()> {
             conversation_id,
             transcript_path,
         } => handle_snapshot(conversation_id, transcript_path),
+        Commands::Usage {
+            window,
+            currency,
+            tz_offset_mins,
+            force_sync,
+            json,
+        } => handle_usage(window, currency, tz_offset_mins, force_sync, json),
         Commands::Ui { port } => handle_ui(port),
     }
 }
@@ -449,7 +481,111 @@ fn handle_config(action: Option<ConfigAction>) -> Result<()> {
             let _ = send_request(&DaemonRequest::SetToggle { key: key.clone(), value });
             println!("Set {} = {}", key, value);
         }
+        ConfigAction::Currency { code } => {
+            let norm = cfg.set_currency(&code)?;
+            cfg.save()?;
+            let _ = send_request(&DaemonRequest::SetCurrency {
+                currency: norm.clone(),
+            });
+            println!("Display currency set to {}.", norm);
+        }
+        ConfigAction::Fx { code, rate } => {
+            let norm = code.trim().to_ascii_uppercase();
+            let mut rates = BTreeMap::new();
+            rates.insert(norm.clone(), rate);
+            let ts = now_epoch_ms().max(0) as u64;
+            cfg.update_fx_rates(rates.clone(), "custom", ts)?;
+            cfg.save()?;
+            let _ = send_request(&DaemonRequest::UpdateFxRates {
+                rates,
+                source: Some("custom".to_string()),
+            });
+            println!("Set FX rate: 1 USD = {} {} (custom).", rate, norm);
+        }
     }
+    Ok(())
+}
+
+fn handle_usage(
+    window: String,
+    currency: Option<String>,
+    tz_offset_mins: i32,
+    force_sync: bool,
+    as_json: bool,
+) -> Result<()> {
+    let report: UsageWindowReport =
+        if let Ok(DaemonResponse::Ok { data }) = ensure_and_send(&DaemonRequest::UsageSummary {
+            window: window.clone(),
+            currency: currency.clone(),
+            tz_offset_mins: Some(tz_offset_mins),
+            force_sync,
+        }) {
+            serde_json::from_value(data)?
+        } else {
+            let cfg = HyperConfig::load();
+            let ledger_path = HyperConfig::ledger_path();
+            let mut ledger = UsageLedger::load_from(&ledger_path);
+            let now_ms = now_epoch_ms();
+            let outcome = ledger.sync_from_dirs(&default_brain_dirs(), now_ms);
+            if outcome.dirty {
+                let _ = ledger.save_to(&ledger_path);
+            }
+            ledger.query_window(
+                UsageWindow::parse(&window),
+                &cfg,
+                currency.as_deref(),
+                tz_offset_mins,
+                now_ms,
+                outcome.scan_ms,
+            )
+        };
+
+    if as_json {
+        println!("{}", serde_json::to_string(&report)?);
+        return Ok(());
+    }
+
+    println!(
+        "\n⚡ AGY HYPER USAGE · {} ({} · FX {:.4} [{}])",
+        report.window.to_uppercase(),
+        report.currency,
+        report.fx_rate,
+        report.fx_source
+    );
+    println!("─────────────────────────────────────────────────────────────────");
+    println!(
+        "  Sessions : {} ({} turns · {} tracked in ledger)",
+        report.active_sessions, report.total_turns, report.ledger_sessions_tracked
+    );
+    println!(
+        "  Tokens   : {:.2}M total (cached {:.2}M · {:.1}% hit)",
+        report.total_tokens as f64 / 1_000_000.0,
+        report.total_cache_read_tokens as f64 / 1_000_000.0,
+        report.cache_hit_ratio * 100.0
+    );
+    println!(
+        "  Est. Cost: {:.2} {} ({:.0}% attributed) · Cache Saved: {:.2} {}",
+        report.estimated_cost,
+        report.currency,
+        report.attributed_ratio * 100.0,
+        report.cache_saved,
+        report.currency
+    );
+    for m in &report.models {
+        let cost_lbl = if m.priced {
+            format!("{:.2} {}", m.estimated_cost, report.currency)
+        } else {
+            "— (unattributed)".to_string()
+        };
+        println!(
+            "    {:<32} {:>7.2}M tok  {:>4.0}% cache  {}",
+            m.model,
+            m.total_tokens as f64 / 1_000_000.0,
+            m.cache_hit_ratio * 100.0,
+            cost_lbl
+        );
+    }
+    println!();
     Ok(())
 }
 

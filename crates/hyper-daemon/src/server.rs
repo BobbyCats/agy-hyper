@@ -3,6 +3,7 @@ use crate::state::{build_cockpit_snapshot, execute_rollback_unlocked, DaemonStat
 use anyhow::{Context, Result};
 use fs2::FileExt;
 use hyper_core::config::HyperConfig;
+use hyper_core::usage::UsageWindow;
 use std::fs::{self, OpenOptions};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -217,6 +218,28 @@ fn handle_line(
             );
             return DaemonResponse::ok(snap);
         }
+        DaemonRequest::UsageSummary {
+            window,
+            currency,
+            tz_offset_mins,
+            force_sync,
+        } => {
+            let (config, usage_cache) = match state.lock() {
+                Ok(g) => g.usage_parts(),
+                Err(_) => return DaemonResponse::err("daemon state lock poisoned"),
+            };
+            let report = match usage_cache.lock() {
+                Ok(mut cache) => cache.query_window(
+                    UsageWindow::parse(&window),
+                    &config,
+                    currency.as_deref(),
+                    tz_offset_mins.unwrap_or(0),
+                    force_sync,
+                ),
+                Err(_) => return DaemonResponse::err("usage ledger lock poisoned"),
+            };
+            return DaemonResponse::ok(report);
+        }
         DaemonRequest::RollbackTx { tx_id, force } => {
             return match execute_rollback_unlocked(&tx_id, force) {
                 Ok(res) => {
@@ -298,11 +321,23 @@ fn handle_line(
             Ok(cfg) => DaemonResponse::ok(cfg),
             Err(e) => DaemonResponse::err(e),
         },
+        DaemonRequest::SetCurrency { currency } => match guard.set_currency(&currency) {
+            Ok(cfg) => DaemonResponse::ok(cfg),
+            Err(e) => DaemonResponse::err(e),
+        },
+        DaemonRequest::UpdateFxRates { rates, source } => {
+            match guard.update_fx_rates(rates, source.as_deref()) {
+                Ok(cfg) => DaemonResponse::ok(cfg),
+                Err(e) => DaemonResponse::err(e),
+            }
+        }
         DaemonRequest::Shutdown => {
             guard.flush_stats_now();
             let _ = shutdown_tx.send(true);
             DaemonResponse::ok(serde_json::json!({ "shutting_down": true }))
         }
-        DaemonRequest::Snapshot { .. } | DaemonRequest::RollbackTx { .. } => unreachable!(),
+        DaemonRequest::Snapshot { .. }
+        | DaemonRequest::UsageSummary { .. }
+        | DaemonRequest::RollbackTx { .. } => unreachable!(),
     }
 }

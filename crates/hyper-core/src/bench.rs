@@ -1,8 +1,10 @@
 use crate::json_util::unquote_json_string;
 use crate::transcript::parse_iso8601_epoch_ms;
+use crate::usage::{normalize_model_key, TokenBucket};
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::collections::BTreeMap;
 use std::fs::File;
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
@@ -56,6 +58,8 @@ pub struct SessionBenchmark {
     pub total_tool_calls: usize,
     #[serde(default)]
     pub hyper_adoption_ratio: f64,
+    #[serde(default)]
+    pub model_usage: BTreeMap<String, TokenBucket>,
     pub turns: Vec<TurnWaterfall>,
 }
 
@@ -92,6 +96,7 @@ pub fn analyze_transcript(path: &Path) -> Result<SessionBenchmark> {
         kind: String,
         ts_ms: i64,
         completed_ms: Option<i64>,
+        model: String,
         input_tokens: u64,
         cache_read_tokens: u64,
         output_tokens: u64,
@@ -120,6 +125,11 @@ pub fn analyze_transcript(path: &Path) -> Result<SessionBenchmark> {
             .unwrap_or("")
             .to_string();
         let step_index = v.get("step_index").and_then(Value::as_u64).unwrap_or(0);
+        let model = normalize_model_key(
+            v.get("model")
+                .or_else(|| v.get("model_name"))
+                .and_then(Value::as_str),
+        );
         let input_tokens = v.get("input_tokens").and_then(Value::as_u64).unwrap_or(0);
         let cache_read_tokens = v
             .get("cache_read_tokens")
@@ -178,6 +188,7 @@ pub fn analyze_transcript(path: &Path) -> Result<SessionBenchmark> {
             kind,
             ts_ms,
             completed_ms,
+            model,
             input_tokens,
             cache_read_tokens,
             output_tokens,
@@ -198,6 +209,7 @@ pub fn analyze_transcript(path: &Path) -> Result<SessionBenchmark> {
     let mut cache_break_turns = 0usize;
     let mut prev_planner_ms: Option<i64> = None;
     let mut prev_planner_total: u64 = 0;
+    let mut model_usage: BTreeMap<String, TokenBucket> = BTreeMap::new();
 
     const MAX_VALID_SPAN_MS: i64 = 180_000;
 
@@ -228,6 +240,11 @@ pub fn analyze_transcript(path: &Path) -> Result<SessionBenchmark> {
         total_input += planner.input_tokens;
         total_cache += planner.cache_read_tokens;
         total_output += planner.output_tokens;
+        let mb = model_usage.entry(planner.model.clone()).or_default();
+        mb.turns = mb.turns.saturating_add(1);
+        mb.input_tokens = mb.input_tokens.saturating_add(planner.input_tokens);
+        mb.cache_read_tokens = mb.cache_read_tokens.saturating_add(planner.cache_read_tokens);
+        mb.output_tokens = mb.output_tokens.saturating_add(planner.output_tokens);
         total_tool_calls += planner.tool_names.len();
         hyper_tool_calls += planner.hyper_tool_count;
 
@@ -347,6 +364,7 @@ pub fn analyze_transcript(path: &Path) -> Result<SessionBenchmark> {
         hyper_tool_calls,
         total_tool_calls,
         hyper_adoption_ratio,
+        model_usage,
         turns,
     })
 }

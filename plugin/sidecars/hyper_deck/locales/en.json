@@ -14,6 +14,7 @@
   "tabs": {
     "waterfall": "Waterfall",
     "context": "Context",
+    "usage": "Usage",
     "engine": "Engine",
     "security": "WAL & Audit"
   },
@@ -152,5 +153,34 @@
     "blocked_badge": "{{count}} blocked",
     "blocked_tag": "BLOCKED",
     "audit_empty": "Zero-trust audit stream armed. Tool calls and blocked jail escapes appear here live."
+  },
+  "usage": {
+    "ribbon_session": "Session",
+    "ribbon_tree": "Tree (+{{count}})",
+    "ribbon_saved": "Saved ≈ {{val}}",
+    "unattributed_short": "— (unattributed)",
+    "sync_fx": "Sync FX",
+    "syncing_fx": "Syncing…",
+    "kpi_cost": "Est. Value",
+    "kpi_saved": "Cache Saved",
+    "kpi_tokens": "Tokens",
+    "kpi_cache": "Cache Hit",
+    "sessions_hint": "{{sessions}} sessions · {{turns}} turns",
+    "trend_hourly": "24H Hourly Trend",
+    "trend_daily": "Daily Trend",
+    "metric_cost": "Value",
+    "metric_tokens": "Tokens",
+    "models_heading": "Model Breakdown",
+    "unattributed_row": "Unattributed (pre-model log)",
+    "unattributed_banner": "{{pct}}% of tokens have model tags ({{tokens}} legacy tokens counted in totals, excluded from cost).",
+    "fx_offline": "Offline",
+    "fx_live": "Live FX",
+    "fx_custom": "Custom FX",
+    "empty": "No recorded turns in this window yet.",
+    "footnote": "API-equivalent reference estimate from local transcripts (zero auto network). Override model rates or FX in ~/.gemini/antigravity/agy-hyper/config.json.",
+    "toast_currency": "Currency switched to {{ccy}}",
+    "toast_currency_err": "Currency switch failed: {{err}}",
+    "toast_fx_ok": "Live FX updated ({{detail}})",
+    "toast_fx_err": "FX sync failed: {{err}}"
   }
 }

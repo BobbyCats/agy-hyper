@@ -1,8 +1,8 @@
 (() => {
   const root = (window.HyperDeck = window.HyperDeck || {});
-  const { $, escapeHtml, fmtSec, isDark, palette, renderBreakdown, t } = root.api;
+  const { $, escapeHtml, fmtCurrency, fmtSec, fmtTokens, isDark, palette, renderBreakdown, t } = root.api;
 
-  const charts = { hero: null, waterfall: null, ctxPro: null };
+  const charts = { hero: null, waterfall: null, ctxPro: null, usage: null };
 
   function ensureChart(key, elId) {
     if (!window.echarts) return null;
@@ -435,10 +435,73 @@
     }, true);
   }
 
+  function renderUsageChart(report, metric = 'cost') {
+    const chart = ensureChart('usage', 'chart-usage');
+    const pal = palette();
+    const series = report?.series || [];
+    if (!chart) return;
+    if (!series.length) {
+      chart.clear();
+      return;
+    }
+
+    const currency = report.currency || 'USD';
+    const labels = series.map((pt) => pt.label);
+    const isTokens = metric === 'tokens';
+    const values = series.map((pt) =>
+      isTokens
+        ? Math.round((pt.total_tokens / 1_000_000) * 1000) / 1000
+        : Math.round(pt.estimated_cost * 100) / 100
+    );
+
+    const yFormatter = (v) =>
+      isTokens ? `${v}M` : fmtCurrency(v, currency);
+
+    chart.setOption({
+      animation: false,
+      grid: { top: 14, right: 10, bottom: 22, left: isTokens ? 42 : 48 },
+      tooltip: baseTooltip(pal, {
+        axisPointer: { type: 'shadow' },
+        formatter: (items) => {
+          const pt = series[items?.[0]?.dataIndex ?? 0];
+          if (!pt) return '';
+          const denom = pt.input_tokens + pt.cache_read_tokens;
+          const hit = denom > 0 ? Math.round((pt.cache_read_tokens / denom) * 100) : 0;
+          return [
+            `<b>${escapeHtml(pt.iso_key)}</b>`,
+            `${escapeHtml(t('usage.kpi_tokens'))}: <b>${fmtTokens(pt.total_tokens)}</b> (${hit}% cache)`,
+            `${escapeHtml(t('usage.kpi_cost'))}: <b>${escapeHtml(fmtCurrency(pt.estimated_cost, currency))}</b>`,
+            `${escapeHtml(t('usage.kpi_saved'))}: <b>${escapeHtml(fmtCurrency(pt.cache_saved, currency))}</b>`,
+          ].join('<br/>');
+        },
+      }),
+      xAxis: baseCategoryAxis(pal, labels, true),
+      yAxis: {
+        type: 'value',
+        splitNumber: 3,
+        splitLine: { lineStyle: { color: pal.grid } },
+        axisLabel: { color: pal.muted, fontSize: 9.5, formatter: yFormatter },
+      },
+      series: [
+        {
+          name: isTokens ? t('usage.metric_tokens') : t('usage.metric_cost'),
+          type: 'bar',
+          barMaxWidth: series.length > 35 ? 6 : 12,
+          data: values,
+          itemStyle: {
+            color: isTokens ? pal.accent : pal.ok,
+            borderRadius: [2, 2, 0, 0],
+          },
+        },
+      ],
+    }, true);
+  }
+
   root.charts = {
     resizeAllCharts,
     renderHeroChart,
     renderWaterfallChart,
     renderFullContextChart,
+    renderUsageChart,
   };
 })();

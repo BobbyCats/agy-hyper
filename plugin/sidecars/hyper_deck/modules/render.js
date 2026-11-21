@@ -1,14 +1,7 @@
 (() => {
   const root = (window.HyperDeck = window.HyperDeck || {});
-  const { $, escapeHtml, fmtRelTime, fmtSec, t } = root.api;
-  const { renderFullContextChart, renderHeroChart, renderWaterfallChart } = root.charts;
-
-  function fmtTokens(n) {
-    const v = Number(n || 0);
-    if (v >= 1_000_000) return `${(v / 1_000_000).toFixed(2)}M`;
-    if (v >= 1_000) return `${(v / 1_000).toFixed(1)}k`;
-    return String(v);
-  }
+  const { $, escapeHtml, fmtCurrency, fmtRelTime, fmtSec, fmtTokens, t } = root.api;
+  const { renderFullContextChart, renderHeroChart, renderUsageChart, renderWaterfallChart } = root.charts;
 
   function renderWarmthMeter(snap) {
     if (!snap) return;
@@ -227,6 +220,120 @@
     });
   }
 
+  function renderSessionUsageRibbon(snap) {
+    const ribbon = $('session-usage-ribbon');
+    if (!ribbon) return;
+    const u = snap.session_usage;
+    const ccySel = $('simple-currency-select');
+    const ccy = u?.currency || snap.config?.display_currency || 'USD';
+    if (ccySel && ccySel.value !== ccy) ccySel.value = ccy;
+
+    if (!u || (u.tree_tokens <= 0 && u.session_tokens <= 0)) {
+      ribbon.classList.add('hidden');
+      return;
+    }
+    ribbon.classList.remove('hidden');
+
+    const hasTree = u.subagent_count > 0 && u.tree_tokens > u.session_tokens;
+    const tokens = hasTree ? u.tree_tokens : u.session_tokens;
+    const cost = hasTree ? u.tree_cost : u.session_cost;
+    const saved = hasTree ? u.tree_cache_saved : u.session_cache_saved;
+    const attrRatio = hasTree ? u.tree_attributed_ratio : u.session_attributed_ratio;
+
+    $('s-usage-label').textContent = hasTree
+      ? t('usage.ribbon_tree', { count: u.subagent_count })
+      : t('usage.ribbon_session');
+    $('s-usage-tokens').textContent = `${fmtTokens(tokens)} tok`;
+    $('s-usage-cost').textContent = attrRatio > 0
+      ? `≈ ${fmtCurrency(cost, ccy)}`
+      : t('usage.unattributed_short');
+
+    const savedEl = $('s-usage-saved');
+    if (attrRatio > 0 && saved > 0) {
+      savedEl.textContent = t('usage.ribbon_saved', { val: fmtCurrency(saved, ccy) });
+      savedEl.classList.remove('hidden');
+    } else {
+      savedEl.classList.add('hidden');
+    }
+  }
+
+  function renderUsageReport(report, state) {
+    if (!report || report.error) return;
+    const ccy = report.currency || 'USD';
+    const ccySel = $('usage-currency-select');
+    if (ccySel && ccySel.value !== ccy) ccySel.value = ccy;
+
+    document.querySelectorAll('.win-btn[data-uwin]').forEach((b) => {
+      b.classList.toggle('active', b.dataset.uwin === (report.window || state.usageWindow));
+    });
+    document.querySelectorAll('.metric-btn[data-umetric]').forEach((b) => {
+      b.classList.toggle('active', b.dataset.umetric === state.usageMetric);
+    });
+
+    const hasPriced = (report.attributed_tokens || 0) > 0 || (report.estimated_cost || 0) > 0;
+    $('u-cost').textContent = hasPriced ? fmtCurrency(report.estimated_cost, ccy) : '—';
+    $('u-saved').textContent = hasPriced ? fmtCurrency(report.cache_saved, ccy) : '—';
+    $('u-tokens').textContent = fmtTokens(report.total_tokens || 0);
+    $('u-cache').textContent = `${Math.round((report.cache_hit_ratio || 0) * 100)}%`;
+    $('u-cache').title = t('usage.sessions_hint', {
+      sessions: report.active_sessions || 0,
+      turns: report.total_turns || 0,
+    });
+
+    const attrPct = Math.round((report.attributed_ratio ?? 1) * 100);
+    const attrBanner = $('u-attr-banner');
+    if ((report.unattributed_tokens || 0) > 0) {
+      attrBanner.textContent = t('usage.unattributed_banner', {
+        pct: attrPct,
+        tokens: fmtTokens(report.unattributed_tokens),
+      });
+      attrBanner.classList.remove('hidden');
+    } else {
+      attrBanner.classList.add('hidden');
+    }
+
+    const srcLbl = report.fx_source === 'live'
+      ? t('usage.fx_live')
+      : report.fx_source === 'custom'
+        ? t('usage.fx_custom')
+        : t('usage.fx_offline');
+    const ageLbl = report.fx_updated_at_ms ? ` · ${fmtRelTime(report.fx_updated_at_ms)}` : '';
+    const rateStr = ccy === 'USD' ? 'USD' : `1 USD = ${Number(report.fx_rate || 1).toFixed(2)} ${ccy}`;
+    $('u-fx-meta').textContent = `${rateStr} · ${srcLbl}${ageLbl}`;
+
+    $('usage-chart-title').textContent = report.window === '24h'
+      ? t('usage.trend_hourly')
+      : t('usage.trend_daily');
+
+    const modelsBox = $('usage-models');
+    const models = report.models || [];
+    if (!models.length) {
+      modelsBox.innerHTML = `<div class="empty-state">${escapeHtml(t('usage.empty'))}</div>`;
+    } else {
+      const maxTok = models[0]?.total_tokens || 1;
+      modelsBox.innerHTML = models
+        .map((m) => {
+          const w = Math.max(4, Math.round((m.total_tokens / maxTok) * 100));
+          const label = m.attributed ? m.model : t('usage.unattributed_row');
+          const costStr = m.priced ? fmtCurrency(m.estimated_cost, ccy) : '—';
+          const hitStr = `${Math.round((m.cache_hit_ratio || 0) * 100)}%`;
+          return `
+            <div class="prop-row${m.attributed ? '' : ' muted-row'}">
+              <div class="prop-fill" style="width:${w}%"></div>
+              <span class="prop-label" title="${escapeHtml(label)}">${escapeHtml(label)}</span>
+              <span class="prop-count">${escapeHtml(fmtTokens(m.total_tokens))} <span style="opacity:.65">(${hitStr})</span> · ${escapeHtml(costStr)}</span>
+            </div>`;
+        })
+        .join('');
+    }
+
+    try {
+      renderUsageChart(report, state.usageMetric);
+    } catch {
+      // keep UI responsive
+    }
+  }
+
   function renderSnapshot(snap, state, onRollback, onSelectSession) {
     const cfg = snap.config || {};
     const eng = snap.engine || {};
@@ -244,6 +351,7 @@
 
     renderSessionSelect(snap.recent_sessions, tree, state.selectedConvId, activeConvId);
     renderSubagentStrip(tree, activeConvId, onSelectSession);
+    renderSessionUsageRibbon(snap);
 
     const hChip = $('health-chip');
     hChip.className = 'status-pill';
@@ -359,5 +467,6 @@
   root.render = {
     renderWarmthMeter,
     renderSnapshot,
+    renderUsageReport,
   };
 })();

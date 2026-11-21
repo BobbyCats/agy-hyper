@@ -12,6 +12,7 @@ pub mod search;
 pub mod sessions;
 pub mod transcript;
 pub mod tx_edit;
+pub mod usage;
 pub mod wal;
 
 pub fn version() -> &'static str {
