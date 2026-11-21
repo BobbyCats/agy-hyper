@@ -83,7 +83,7 @@ function renderIndexHtml() {
     const css = readFileSync(join(__dirname, 'styles.css'), 'utf8').replace(/<\/style/gi, '<\\/style');
     html = html.replace(
       '<link rel="stylesheet" href="/styles.css">',
-      `<style id="hyper-inline-styles">\n${css}\n</style>`
+      () => `<style id="hyper-inline-styles">\n${css}\n</style>`
     );
   } catch {
     // fallback to external stylesheet
@@ -100,7 +100,7 @@ function renderIndexHtml() {
     const safeJson = JSON.stringify(locales).replace(/<\//g, '<\\/');
     html = html.replace(
       '<!-- INLINE_LOCALES -->',
-      `<script>window.__HYPER_LOCALES__ = ${safeJson};</script>`
+      () => `<script>window.__HYPER_LOCALES__ = ${safeJson};</script>`
     );
   } catch {
     // fallback to runtime fetch
@@ -111,10 +111,10 @@ function renderIndexHtml() {
       const src = readFileSync(join(__dirname, rel), 'utf8').replace(/<\/script/gi, '<\\/script');
       return `<script data-module="${rel}">\n${src}\n</script>`;
     }).join('\n');
-    html = html.replace('<!-- INLINE_APP_SCRIPTS -->', inlined);
+    html = html.replace('<!-- INLINE_APP_SCRIPTS -->', () => inlined);
   } catch {
     const tags = APP_SCRIPTS.map((rel) => `<script src="/${rel}"></script>`).join('\n');
-    html = html.replace('<!-- INLINE_APP_SCRIPTS -->', tags);
+    html = html.replace('<!-- INLINE_APP_SCRIPTS -->', () => tags);
   }
   return html;
 }

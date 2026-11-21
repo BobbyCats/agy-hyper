@@ -183,9 +183,9 @@
     }).then((x) => x.json()).catch(() => ({ ok: false }));
     if (r.ok) {
       showToast(t('usage.toast_currency', { ccy: code }));
+      lastUsageFetchMs = 0;
       poll(true);
       if (state.mode === 'pro' && state.proTab === 'usage') {
-        lastUsageFetchMs = 0;
         pollUsage(true);
       }
     } else {
