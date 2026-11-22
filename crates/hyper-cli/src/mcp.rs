@@ -14,6 +14,7 @@ use hyper_daemon::protocol::{
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::io::{self, BufRead, Write};
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
@@ -159,6 +160,139 @@ fn write_json(stdout: &Arc<Mutex<io::Stdout>>, val: &Value) {
     }
 }
 
+fn canonical_or_raw(path: &Path) -> PathBuf {
+    std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
+}
+
+fn is_installed_plugin_dir(
+    candidate: &Path,
+    exe_path: Option<&Path>,
+    home: Option<&Path>,
+    env_plugin_root: Option<&Path>,
+) -> bool {
+    let cand = canonical_or_raw(candidate);
+    // Developing a Rust source checkout (e.g. agy-hyper repo itself) is never a deployed plugin dir.
+    if cand.join("Cargo.toml").is_file() {
+        return false;
+    }
+
+    if let Some(root) = env_plugin_root {
+        let root_c = canonical_or_raw(root);
+        if !root_c.join("Cargo.toml").is_file() && cand.starts_with(&root_c) {
+            return true;
+        }
+    }
+
+    if let Some(exe) = exe_path {
+        let exe_c = canonical_or_raw(exe);
+        if let Some(bin_dir) = exe_c.parent() {
+            let is_bin = bin_dir
+                .file_name()
+                .and_then(|s| s.to_str())
+                .map(|s| s.eq_ignore_ascii_case("bin"))
+                .unwrap_or(false);
+            if is_bin {
+                if let Some(plugin_root) = bin_dir.parent() {
+                    if plugin_root.join("plugin.json").is_file()
+                        && !plugin_root.join("Cargo.toml").is_file()
+                        && cand.starts_with(plugin_root)
+                    {
+                        return true;
+                    }
+                }
+            }
+        }
+    }
+
+    if let Some(h) = home {
+        let h_c = canonical_or_raw(h);
+        for rel in [
+            ".gemini/config/plugins",
+            ".gemini/antigravity/plugins",
+            ".gemini/antigravity-cli/plugins",
+        ] {
+            let plugins_root = canonical_or_raw(&h_c.join(rel));
+            if cand.starts_with(&plugins_root) {
+                return true;
+            }
+        }
+    }
+
+    false
+}
+
+fn unsafe_default_cwd_reason(
+    cwd: &Path,
+    exe_path: Option<&Path>,
+    home: Option<&Path>,
+    env_plugin_root: Option<&Path>,
+) -> Option<&'static str> {
+    if is_installed_plugin_dir(cwd, exe_path, home, env_plugin_root) {
+        return Some("the installed plugin directory");
+    }
+    let cwd_c = canonical_or_raw(cwd);
+    if cwd_c.parent().is_none() {
+        return Some("the filesystem root");
+    }
+    if let Some(h) = home {
+        if cwd_c == canonical_or_raw(h) {
+            return Some("the user home directory");
+        }
+    }
+    None
+}
+
+fn resolve_mcp_workspace(
+    explicit: Option<&str>,
+    allow_outside_workspace: bool,
+    cwd: Option<&Path>,
+    exe_path: Option<&Path>,
+    home: Option<&Path>,
+    env_plugin_root: Option<&Path>,
+) -> Result<String> {
+    let trimmed = explicit.map(str::trim).filter(|s| !s.is_empty());
+    if let Some(ws) = trimmed {
+        if ws != "." {
+            let p = Path::new(ws);
+            if !allow_outside_workspace && is_installed_plugin_dir(p, exe_path, home, env_plugin_root) {
+                return Err(anyhow!(
+                    "refusing to target installed plugin directory '{}' as workspace; pass your project root path",
+                    ws
+                ));
+            }
+            return Ok(ws.to_string());
+        }
+    }
+
+    let Some(cwd_path) = cwd else {
+        return Err(anyhow!(
+            "workspace parameter is required (could not determine MCP process working directory)"
+        ));
+    };
+
+    if let Some(reason) = unsafe_default_cwd_reason(cwd_path, exe_path, home, env_plugin_root) {
+        return Err(anyhow!(
+            "workspace parameter is required: MCP process cwd ('{}') points to {}, not your project workspace. Re-call this tool with an explicit absolute 'workspace' path (e.g., workspace: \"/path/to/project\").",
+            cwd_path.display(),
+            reason
+        ));
+    }
+
+    Ok(cwd_path.display().to_string())
+}
+
+fn env_plugin_root() -> Option<PathBuf> {
+    for key in ["AGY_PLUGIN_ROOT", "ANTIGRAVITY_PLUGIN_ROOT", "CLAUDE_PLUGIN_ROOT"] {
+        if let Ok(val) = std::env::var(key) {
+            let t = val.trim();
+            if !t.is_empty() {
+                return Some(PathBuf::from(t));
+            }
+        }
+    }
+    None
+}
+
 fn dispatch_tool(params: &Value, cancel_flag: Arc<AtomicBool>) -> Result<String> {
     let name = params
         .get("name")
@@ -168,13 +302,6 @@ fn dispatch_tool(params: &Value, cancel_flag: Arc<AtomicBool>) -> Result<String>
     let cfg = HyperConfig::load();
     let started = Instant::now();
     let max_bytes = cfg.max_output_bytes.clamp(2_000, 8_500);
-    let workspace = args
-        .get("workspace")
-        .and_then(Value::as_str)
-        .filter(|s| !s.trim().is_empty())
-        .map(String::from)
-        .or_else(|| std::env::current_dir().ok().map(|p| p.display().to_string()))
-        .unwrap_or_else(|| ".".into());
 
     if !cfg.is_mcp_tool_enabled(name) {
         let hint = if name == "hyper_edit" {
@@ -190,12 +317,37 @@ fn dispatch_tool(params: &Value, cancel_flag: Arc<AtomicBool>) -> Result<String>
         ));
     }
 
+    let explicit_ws = args
+        .get("workspace")
+        .and_then(Value::as_str)
+        .map(String::from);
     let output = match name {
-        "hyper_pack" => handle_pack(&workspace, args, &cfg, started)?,
-        "hyper_search" => handle_search(&workspace, args, &cfg, started)?,
-        "hyper_edit" => handle_edit(&workspace, args, &cfg, started)?,
-        "hyper_check" => handle_check(&workspace, args, &cfg, started, cancel_flag)?,
-        "hyper_tx" => handle_tx(&workspace, args, started)?,
+        "hyper_tx" => handle_tx(
+            explicit_ws.as_deref().filter(|s| !s.trim().is_empty()),
+            args,
+            started,
+        )?,
+        "hyper_pack" | "hyper_search" | "hyper_edit" | "hyper_check" => {
+            let cwd = std::env::current_dir().ok();
+            let exe = std::env::current_exe().ok();
+            let home = dirs::home_dir();
+            let env_root = env_plugin_root();
+            let workspace = resolve_mcp_workspace(
+                explicit_ws.as_deref(),
+                cfg.allow_outside_workspace,
+                cwd.as_deref(),
+                exe.as_deref(),
+                home.as_deref(),
+                env_root.as_deref(),
+            )?;
+            match name {
+                "hyper_pack" => handle_pack(&workspace, args, &cfg, started)?,
+                "hyper_search" => handle_search(&workspace, args, &cfg, started)?,
+                "hyper_edit" => handle_edit(&workspace, args, &cfg, started)?,
+                "hyper_check" => handle_check(&workspace, args, &cfg, started, cancel_flag)?,
+                _ => unreachable!(),
+            }
+        }
         unknown => return Err(anyhow!("unknown tool '{}'", unknown)),
     };
 
@@ -528,7 +680,7 @@ fn handle_check(
     Ok(out)
 }
 
-fn handle_tx(workspace: &str, args: Value, started: Instant) -> Result<String> {
+fn handle_tx(workspace: Option<&str>, args: Value, started: Instant) -> Result<String> {
     let action = args.get("action").and_then(Value::as_str).unwrap_or("list");
     match action {
         "list" => {
@@ -555,7 +707,7 @@ fn handle_tx(workspace: &str, args: Value, started: Instant) -> Result<String> {
             let rb = rollback_transaction(&HyperConfig::wal_dir(), tx_id, force)?;
             record_telemetry(
                 "rollback",
-                Some(workspace.to_string()),
+                workspace.map(String::from),
                 started.elapsed().as_millis() as u64,
                 0,
                 0,
@@ -624,7 +776,7 @@ fn tool_definitions(cfg: &HyperConfig) -> Value {
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "workspace": { "type": "string", "description": "Workspace root directory path" },
+                    "workspace": { "type": "string", "description": "Absolute project workspace root path (required when host spawns MCP outside the project directory)" },
                     "query": { "type": "string", "description": "Task keywords or symbol names to pack" },
                     "focus_paths": { "type": "array", "items": { "type": "string" } },
                     "include_outlines": { "type": "boolean", "default": true },
@@ -738,4 +890,81 @@ fn tool_definitions(cfg: &HyperConfig) -> Value {
         })
         .collect();
     Value::Array(filtered)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn mcp_workspace_guard_blocks_plugin_root_home_and_fs_root() {
+        let tmp = std::env::temp_dir().join(format!("agy-hyper-mcp-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        let home = tmp.join("home");
+        let plugin_root = home.join(".gemini/config/plugins/agy-hyper");
+        let plugin_bin = plugin_root.join("bin");
+        let source_repo = tmp.join("src/agy-hyper");
+        let user_project = tmp.join("work/my-app");
+        std::fs::create_dir_all(&plugin_bin).unwrap();
+        std::fs::create_dir_all(&source_repo).unwrap();
+        std::fs::create_dir_all(&user_project).unwrap();
+        std::fs::write(plugin_root.join("plugin.json"), r#"{"name":"agy-hyper"}"#).unwrap();
+        std::fs::write(plugin_bin.join("agy-hyper"), b"").unwrap();
+        std::fs::write(source_repo.join("Cargo.toml"), "[workspace]\n").unwrap();
+        let exe = plugin_bin.join("agy-hyper");
+
+        // 1. Omitted workspace when cwd == installed PLUGIN_ROOT -> fail fast
+        let err = resolve_mcp_workspace(None, false, Some(&plugin_root), Some(&exe), Some(&home), None)
+            .unwrap_err();
+        assert!(err.to_string().contains("installed plugin directory"), "got: {}", err);
+
+        // 2. Dot workspace "." when cwd == installed PLUGIN_ROOT -> fail fast
+        let err = resolve_mcp_workspace(Some("."), false, Some(&plugin_root), Some(&exe), Some(&home), None)
+            .unwrap_err();
+        assert!(err.to_string().contains("installed plugin directory"), "got: {}", err);
+
+        // 3. Explicit workspace targeting installed PLUGIN_ROOT -> blocked
+        let err = resolve_mcp_workspace(
+            Some(plugin_root.to_str().unwrap()),
+            false,
+            Some(&user_project),
+            Some(&exe),
+            Some(&home),
+            None,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("refusing to target installed plugin directory"), "got: {}", err);
+
+        // 4. Omitted workspace when cwd == $HOME -> fail fast
+        let err = resolve_mcp_workspace(None, false, Some(&home), Some(&exe), Some(&home), None)
+            .unwrap_err();
+        assert!(err.to_string().contains("user home directory"), "got: {}", err);
+
+        // 5. Omitted workspace when cwd == real project directory -> allowed (CLI compatibility)
+        let ok = resolve_mcp_workspace(None, false, Some(&user_project), Some(&exe), Some(&home), None)
+            .unwrap();
+        assert_eq!(PathBuf::from(ok), user_project);
+
+        // 6. Explicit workspace targeting the agy-hyper source repo (has Cargo.toml) -> allowed
+        let ok = resolve_mcp_workspace(
+            Some(source_repo.to_str().unwrap()),
+            false,
+            Some(&plugin_root),
+            Some(&exe),
+            Some(&home),
+            None,
+        )
+        .unwrap();
+        assert_eq!(PathBuf::from(ok), source_repo);
+
+        // 7. Filesystem root as omitted cwd -> fail fast
+        #[cfg(unix)]
+        {
+            let err = resolve_mcp_workspace(None, false, Some(Path::new("/")), Some(&exe), Some(&home), None)
+                .unwrap_err();
+            assert!(err.to_string().contains("filesystem root"), "got: {}", err);
+        }
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
 }

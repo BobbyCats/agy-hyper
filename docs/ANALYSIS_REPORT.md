@@ -63,7 +63,7 @@ Instead of assuming a single universal cache window across every model family, `
 # Install in zero-intrusion Observe mode first (never touches config.json)
 curl -fsSL https://raw.githubusercontent.com/BobbyCats/agy-hyper/main/install.sh | bash -s -- --observe
 
-# Run your own 14-day local burn audit and export a dark/light SVG card
-agy-hyper audit --days 14 --svg my-audit.svg
+# Run your own 14-day local burn audit and export a shareable 2x Retina PNG (or SVG) card
+agy-hyper audit --days 14 --png my-audit.png
 agy-hyper bench --cache-ttl
 ```

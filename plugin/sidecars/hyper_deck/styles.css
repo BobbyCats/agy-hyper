@@ -1408,6 +1408,12 @@ button:focus-visible, select:focus-visible, input:focus-visible {
   gap: 8px;
 }
 
+.audit-export-group {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
 .audit-ttl-chips {
   display: flex;
   flex-wrap: wrap;

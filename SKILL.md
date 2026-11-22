@@ -62,7 +62,8 @@ agy-hyper daemon status
 agy-hyper daemon start
 agy-hyper daemon stop
 
-# Local burn audit & shareable SVG diagnostic card
+# Local burn audit & shareable 2x Retina PNG / SVG diagnostic card
+agy-hyper audit --days 14 --png audit-card.png
 agy-hyper audit --days 14 --svg audit-card.svg
 
 # Usage & multi-currency API-equivalent cost ledger (24h | 7d | 30d | 90d)

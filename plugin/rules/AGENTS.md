@@ -21,7 +21,7 @@ You have the `agy-hyper` native Rust MCP engine active (sub-millisecond local UD
 
 ## Compact Tool Schemas (Inline — No Extra Schema-Read Turn Required)
 
-When tools are lazy-loaded by Antigravity, invoke directly via `call_mcp_tool(ServerName="agy-hyper_core", ToolName="...", Arguments={...})` — no separate schema-file read needed:
+When tools are lazy-loaded by Antigravity, invoke directly via `call_mcp_tool(ServerName="agy-hyper_core", ToolName="...", Arguments={...})` — no separate schema-file read needed. Always pass the explicit absolute `workspace` project root path for workspace-scoped tools (`hyper_pack`, `hyper_search`, `hyper_edit`, `hyper_check`):
 
 - `hyper_pack`: `{ workspace?, query?, focus_paths?: string[], include_outlines?: true, include_git?: true, max_bytes?: 8200 }`
 - `hyper_search`: `{ workspace?, queries?: [{ pattern, path?, glob?, fixed_strings?, case_sensitive?, max_matches? }], glob?, path?, include_git?: false }`

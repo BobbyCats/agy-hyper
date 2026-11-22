@@ -4,10 +4,22 @@ use crate::sessions::discover_transcripts;
 use crate::usage::{
     default_brain_dirs, now_epoch_ms, ModelTtlEstimate, UsageLedger, UsageWindow, UsageWindowReport,
 };
+use anyhow::{anyhow, Result};
+use resvg::{tiny_skia, usvg};
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::PathBuf;
 use std::time::{Duration, SystemTime};
+
+pub const AUDIT_SVG_W: u32 = 920;
+pub const AUDIT_SVG_H: u32 = 560;
+const AUDIT_PNG_PAD: u32 = 20;
+const TTL_BAR_X: f64 = 184.0;
+const TTL_BAR_MAX_W: f64 = 164.0;
+const SANS_FONT_STACK: &str =
+    "Helvetica Neue, Segoe UI, DejaVu Sans, Liberation Sans, Arial, system-ui, sans-serif";
+const MONO_FONT_STACK: &str =
+    "Menlo, Consolas, DejaVu Sans Mono, Liberation Mono, Courier New, ui-monospace, monospace";
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct AuditCohortStats {
@@ -515,7 +527,7 @@ pub fn render_audit_svg(report: &BurnAuditReport, dark: bool) -> String {
     for (idx, m) in report.model_ttl_cliffs.iter().take(5).enumerate() {
         let y = 248 + idx * 34;
         let ratio = (m.effective_ttl_secs as f64 / max_ttl).clamp(0.08, 1.0);
-        let fill_w = (ratio * 195.0).round();
+        let fill_w = (ratio * TTL_BAR_MAX_W).round();
         let bar_color = if m.effective_ttl_secs <= 120 {
             err
         } else if m.effective_ttl_secs <= 180 {
@@ -526,10 +538,10 @@ pub fn render_audit_svg(report: &BurnAuditReport, dark: bool) -> String {
         let tag = if m.source == "empirical" { "emp" } else { "def" };
         let label = xml_escape(&m.model_family);
         ttl_rows.push_str(&format!(
-            "  <text x=\"44\" y=\"{}\" fill=\"{}\" font-size=\"11.5\" font-family=\"ui-monospace,Menlo,monospace\">{}</text>\n\
-             \x20 <rect x=\"184\" y=\"{}\" width=\"195\" height=\"10\" rx=\"5\" fill=\"{}\"/>\n\
-             \x20 <rect x=\"184\" y=\"{}\" width=\"{:.0}\" height=\"10\" rx=\"5\" fill=\"{}\"/>\n\
-             \x20 <text x=\"434\" y=\"{}\" text-anchor=\"end\" fill=\"{}\" font-size=\"11\" font-family=\"ui-monospace,Menlo,monospace\">{}s · {}</text>\n",
+            "  <text x=\"44\" y=\"{}\" fill=\"{}\" font-size=\"11.5\" font-family=\"{mono}\">{}</text>\n\
+             \x20 <rect x=\"{bar_x:.0}\" y=\"{}\" width=\"{bar_w:.0}\" height=\"10\" rx=\"5\" fill=\"{}\"/>\n\
+             \x20 <rect x=\"{bar_x:.0}\" y=\"{}\" width=\"{:.0}\" height=\"10\" rx=\"5\" fill=\"{}\"/>\n\
+             \x20 <text x=\"434\" y=\"{}\" text-anchor=\"end\" fill=\"{}\" font-size=\"11\" font-family=\"{mono}\">{}s · {}</text>\n",
             y,
             fg,
             label,
@@ -541,13 +553,17 @@ pub fn render_audit_svg(report: &BurnAuditReport, dark: bool) -> String {
             y,
             muted,
             m.effective_ttl_secs,
-            tag
+            tag,
+            mono = MONO_FONT_STACK,
+            bar_x = TTL_BAR_X,
+            bar_w = TTL_BAR_MAX_W,
         ));
     }
     if report.model_ttl_cliffs.is_empty() {
         ttl_rows.push_str(&format!(
-            "  <text x=\"44\" y=\"268\" fill=\"{}\" font-size=\"12\" font-family=\"system-ui,sans-serif\">Not enough multi-turn gaps yet for empirical TTL.</text>\n",
-            muted
+            "  <text x=\"44\" y=\"268\" fill=\"{}\" font-size=\"12\" font-family=\"{sans}\">Not enough multi-turn gaps yet for empirical TTL.</text>\n",
+            muted,
+            sans = SANS_FONT_STACK
         ));
     }
 
@@ -572,7 +588,7 @@ pub fn render_audit_svg(report: &BurnAuditReport, dark: bool) -> String {
         let ly = 274 + (idx / 2) * 20;
         ctx_legend.push_str(&format!(
             "  <rect x=\"{}\" y=\"{}\" width=\"8\" height=\"8\" rx=\"2\" fill=\"{}\"/>\n\
-             \x20 <text x=\"{}\" y=\"{}\" fill=\"{}\" font-size=\"11\" font-family=\"system-ui,sans-serif\">{} {:.1}%</text>\n",
+             \x20 <text x=\"{}\" y=\"{}\" fill=\"{}\" font-size=\"11\" font-family=\"{sans}\">{} {:.1}%</text>\n",
             lx,
             ly - 8,
             col,
@@ -580,7 +596,8 @@ pub fn render_audit_svg(report: &BurnAuditReport, dark: bool) -> String {
             ly,
             muted,
             xml_escape(category_label(&c.key)),
-            c.share_pct
+            c.share_pct,
+            sans = SANS_FONT_STACK
         ));
     }
 
@@ -613,12 +630,13 @@ pub fn render_audit_svg(report: &BurnAuditReport, dark: bool) -> String {
         let txt = xml_escape(&f.title);
         findings_svg.push_str(&format!(
             "  <circle cx=\"50\" cy=\"{}\" r=\"4\" fill=\"{}\"/>\n\
-             \x20 <text x=\"64\" y=\"{}\" fill=\"{}\" font-size=\"12\" font-family=\"system-ui,-apple-system,sans-serif\">{}</text>\n",
+             \x20 <text x=\"64\" y=\"{}\" fill=\"{}\" font-size=\"12\" font-family=\"{sans}\">{}</text>\n",
             y - 4,
             dot,
             y,
             fg,
-            txt
+            txt,
+            sans = SANS_FONT_STACK
         ));
     }
 
@@ -632,44 +650,48 @@ pub fn render_audit_svg(report: &BurnAuditReport, dark: bool) -> String {
     ));
 
     format!(
-        "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"920\" height=\"560\" viewBox=\"0 0 920 560\">\n\
-         \x20 <rect width=\"920\" height=\"560\" rx=\"16\" fill=\"{bg}\" stroke=\"{border}\" stroke-width=\"1.5\"/>\n\
-         \x20 <text x=\"28\" y=\"42\" fill=\"{fg}\" font-size=\"18\" font-weight=\"700\" font-family=\"system-ui,-apple-system,sans-serif\">AGY HYPER · LOCAL TELEMETRY BURN AUDIT</text>\n\
-         \x20 <text x=\"892\" y=\"40\" text-anchor=\"end\" fill=\"{accent}\" font-size=\"12\" font-weight=\"600\" font-family=\"ui-monospace,Menlo,monospace\">v{ver}</text>\n\
-         \x20 <text x=\"28\" y=\"64\" fill=\"{muted}\" font-size=\"12\" font-family=\"ui-monospace,Menlo,monospace\">{header_sub}</text>\n\
+        "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"{svg_w}\" height=\"{svg_h}\" viewBox=\"0 0 {svg_w} {svg_h}\">\n\
+         \x20 <rect width=\"{svg_w}\" height=\"{svg_h}\" rx=\"16\" fill=\"{bg}\" stroke=\"{border}\" stroke-width=\"1.5\"/>\n\
+         \x20 <text x=\"28\" y=\"42\" fill=\"{fg}\" font-size=\"18\" font-weight=\"700\" font-family=\"{sans}\">AGY HYPER · LOCAL TELEMETRY BURN AUDIT</text>\n\
+         \x20 <text x=\"892\" y=\"40\" text-anchor=\"end\" fill=\"{accent}\" font-size=\"12\" font-weight=\"600\" font-family=\"{mono}\">v{ver}</text>\n\
+         \x20 <text x=\"28\" y=\"64\" fill=\"{muted}\" font-size=\"12\" font-family=\"{mono}\">{header_sub}</text>\n\
          \x20 <g>\n\
          \x20   <rect x=\"28\" y=\"84\" width=\"206\" height=\"88\" rx=\"10\" fill=\"{card_bg}\" stroke=\"{border}\"/>\n\
-         \x20   <text x=\"44\" y=\"108\" fill=\"{muted}\" font-size=\"11\" font-family=\"system-ui,sans-serif\">PROMPT CACHE HIT</text>\n\
-         \x20   <text x=\"44\" y=\"138\" fill=\"{accent}\" font-size=\"24\" font-weight=\"700\" font-family=\"ui-monospace,Menlo,monospace\">{cache_pct}</text>\n\
-         \x20   <text x=\"44\" y=\"158\" fill=\"{muted}\" font-size=\"11\" font-family=\"system-ui,sans-serif\">{breaks} cold-cache breaks</text>\n\
+         \x20   <text x=\"44\" y=\"108\" fill=\"{muted}\" font-size=\"11\" font-family=\"{sans}\">PROMPT CACHE HIT</text>\n\
+         \x20   <text x=\"44\" y=\"138\" fill=\"{accent}\" font-size=\"24\" font-weight=\"700\" font-family=\"{mono}\">{cache_pct}</text>\n\
+         \x20   <text x=\"44\" y=\"158\" fill=\"{muted}\" font-size=\"11\" font-family=\"{sans}\">{breaks} cold-cache breaks</text>\n\
          \x20   <rect x=\"248\" y=\"84\" width=\"206\" height=\"88\" rx=\"10\" fill=\"{card_bg}\" stroke=\"{border}\"/>\n\
-         \x20   <text x=\"264\" y=\"108\" fill=\"{muted}\" font-size=\"11\" font-family=\"system-ui,sans-serif\">UNCACHED INPUT SPEND</text>\n\
-         \x20   <text x=\"264\" y=\"138\" fill=\"{warn}\" font-size=\"24\" font-weight=\"700\" font-family=\"ui-monospace,Menlo,monospace\">{uncached_str}</text>\n\
-         \x20   <text x=\"264\" y=\"158\" fill=\"{ok}\" font-size=\"11\" font-family=\"system-ui,sans-serif\">{saved_sub}</text>\n\
+         \x20   <text x=\"264\" y=\"108\" fill=\"{muted}\" font-size=\"11\" font-family=\"{sans}\">UNCACHED INPUT SPEND</text>\n\
+         \x20   <text x=\"264\" y=\"138\" fill=\"{warn}\" font-size=\"24\" font-weight=\"700\" font-family=\"{mono}\">{uncached_str}</text>\n\
+         \x20   <text x=\"264\" y=\"158\" fill=\"{ok}\" font-size=\"11\" font-family=\"{sans}\">{saved_sub}</text>\n\
          \x20   <rect x=\"468\" y=\"84\" width=\"206\" height=\"88\" rx=\"10\" fill=\"{card_bg}\" stroke=\"{border}\"/>\n\
-         \x20   <text x=\"484\" y=\"108\" fill=\"{muted}\" font-size=\"11\" font-family=\"system-ui,sans-serif\">FIRST-EDIT CONTEXT P50</text>\n\
-         \x20   <text x=\"484\" y=\"138\" fill=\"{fg}\" font-size=\"24\" font-weight=\"700\" font-family=\"ui-monospace,Menlo,monospace\">{fe_str}</text>\n\
-         \x20   <text x=\"484\" y=\"158\" fill=\"{muted}\" font-size=\"11\" font-family=\"system-ui,sans-serif\">{fe_sub}</text>\n\
+         \x20   <text x=\"484\" y=\"108\" fill=\"{muted}\" font-size=\"11\" font-family=\"{sans}\">FIRST-EDIT CONTEXT P50</text>\n\
+         \x20   <text x=\"484\" y=\"138\" fill=\"{fg}\" font-size=\"24\" font-weight=\"700\" font-family=\"{mono}\">{fe_str}</text>\n\
+         \x20   <text x=\"484\" y=\"158\" fill=\"{muted}\" font-size=\"11\" font-family=\"{sans}\">{fe_sub}</text>\n\
          \x20   <rect x=\"688\" y=\"84\" width=\"204\" height=\"88\" rx=\"10\" fill=\"{card_bg}\" stroke=\"{border}\"/>\n\
-         \x20   <text x=\"704\" y=\"108\" fill=\"{muted}\" font-size=\"11\" font-family=\"system-ui,sans-serif\">BLANKET-READ TURNS</text>\n\
-         \x20   <text x=\"704\" y=\"138\" fill=\"{err}\" font-size=\"24\" font-weight=\"700\" font-family=\"ui-monospace,Menlo,monospace\">{blanket_str}</text>\n\
-         \x20   <text x=\"704\" y=\"158\" fill=\"{muted}\" font-size=\"11\" font-family=\"system-ui,sans-serif\">{blanket_sub}</text>\n\
+         \x20   <text x=\"704\" y=\"108\" fill=\"{muted}\" font-size=\"11\" font-family=\"{sans}\">BLANKET-READ TURNS</text>\n\
+         \x20   <text x=\"704\" y=\"138\" fill=\"{err}\" font-size=\"24\" font-weight=\"700\" font-family=\"{mono}\">{blanket_str}</text>\n\
+         \x20   <text x=\"704\" y=\"158\" fill=\"{muted}\" font-size=\"11\" font-family=\"{sans}\">{blanket_sub}</text>\n\
          \x20 </g>\n\
          \x20 <rect x=\"28\" y=\"190\" width=\"426\" height=\"214\" rx=\"10\" fill=\"{card_bg}\" stroke=\"{border}\"/>\n\
-         \x20 <text x=\"44\" y=\"216\" fill=\"{fg}\" font-size=\"13\" font-weight=\"700\" font-family=\"system-ui,sans-serif\">EMPIRICAL MODEL CACHE TTL CLIFFS</text>\n\
+         \x20 <text x=\"44\" y=\"216\" fill=\"{fg}\" font-size=\"13\" font-weight=\"700\" font-family=\"{sans}\">EMPIRICAL MODEL CACHE TTL CLIFFS</text>\n\
          {ttl_rows}\
          \x20 <rect x=\"468\" y=\"190\" width=\"424\" height=\"214\" rx=\"10\" fill=\"{card_bg}\" stroke=\"{border}\"/>\n\
-         \x20 <text x=\"486\" y=\"216\" fill=\"{fg}\" font-size=\"13\" font-weight=\"700\" font-family=\"system-ui,sans-serif\">POST-COMPACT CONTEXT MIX &amp; OBSERVED COHORTS</text>\n\
+         \x20 <text x=\"486\" y=\"216\" fill=\"{fg}\" font-size=\"13\" font-weight=\"700\" font-family=\"{sans}\">POST-COMPACT CONTEXT MIX &amp; OBSERVED COHORTS</text>\n\
          {ctx_bar}\
          {ctx_legend}\
          \x20 <line x1=\"486\" y1=\"342\" x2=\"874\" y2=\"342\" stroke=\"{border}\" stroke-width=\"1\"/>\n\
-         \x20 <text x=\"486\" y=\"365\" fill=\"{muted}\" font-size=\"11\" font-family=\"ui-monospace,Menlo,monospace\">{c1}</text>\n\
-         \x20 <text x=\"486\" y=\"386\" fill=\"{accent}\" font-size=\"11\" font-family=\"ui-monospace,Menlo,monospace\">{c2}</text>\n\
+         \x20 <text x=\"486\" y=\"365\" fill=\"{muted}\" font-size=\"11\" font-family=\"{mono}\">{c1}</text>\n\
+         \x20 <text x=\"486\" y=\"386\" fill=\"{accent}\" font-size=\"11\" font-family=\"{mono}\">{c2}</text>\n\
          \x20 <rect x=\"28\" y=\"420\" width=\"864\" height=\"96\" rx=\"10\" fill=\"{card_bg}\" stroke=\"{border}\"/>\n\
-         \x20 <text x=\"44\" y=\"438\" fill=\"{muted}\" font-size=\"10.5\" font-weight=\"700\" font-family=\"system-ui,sans-serif\">TOP LOCAL FINDINGS</text>\n\
+         \x20 <text x=\"44\" y=\"438\" fill=\"{muted}\" font-size=\"10.5\" font-weight=\"700\" font-family=\"{sans}\">TOP LOCAL FINDINGS</text>\n\
          {findings_svg}\
-         \x20 <text x=\"28\" y=\"542\" fill=\"{muted}\" font-size=\"11\" font-family=\"ui-monospace,Menlo,monospace\">100% local transcript audit · zero cloud upload · github.com/BobbyCats/agy-hyper</text>\n\
+         \x20 <text x=\"28\" y=\"542\" fill=\"{muted}\" font-size=\"11\" font-family=\"{mono}\">100% local transcript audit · zero cloud upload · github.com/BobbyCats/agy-hyper</text>\n\
          </svg>\n",
+        svg_w = AUDIT_SVG_W,
+        svg_h = AUDIT_SVG_H,
+        sans = SANS_FONT_STACK,
+        mono = MONO_FONT_STACK,
         ver = xml_escape(&report.version),
         breaks = report.cache_break_turns,
         uncached_str = xml_escape(&uncached_str),
@@ -681,6 +703,100 @@ pub fn render_audit_svg(report: &BurnAuditReport, dark: bool) -> String {
         c1 = xml_escape(&cohort_line_1),
         c2 = xml_escape(&cohort_line_2),
     )
+}
+
+fn pick_installed_family(db: &usvg::fontdb::Database, preferred: &[&str]) -> Option<String> {
+    for candidate in preferred {
+        if db.faces().any(|f| {
+            f.families
+                .iter()
+                .any(|(name, _)| name.eq_ignore_ascii_case(candidate))
+        }) {
+            return Some((*candidate).to_string());
+        }
+    }
+    db.faces()
+        .next()
+        .and_then(|f| f.families.first().map(|(name, _)| name.clone()))
+}
+
+/// Rasterize the single-source audit SVG into a framed 2x Retina PNG (1920×1200 at scale=2.0)
+/// in pure Rust with zero external browser/CLI dependencies.
+pub fn render_svg_to_png(svg_xml: &str, dark: bool, scale: f32) -> Result<Vec<u8>> {
+    let scale = scale.clamp(1.0, 4.0);
+    let mut fontdb = usvg::fontdb::Database::new();
+    fontdb.load_system_fonts();
+    if fontdb.is_empty() {
+        return Err(anyhow!(
+            "no system fonts available for local PNG rasterization (use --svg or `agy-hyper ui` to export via browser)"
+        ));
+    }
+
+    let sans = pick_installed_family(
+        &fontdb,
+        &[
+            "Helvetica Neue",
+            "Segoe UI",
+            "Inter",
+            "DejaVu Sans",
+            "Liberation Sans",
+            "Noto Sans",
+            "Arial",
+        ],
+    );
+    let mono = pick_installed_family(
+        &fontdb,
+        &[
+            "Menlo",
+            "Consolas",
+            "JetBrains Mono",
+            "Cascadia Mono",
+            "DejaVu Sans Mono",
+            "Liberation Mono",
+            "Courier New",
+        ],
+    );
+    if let Some(ref s) = sans {
+        fontdb.set_sans_serif_family(s);
+    }
+    if let Some(ref m) = mono {
+        fontdb.set_monospace_family(m);
+    }
+
+    let mut opt = usvg::Options::default();
+    if let Some(s) = sans {
+        opt.font_family = s;
+    }
+    opt.fontdb = std::sync::Arc::new(fontdb);
+
+    let tree = usvg::Tree::from_str(svg_xml, &opt)
+        .map_err(|e| anyhow!("failed to parse audit SVG for PNG export: {}", e))?;
+
+    let pad_px = (AUDIT_PNG_PAD as f32) * scale;
+    let out_w = ((AUDIT_SVG_W + 2 * AUDIT_PNG_PAD) as f32 * scale).round() as u32;
+    let out_h = ((AUDIT_SVG_H + 2 * AUDIT_PNG_PAD) as f32 * scale).round() as u32;
+    let mut pixmap = tiny_skia::Pixmap::new(out_w, out_h)
+        .ok_or_else(|| anyhow!("failed to allocate {}x{} PNG canvas", out_w, out_h))?;
+
+    let outer_bg = if dark {
+        tiny_skia::Color::from_rgba8(6, 9, 17, 255)
+    } else {
+        tiny_skia::Color::from_rgba8(226, 232, 240, 255)
+    };
+    pixmap.fill(outer_bg);
+
+    let transform = tiny_skia::Transform::from_scale(scale, scale).post_translate(pad_px, pad_px);
+    resvg::render(&tree, transform, &mut pixmap.as_mut());
+
+    pixmap
+        .encode_png()
+        .map_err(|e| anyhow!("failed to encode audit PNG: {}", e))
+}
+
+/// Render the shareable 2x Retina (1920×1200) local burn audit PNG directly from `BurnAuditReport`.
+pub fn render_audit_png(report: &BurnAuditReport, dark: bool) -> Result<Vec<u8>> {
+    let svg = render_audit_svg(report, dark);
+    render_svg_to_png(&svg, dark, 2.0)
 }
 
 #[cfg(test)]
@@ -820,6 +936,16 @@ mod tests {
         assert!(svg.starts_with("<svg "));
         assert!(svg.contains("gemini-4-carbon"));
         assert!(svg.contains("90s · emp"));
+        assert!(svg.contains("width=\"164\""), "TTL bar track must leave clearance before right label");
+        assert!(TTL_BAR_X + TTL_BAR_MAX_W <= 352.0);
         assert!(svg.ends_with("</svg>\n"));
+
+        // Pure-Rust 2x Retina PNG export verification (1920x1200)
+        let png = render_audit_png(&report, true).expect("render_audit_png should succeed");
+        assert!(png.len() > 12_000, "PNG should contain real rendered card pixels, got {}B", png.len());
+        assert_eq!(&png[0..8], b"\x89PNG\r\n\x1a\n", "valid PNG signature");
+        let w = u32::from_be_bytes([png[16], png[17], png[18], png[19]]);
+        let h = u32::from_be_bytes([png[20], png[21], png[22], png[23]]);
+        assert_eq!((w, h), (1920, 1200));
     }
 }

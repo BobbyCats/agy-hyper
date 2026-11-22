@@ -12,7 +12,7 @@
 [![Release](https://img.shields.io/github/v/release/BobbyCats/agy-hyper?style=flat-square&color=E25B2A&labelColor=1E2022)](https://github.com/BobbyCats/agy-hyper/releases/latest)
 [![License: MIT](https://img.shields.io/badge/License-MIT-0EA5E9.svg?style=flat-square)](./LICENSE)
 [![桌面版 + CLI](https://img.shields.io/badge/支持端-桌面版_%2B_CLI_(agy)-16A34A.svg?style=flat-square)](#antigravity-cliagy完整支持)
-[![Rust](https://img.shields.io/badge/单文件引擎-Rust_~4MB_压缩包-111827.svg?style=flat-square&logo=rust&logoColor=white)](#安全与透明说明)
+[![Rust](https://img.shields.io/badge/单文件引擎-Rust_~4.5MB_压缩包-111827.svg?style=flat-square&logo=rust&logoColor=white)](#安全与透明说明)
 [![Follow on X](https://img.shields.io/badge/X-@BobbyCat2025-000000.svg?style=flat-square&logo=x&logoColor=white)](https://x.com/BobbyCat2025)
 
 [English](./README.md) · **简体中文** · [一行安装](#一行安装装完即用) · [CLI 支持](#antigravity-cliagy完整支持) · [实测报告](./docs/ANALYSIS_REPORT.md) · [安全透明](#安全与透明说明) · [实测基准](#可复现实测数据) · [卸载说明](#卸载与保留说明)
@@ -23,7 +23,7 @@
 
 **10 秒看清你的 Antigravity 额度到底烧在了哪里——而且不用牺牲原生行内 Diff 对比卡片。**
 
-复盘本机 **80 个真实会话（4,184 轮）** 后揪出两个最大元凶：一半编码任务在**改第一行代码前就已经靠盲读把上下文干到 `151k+`**；而且不同模型族的 Prompt 缓存保鲜拐点根本不一样（Carbon **`~90s`**、Opus **`~120s`**、Neon/Argon **`~180s`**）。**AGY Hyper** 提供 10 秒离线烧额度体检卡（`agy-hyper audit --svg`）、实时侧边栏/终端缓存保鲜表、BLAKE3 WAL 行级 Diff 一键撤回，以及四档分层 Rust 加速（`Observe` / `Safe` / `Balanced` / `Hyper`）。
+复盘本机 **80 个真实会话（4,184 轮）** 后揪出两个最大元凶：一半编码任务在**改第一行代码前就已经靠盲读把上下文干到 `151k+`**；而且不同模型族的 Prompt 缓存保鲜拐点根本不一样（Carbon **`~90s`**、Opus **`~120s`**、Neon/Argon **`~180s`**）。**AGY Hyper** 提供 10 秒离线烧额度体检卡（`agy-hyper audit --png audit.png` 纯 Rust 直出 2x 高清 PNG / `--svg`）、实时侧边栏/终端缓存保鲜表、BLAKE3 WAL 行级 Diff 一键撤回，以及四档分层 Rust 加速（`Observe` / `Safe` / `Balanced` / `Hyper`）。
 
 | 首次改代码前上下文膨胀 | 分模型实测缓存掉崖拐点 | 原生 Diff 卡片保留 | 本地引擎与 CLI 验证 |
 | :---: | :---: | :---: | :---: |
@@ -81,7 +81,7 @@ git clone https://github.com/BobbyCats/agy-hyper.git && cd agy-hyper && ./instal
 
 - **可核验构建**：所有 Release 归档均由公开 GitHub Actions（`.github/workflows/release.yml`）编译产出，配套 `SHA256SUMS`（安装脚本原子替换前强制校验）与 GitHub Artifact Attestations；如果不放心任何预编译包，直接 `git clone` 后运行 `./install.sh` 即可从 MIT 开源 Rust 源码本地编出二进制。
 - **零遥测、零云端上传**：所有会话日志、WAL 快照、用量账本和 SVG 体检图全部留在本地 `~/.gemini/antigravity/agy-hyper/`。
-- **严格工作区牢笼 + Secret Shield**：MCP 工具无法越界读写工作区外文件，`hyper_check` 禁用通用 Shell（仅放行白名单构建/测试工具），`.env` 与密钥文件默认屏蔽。
+- **严格工作区牢笼、`PLUGIN_ROOT` 防呆 + Secret Shield**：MCP 工具无法越界读写工作区外文件；当宿主未传 `workspace` 且默认落到插件安装目录 / `$HOME` / `/` 时立即 Fail-Fast 拦截防误扫；`hyper_check` 禁用通用 Shell（仅放行白名单构建/测试工具），`.env` 与密钥文件默认屏蔽。
 
 ### AI 一键安装与体检
 
@@ -92,7 +92,8 @@ git clone https://github.com/BobbyCats/agy-hyper.git && cd agy-hyper && ./instal
 常用终端命令：
 
 ```bash
-agy-hyper audit --svg audit.svg   # 10 秒本机烧额度诊断 + 导出可分享深浅色 SVG 体检卡
+agy-hyper audit --png audit.png   # 10 秒本机烧额度诊断 + 纯 Rust 直出 2x 高清 PNG（1920x1200，可直接发推晒图）
+agy-hyper audit --svg audit.svg   # 导出可分享深浅色矢量 SVG 体检卡
 agy-hyper doctor                  # 检查 Tree-sitter 语法、gix、守护进程延迟与安全边界
 agy-hyper tx diff <tx_id>         # 撤回前先在终端审阅 WAL 快照的行级红绿 Diff
 agy-hyper bench --cache-ttl       # 查看各模型族实测 Prompt 缓存衰减曲线与 TTL 拐点
@@ -104,7 +105,7 @@ agy-hyper ui                      # 在浏览器独立打开 AGY Hyper Deck (127
 
 ## 本机烧钱诊断战报卡（`agy-hyper audit`）
 
-运行 `agy-hyper audit --days 14 --svg audit-card.svg`，100% 本地离线扫描你自己的 Antigravity 历史日志（零云端上传），直接揪出各模型真实缓存掉崖时间、未命中输入成本、首次改代码前上下文膨胀与地毯式预读次数，并生成一张可直接分享的矢量 SVG 诊断卡：
+运行 `agy-hyper audit --days 14 --png audit-card.png`（或 `--svg audit-card.svg`），100% 本地离线扫描你自己的 Antigravity 历史日志（零云端上传、零外部浏览器/ImageMagick 依赖），直接揪出各模型真实缓存掉崖时间、未命中输入成本、首次改代码前上下文膨胀与地毯式预读次数，一键生成可直接发 X / 微信 / Slack 的 2x 高清 PNG 或矢量 SVG 诊断卡：
 
 <div align="center">
   <picture>
@@ -122,7 +123,7 @@ agy-hyper ui                      # 在浏览器独立打开 AGY Hyper Deck (127
 
 - **分层零侵入架构**：支持先用 **纯观测（Observe）** 模式（只开侧边栏驾驶舱、烧钱诊断与被动 WAL 快照，完全不碰原生工具与 Diff 卡片），或切到 **安全稳健（Safe）**（开启打包读与同步校验，同时保留原生 `edit_file` 行内 Diff），也可以一键解锁 **均衡 / 狂暴** 全量 Rust MCP 加速，并在 **引擎** 页独立开关读/写/校验三个工具层。
 - **简洁模式**面向日常使用：展示上下文水位、单轮 P50、本步与会话累计缓存命中、**子代理树状态条**（高亮运行中红线与静默 `>=90s` 的 `STALLED` 卡死子代理）、**本会话/整树等价估值缎带**（支持一键切货币）、**分模型自适应缓存保鲜条**（实测/默认 TTL 徽章与连续失败熔断预警）、四档分层模式切换，以及 **WAL 行级 Unified Diff 内联审阅 + 一键撤回**。
-- **极客模式**展开五大深度视图：**耗时瀑布**（LLM / Hyper / 普通工具严格拆分）、**上下文轨迹**（双轴堆叠面积曲线 + **上下文 X-Ray 透视条**，拆分读文件/命令输出/Hyper 工具/思考回复并标注首次改动水位与地毯读次数）、**用量账本**（`24H / 7D / 30D / 90D` 增量统计 + 8 种货币 + 手动 **同步汇率** + **本机烧钱诊断与 TTL 断崖** 及一键导出 `.svg` 战报卡）、**引擎与缓存**（AST/打包命中 + 细粒度 MCP 开关）、**回滚与审计**。
+- **极客模式**展开五大深度视图：**耗时瀑布**（LLM / Hyper / 普通工具严格拆分）、**上下文轨迹**（双轴堆叠面积曲线 + **上下文 X-Ray 透视条**，拆分读文件/命令输出/Hyper 工具/思考回复并标注首次改动水位与地毯读次数）、**用量账本**（`24H / 7D / 30D / 90D` 增量统计 + 8 种货币 + 手动 **同步汇率** + **本机烧钱诊断与 TTL 断崖** 及一键导出 **2x PNG / SVG** 战报卡）、**引擎与缓存**（AST/打包命中 + 细粒度 MCP 开关）、**回滚与审计**。
 
 <div align="center">
 <table>
@@ -217,7 +218,7 @@ Apple Silicon 实机 Release（LTO 优化）通过 `./bench/run-bench.sh` 实测
 | `hyper_search` + `gix` 只读 Git（单次调用） | **20 ms** | 对比基线 `git status && git log && grep -rn` 耗时 **43 ms**（**2.2x 提速**） |
 | `hyper_pack`（冷启单遍 ripgrep + AST + 切片 + `gix` + 1-hop） | **58 ms** | 零外部 `rg` 与 `git` 二进制依赖 |
 | `agy-hyper statusline`（守护进程热脉冲 + CLI stdin） | **4.2 ms** | 含进程冷启、无锁 UDS 通信与渲染（任何异常保证 `exit 0`） |
-| Rust 单元与安全混沌测试全集（`48/48`） | **2.1 s** | 覆盖磁盘满 staging、悬空软链、4 语言 1-hop、WAL 回滚、静默/崩溃看门狗、实测 TTL 迁移、上下文 X-Ray、循环熔断与 CLI 状态栏 |
+| Rust 单元与安全混沌测试全集（`53/53`） | **2.1 s** | 覆盖磁盘满 staging、悬空软链、4 语言 1-hop、WAL 回滚、静默/崩溃看门狗、实测 TTL 迁移、上下文 X-Ray、循环熔断、CLI 状态栏、纯 Rust 2x PNG 战报直出与 MCP `PLUGIN_ROOT` 防呆 |
 
 在任意本地仓库一键复现：
 
@@ -232,7 +233,7 @@ Apple Silicon 实机 Release（LTO 优化）通过 `./bench/run-bench.sh` 实测
 agy-hyper doctor                                # 全链路 Tree-sitter、gix、守护进程与安全体检
 agy-hyper daemon start|stop|status              # 管理本地共享 Rust 守护进程
 agy-hyper ui [--port 47821]                     # 在浏览器独立打开 AGY Hyper Deck
-agy-hyper audit [--days 14] [--sessions 80] [--svg card.svg] [--theme dark|light] [--json]
+agy-hyper audit [--days 14] [--sessions 80] [--png card.png] [--svg card.svg] [--theme dark|light] [--json]
 agy-hyper usage [--window 24h|7d|30d|90d] [--currency CNY] [--json]
 agy-hyper bench [--sessions 10] [--svg waterfall.svg] [--cache-ttl] [--json]
 agy-hyper statusline [--format compact|rich|json] [--title] [--no-color]

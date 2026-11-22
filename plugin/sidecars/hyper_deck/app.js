@@ -76,6 +76,29 @@
     }
   }
 
+  async function fetchAuditSvgPayload() {
+    const days = state.usageWindow === '24h' ? 1 : state.usageWindow === '7d' ? 7 : state.usageWindow === '30d' ? 30 : 90;
+    const tz = -new Date().getTimezoneOffset();
+    const theme = isDark() ? 'dark' : 'light';
+    const res = await apiFetch(`/api/audit/svg?days=${days}&theme=${theme}&tzOffsetMins=${tz}`, { method: 'GET' });
+    const svgText = await res.text();
+    if (!svgText.trim().startsWith('<svg')) {
+      throw new Error('invalid SVG response');
+    }
+    return { days, theme, svgText };
+  }
+
+  function triggerBlobDownload(blob, filename) {
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 1500);
+  }
+
   async function exportAuditSvg() {
     const btn = $('btn-export-audit');
     if (!btn || btn.disabled) return;
@@ -83,24 +106,55 @@
     const prev = btn.textContent;
     btn.textContent = t('usage.exporting_card');
     try {
-      const days = state.usageWindow === '24h' ? 1 : state.usageWindow === '7d' ? 7 : state.usageWindow === '30d' ? 30 : 90;
-      const tz = -new Date().getTimezoneOffset();
-      const theme = isDark() ? 'dark' : 'light';
-      const res = await apiFetch(`/api/audit/svg?days=${days}&theme=${theme}&tzOffsetMins=${tz}`, { method: 'GET' });
-      const svgText = await res.text();
-      if (!svgText.trim().startsWith('<svg')) {
-        throw new Error('invalid SVG response');
-      }
+      const { days, theme, svgText } = await fetchAuditSvgPayload();
       const blob = new Blob([svgText], { type: 'image/svg+xml;charset=utf-8' });
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = `agy-hyper-audit-${days}d-${theme}.svg`;
-      document.body.appendChild(a);
-      a.click();
-      a.remove();
-      setTimeout(() => URL.revokeObjectURL(url), 1500);
+      triggerBlobDownload(blob, `agy-hyper-audit-${days}d-${theme}.svg`);
       showToast(t('usage.toast_audit_ok'));
+    } catch (e) {
+      showToast(t('usage.toast_audit_err', { err: String(e?.message || e) }));
+    } finally {
+      btn.disabled = false;
+      btn.textContent = prev;
+    }
+  }
+
+  async function exportAuditPng() {
+    const btn = $('btn-export-audit-png');
+    if (!btn || btn.disabled) return;
+    btn.disabled = true;
+    const prev = btn.textContent;
+    btn.textContent = t('usage.exporting_card');
+    try {
+      const { days, theme, svgText } = await fetchAuditSvgPayload();
+      const svgBlob = new Blob([svgText], { type: 'image/svg+xml;charset=utf-8' });
+      const svgUrl = URL.createObjectURL(svgBlob);
+      try {
+        const img = await new Promise((resolve, reject) => {
+          const el = new Image();
+          el.onload = () => resolve(el);
+          el.onerror = () => reject(new Error('failed to decode SVG for PNG export'));
+          el.src = svgUrl;
+        });
+        const scale = 2;
+        const pad = 20;
+        const cardW = 920;
+        const cardH = 560;
+        const canvas = document.createElement('canvas');
+        canvas.width = (cardW + pad * 2) * scale;
+        canvas.height = (cardH + pad * 2) * scale;
+        const ctx = canvas.getContext('2d');
+        if (!ctx) throw new Error('canvas 2d context unavailable');
+        ctx.fillStyle = theme === 'dark' ? '#060911' : '#E2E8F0';
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+        ctx.drawImage(img, pad * scale, pad * scale, cardW * scale, cardH * scale);
+        const pngBlob = await new Promise((resolve, reject) => {
+          canvas.toBlob((b) => (b ? resolve(b) : reject(new Error('PNG encoding failed'))), 'image/png');
+        });
+        triggerBlobDownload(pngBlob, `agy-hyper-audit-${days}d-${theme}.png`);
+        showToast(t('usage.toast_audit_png_ok'));
+      } finally {
+        URL.revokeObjectURL(svgUrl);
+      }
     } catch (e) {
       showToast(t('usage.toast_audit_err', { err: String(e?.message || e) }));
     } finally {
@@ -402,6 +456,10 @@
 
   $('btn-sync-fx')?.addEventListener('click', () => {
     syncLiveFx();
+  });
+
+  $('btn-export-audit-png')?.addEventListener('click', () => {
+    exportAuditPng();
   });
 
   $('btn-export-audit')?.addEventListener('click', () => {

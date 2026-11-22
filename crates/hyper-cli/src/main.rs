@@ -5,7 +5,7 @@ mod statusline;
 use anyhow::{anyhow, Result};
 use clap::{Parser, Subcommand};
 use hyper_core::ast::outline_source;
-use hyper_core::audit::{build_audit_report, render_audit_svg, BurnAuditReport};
+use hyper_core::audit::{build_audit_report, render_audit_png, render_audit_svg, BurnAuditReport};
 use hyper_core::bench::{aggregate_sessions, render_waterfall_svg};
 use hyper_core::config::{HyperConfig, Profile};
 use hyper_core::git::quick_head;
@@ -68,7 +68,7 @@ enum Commands {
         #[arg(long)]
         json: bool,
     },
-    /// Run a local multi-session burn audit (cache TTL cliffs, pre-edit bloat, cost & SVG card)
+    /// Run a local multi-session burn audit (cache TTL cliffs, pre-edit bloat, cost & PNG/SVG card)
     Audit {
         /// Lookback window in days (1..90)
         #[arg(long, default_value_t = 14)]
@@ -76,10 +76,13 @@ enum Commands {
         /// Maximum recent sessions to inspect
         #[arg(long, default_value_t = 80)]
         sessions: usize,
+        /// Export a shareable 2x Retina PNG diagnostic report card (1920x1200, pure Rust)
+        #[arg(long)]
+        png: Option<PathBuf>,
         /// Export a shareable SVG diagnostic report card
         #[arg(long)]
         svg: Option<PathBuf>,
-        /// Card theme for --svg: dark | light
+        /// Card theme for --png / --svg: dark | light
         #[arg(long, default_value = "dark")]
         theme: String,
         /// Local timezone offset in minutes
@@ -238,11 +241,12 @@ fn main() -> Result<()> {
         Commands::Audit {
             days,
             sessions,
+            png,
             svg,
             theme,
             tz_offset_mins,
             json,
-        } => handle_audit(days, sessions, svg, &theme, tz_offset_mins, json),
+        } => handle_audit(days, sessions, png, svg, &theme, tz_offset_mins, json),
         Commands::Statusline {
             format,
             title,
@@ -810,6 +814,7 @@ fn handle_bench_cache_ttl(as_json: bool) -> Result<()> {
 fn handle_audit(
     days: u32,
     sessions: usize,
+    png: Option<PathBuf>,
     svg: Option<PathBuf>,
     theme: &str,
     tz_offset_mins: i32,
@@ -826,8 +831,24 @@ fn handle_audit(
         _ => build_audit_report(days, sessions, &cfg, tz_offset_mins),
     };
 
+    let dark = !theme.trim().eq_ignore_ascii_case("light");
+    if let Some(png_path) = png {
+        let png_bytes = render_audit_png(&report, dark)?;
+        if let Some(parent) = png_path.parent() {
+            if !parent.as_os_str().is_empty() {
+                fs::create_dir_all(parent)?;
+            }
+        }
+        fs::write(&png_path, png_bytes)?;
+        if !as_json {
+            println!(
+                "Exported shareable 2x PNG audit card -> {} (1920x1200)",
+                png_path.display()
+            );
+        }
+    }
+
     if let Some(svg_path) = svg {
-        let dark = !theme.trim().eq_ignore_ascii_case("light");
         let svg_xml = render_audit_svg(&report, dark);
         if let Some(parent) = svg_path.parent() {
             if !parent.as_os_str().is_empty() {
@@ -836,7 +857,7 @@ fn handle_audit(
         }
         fs::write(&svg_path, svg_xml)?;
         if !as_json {
-            println!("Exported shareable audit card -> {}", svg_path.display());
+            println!("Exported shareable SVG audit card -> {}", svg_path.display());
         }
     }
 

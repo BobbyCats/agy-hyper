@@ -12,7 +12,7 @@
 [![Release](https://img.shields.io/github/v/release/BobbyCats/agy-hyper?style=flat-square&color=E25B2A&labelColor=1E2022)](https://github.com/BobbyCats/agy-hyper/releases/latest)
 [![License: MIT](https://img.shields.io/badge/License-MIT-0EA5E9.svg?style=flat-square)](./LICENSE)
 [![Antigravity App + CLI](https://img.shields.io/badge/Surface-App_%2B_CLI_(agy)-16A34A.svg?style=flat-square)](#antigravity-cli-agy-support)
-[![Rust](https://img.shields.io/badge/Single_Binary-Rust_~4MB_tar.gz-111827.svg?style=flat-square&logo=rust&logoColor=white)](#security--transparency)
+[![Rust](https://img.shields.io/badge/Single_Binary-Rust_~4.5MB_tar.gz-111827.svg?style=flat-square&logo=rust&logoColor=white)](#security--transparency)
 [![Follow on X](https://img.shields.io/badge/Follow-@BobbyCat2025-000000.svg?style=flat-square&logo=x&logoColor=white)](https://x.com/BobbyCat2025)
 
 **English** · [简体中文](./README.zh-CN.md) · [Quick Install](#install-in-one-line) · [CLI Support](#antigravity-cli-agy-support) · [Analysis Report](./docs/ANALYSIS_REPORT.md) · [Security](#security--transparency) · [Benchmarks](#reproducible-benchmarks) · [Uninstall](#uninstall--preserved-files)
@@ -23,7 +23,7 @@
 
 **Find out why your Antigravity quota drains so fast — without giving up native inline diffs.**
 
-Analyzing **80 real local sessions (4,184 turns)** exposed two hidden killers: half of coding sessions load **`151k+` tokens of exploratory file reads before editing a single line**, and each model family's prompt cache drops off a different cliff (**`~90s`** on Carbon, **`~120s`** on Opus, **`~180s`** on Neon/Argon). **AGY Hyper** gives you a 10-second offline burn audit (`agy-hyper audit --svg`), a live sidecar/terminal cache meter, crash-safe BLAKE3 WAL line-level Diff Undo, and layered Rust MCP acceleration (`Observe` / `Safe` / `Balanced` / `Hyper`).
+Analyzing **80 real local sessions (4,184 turns)** exposed two hidden killers: half of coding sessions load **`151k+` tokens of exploratory file reads before editing a single line**, and each model family's prompt cache drops off a different cliff (**`~90s`** on Carbon, **`~120s`** on Opus, **`~180s`** on Neon/Argon). **AGY Hyper** gives you a 10-second offline burn audit (`agy-hyper audit --png audit.png` / `--svg`), a live sidecar/terminal cache meter, crash-safe BLAKE3 WAL line-level Diff Undo, and layered Rust MCP acceleration (`Observe` / `Safe` / `Balanced` / `Hyper`).
 
 | First-Edit Context Bloat | Empirical Cache TTL Cliffs | Native Diffs Preserved | Local Engine & CLI |
 | :---: | :---: | :---: | :---: |
@@ -81,7 +81,7 @@ We know running any local binary next to your coding workspace requires real tru
 
 - **Auditable builds**: Every release archive is built in public GitHub Actions (`.github/workflows/release.yml`), paired with `SHA256SUMS` (verified by `install.sh`/`install.ps1` before atomic swap) and GitHub Artifact Attestations. Don't want a prebuilt binary? Clone and run `./install.sh` to compile locally from 100% open-source MIT Rust code.
 - **Zero telemetry / zero cloud uploads**: All transcripts, WAL snapshots, usage ledgers, and SVG audit cards stay strictly on disk under `~/.gemini/antigravity/agy-hyper/`.
-- **Strict workspace jail & Secret Shield**: MCP tools cannot escape your workspace root, shell execution is disabled in `hyper_check` (allowlisted build/test tools only), and `.env` / key files are shielded by default.
+- **Strict workspace jail, `PLUGIN_ROOT` guard & Secret Shield**: MCP tools cannot escape your workspace root, fail fast if a host spawns MCP inside the plugin install directory / `$HOME` / `/` without passing `workspace`, disable shell execution in `hyper_check` (allowlisted build/test tools only), and shield `.env` / key files by default.
 
 ### AI One-Click Install
 
@@ -92,7 +92,8 @@ Paste this prompt into **Antigravity (App or CLI), Claude Code, Codex, or Cursor
 Terminal essentials:
 
 ```bash
-agy-hyper audit --svg audit.svg   # 10s local burn audit + shareable dark/light SVG diagnostic card
+agy-hyper audit --png audit.png   # 10s local burn audit + shareable 2x Retina PNG (1920x1200, pure Rust)
+agy-hyper audit --svg audit.svg   # vector dark/light SVG diagnostic card
 agy-hyper doctor                  # verify Tree-sitter grammars, gix, daemon RTT & security posture
 agy-hyper tx diff <tx_id>         # inspect line-level unified diff for any WAL snapshot before undo
 agy-hyper bench --cache-ttl       # inspect empirical per-model prompt-cache TTL decay curves
@@ -104,7 +105,7 @@ agy-hyper ui                      # launch AGY Hyper Deck standalone at http://1
 
 ## Local Burn Audit Card (`agy-hyper audit`)
 
-Run `agy-hyper audit --days 14 --svg audit-card.svg` to audit your own Antigravity transcripts 100% locally (zero cloud uploads). It surfaces empirical per-model cache TTL cliffs, uncached input spend, pre-edit context bloat, blanket-read turns, and an unadjusted local cohort view in a crisp shareable SVG card:
+Run `agy-hyper audit --days 14 --png audit-card.png` (or `--svg audit-card.svg`) to audit your own Antigravity transcripts 100% locally (zero cloud uploads, zero external Chrome/ImageMagick deps). It surfaces empirical per-model cache TTL cliffs, uncached input spend, pre-edit context bloat, blanket-read turns, and an unadjusted local cohort view in a crisp shareable 2x Retina PNG or vector SVG card:
 
 <div align="center">
   <picture>
@@ -122,7 +123,7 @@ Docked directly in Antigravity's auxiliary pane via `SIDECAR_UI_ENTRYPOINT_AUX_P
 
 - **Layered Zero-Intrusion Design**: start in **Observe** mode (read-only cockpit + burn audit + passive WAL capture; native tools & diff cards untouched), switch to **Safe** (bundled reads & preset checks while keeping native `edit_file` inline diffs), or unlock **Balanced / Hyper** full Rust MCP acceleration — plus granular per-tool toggles (`MCP Read`, `MCP Edit`, `MCP Check`) under **Engine**.
 - **Simple Mode** keeps daily essentials front and center: context level, Turn P50, step vs. session cache hit rate, linked subagent tree strip (highlighting active redlines and `STALLED` subagents silent `>=90s`), session/tree usage ribbon with quick currency switch, **auto-calibrated per-model cache warmth bar** (empirical vs. default TTL badge & loop-guard alerts), 4-mode layered profile switch, and **inline WAL Unified Diff preview + 1-click Undo**.
-- **Pro Mode** opens five deep telemetry tabs: **Waterfall** (disjoint LLM vs. Hyper vs. Standard spans), **Context** (dual-axis cached/uncached curve + **Context X-Ray** composition bar with first-edit token load and blanket-read count), **Usage** (`24H / 7D / 30D / 90D` incremental ledger across 8 currencies, manual **Sync FX**, plus **Local Burn Audit & TTL Cliffs** with 1-click `.svg` card export), **Engine** (AST/pack cache hits & granular MCP layer switches), and **WAL & Audit**.
+- **Pro Mode** opens five deep telemetry tabs: **Waterfall** (disjoint LLM vs. Hyper vs. Standard spans), **Context** (dual-axis cached/uncached curve + **Context X-Ray** composition bar with first-edit token load and blanket-read count), **Usage** (`24H / 7D / 30D / 90D` incremental ledger across 8 currencies, manual **Sync FX**, plus **Local Burn Audit & TTL Cliffs** with 1-click **Export PNG** & **SVG** card download), **Engine** (AST/pack cache hits & granular MCP layer switches), and **WAL & Audit**.
 
 <div align="center">
 <table>
@@ -217,7 +218,7 @@ Measured on Apple Silicon (release LTO build, cold MCP process spawn included) v
 | `hyper_search` + `gix` read-only Git (1 call) | **20 ms** | vs **43 ms** baseline `git status && git log && grep -rn` (**2.2x faster**) |
 | `hyper_pack` (cold single-pass ripgrep + AST + slices + `gix` + 1-hop) | **58 ms** | Zero external `rg` or `git` binaries |
 | `agy-hyper statusline` (warm Daemon pulse + CLI stdin) | **4.2 ms** | Full process exec + lock-free UDS RPC + ANSI/plain-title render (always exits `0`) |
-| Full Rust unit & security chaos suite (`48/48`) | **2.1 s** | Covers ENOSPC staging, dangling symlinks, 4-lang 1-hop, WAL rollback, idle/fail-fast watchdog, empirical TTL migration, Context X-Ray, Loop Guard, CLI statusline |
+| Full Rust unit & security chaos suite (`53/53`) | **2.1 s** | Covers ENOSPC staging, dangling symlinks, 4-lang 1-hop, WAL rollback, idle/fail-fast watchdog, empirical TTL migration, Context X-Ray, Loop Guard, CLI statusline, pure-Rust 2x PNG audit export, and MCP `PLUGIN_ROOT` fail-fast guard |
 
 Reproduce on your own repository:
 
@@ -232,7 +233,7 @@ Reproduce on your own repository:
 agy-hyper doctor                                # Tree-sitter, gix, daemon RTT & security self-check
 agy-hyper daemon start|stop|status              # Manage the shared local Rust daemon
 agy-hyper ui [--port 47821]                     # Launch AGY Hyper Deck standalone in browser
-agy-hyper audit [--days 14] [--sessions 80] [--svg card.svg] [--theme dark|light] [--json]
+agy-hyper audit [--days 14] [--sessions 80] [--png card.png] [--svg card.svg] [--theme dark|light] [--json]
 agy-hyper usage [--window 24h|7d|30d|90d] [--currency CNY] [--json]
 agy-hyper bench [--sessions 10] [--svg waterfall.svg] [--cache-ttl] [--json]
 agy-hyper statusline [--format compact|rich|json] [--title] [--no-color]
