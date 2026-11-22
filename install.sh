@@ -135,6 +135,10 @@ if [[ -n "$SCRIPT_DIR" && -f "${SCRIPT_DIR}/Cargo.toml" && -d "${SCRIPT_DIR}/plu
     echo "✓ Profile set to 'observe' (zero-intrusion cockpit only; switch anytime in Hyper Deck)."
   fi
   recycle_sidecar
+  if command -v agy >/dev/null 2>&1; then
+    agy plugin enable agy-hyper >/dev/null 2>&1 || true
+    echo "✓ Detected Antigravity CLI (agy): enabled agy-hyper plugin."
+  fi
   echo "✓ Installed local build to ${PLUGIN_DIR}"
   if pgrep -f "agy-hyper mcp" >/dev/null 2>&1; then
     echo "ℹ Running MCP server detected; reload plugin in Antigravity if you updated MCP tool handlers."
@@ -204,6 +208,12 @@ if [[ "$OBSERVE" -eq 1 ]]; then
 fi
 
 recycle_sidecar
+
+if command -v agy >/dev/null 2>&1; then
+  agy plugin enable agy-hyper >/dev/null 2>&1 || true
+  echo "✓ Detected Antigravity CLI (agy): enabled agy-hyper plugin."
+  echo "  Tip: run 'agy-hyper cli-setup --apply' to attach the live terminal statusline."
+fi
 
 "${PLUGIN_DIR}/bin/agy-hyper" doctor
 echo "⚡ Done! Open Antigravity and click AGY Hyper Deck in your side pane (or run: agy-hyper ui)."

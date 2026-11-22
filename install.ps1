@@ -128,6 +128,12 @@ try {
     Write-Host "✓ Profile set to 'observe' (zero-intrusion cockpit only; switch anytime in Hyper Deck)." -ForegroundColor Green
   }
 
+  if (Get-Command agy -ErrorAction SilentlyContinue) {
+    & agy plugin enable agy-hyper 2>$null | Out-Null
+    Write-Host "✓ Detected Antigravity CLI (agy): enabled agy-hyper plugin." -ForegroundColor Green
+    Write-Host "  Tip: run 'agy-hyper cli-setup --apply' to attach the live terminal statusline." -ForegroundColor DarkGray
+  }
+
   & (Join-Path $BinDir "agy-hyper.exe") doctor
   Write-Host "⚡ Installed to $PluginDir" -ForegroundColor Cyan
 } finally {

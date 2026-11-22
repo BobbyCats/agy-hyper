@@ -1,85 +1,100 @@
 <div align="center">
 
-<picture>
-  <source media="(prefers-color-scheme: dark)" srcset="./assets/hero-dark.svg">
-  <source media="(prefers-color-scheme: light)" srcset="./assets/hero-light.svg">
-  <img alt="AGY Hyper — Native Rust Acceleration Engine & Telemetry Cockpit for Antigravity" src="./assets/hero-dark.svg" width="100%">
-</picture>
+<img alt="AGY Hyper — Before (151K blind reads & cold cache) vs. With AGY Hyper (live cache meter, inline WAL Diff & 1-click Undo)" src="./assets/hero-bobbycat.png" width="100%">
 
-<br/>
+<br/><br/>
+
+# AGY Hyper
+
+**Local Quota Burn Audit, Live Cache-TTL Cockpit, Inline WAL Undo & Rust MCP Accelerator for Google Antigravity (App & CLI)**
 
 [![CI](https://img.shields.io/github/actions/workflow/status/BobbyCats/agy-hyper/ci.yml?branch=main&style=flat-square&label=CI&logo=githubactions&logoColor=white)](https://github.com/BobbyCats/agy-hyper/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/BobbyCats/agy-hyper?style=flat-square&color=E25B2A&labelColor=1E2022)](https://github.com/BobbyCats/agy-hyper/releases/latest)
 [![License: MIT](https://img.shields.io/badge/License-MIT-0EA5E9.svg?style=flat-square)](./LICENSE)
-[![Rust](https://img.shields.io/badge/Single_Binary-Rust_~10MB-111827.svg?style=flat-square&logo=rust&logoColor=white)](#architecture)
-[![UDS RTT](https://img.shields.io/badge/Daemon_RTT-0.12ms-16A34A.svg?style=flat-square)](#reproducible-benchmarks)
-[![Platform](https://img.shields.io/badge/Platform-macOS_%C2%B7_Linux_%C2%B7_Windows-4B5563.svg?style=flat-square)](#install-in-one-line)
+[![Antigravity App + CLI](https://img.shields.io/badge/Surface-App_%2B_CLI_(agy)-16A34A.svg?style=flat-square)](#antigravity-cli-agy-support)
+[![Rust](https://img.shields.io/badge/Single_Binary-Rust_~4MB_tar.gz-111827.svg?style=flat-square&logo=rust&logoColor=white)](#security--transparency)
 [![Follow on X](https://img.shields.io/badge/Follow-@BobbyCat2025-000000.svg?style=flat-square&logo=x&logoColor=white)](https://x.com/BobbyCat2025)
 
-**English** · [简体中文](./README.zh-CN.md) · [Quick Install](#install-in-one-line) · [AI One-Click](#ai-one-click-install) · [Hyper Deck](#agy-hyper-deck-native-sidecar-cockpit) · [Benchmarks](#reproducible-benchmarks) · [Uninstall](#uninstall--preserved-files) · [Contributing](./CONTRIBUTING.md)
+**English** · [简体中文](./README.zh-CN.md) · [Quick Install](#install-in-one-line) · [CLI Support](#antigravity-cli-agy-support) · [Analysis Report](./docs/ANALYSIS_REPORT.md) · [Security](#security--transparency) · [Benchmarks](#reproducible-benchmarks) · [Uninstall](#uninstall--preserved-files)
 
 </div>
 
 ---
 
-You asked your AI agent to trace one auth middleware. It ran `glob`, then `grep`, read half a file that spilled past 10KB to disk, then guessed the next file — five serial round-trips and 38 seconds gone before writing a single line of code. Most of that wait is queuing for five separate model first-token floors.
+**Find out why your Antigravity quota drains so fast — without giving up native inline diffs.**
 
-**AGY Hyper cuts out the dead air.** One ~10MB static Rust engine collapses multi-turn codebase exploration into a single `14ms` cached pack, guards every multi-file edit behind crash-safe WAL 1-click Undo, and docks a live telemetry & cost cockpit right inside Antigravity's side pane.
+Analyzing **80 real local sessions (4,184 turns)** exposed two hidden killers: half of coding sessions load **`151k+` tokens of exploratory file reads before editing a single line**, and each model family's prompt cache drops off a different cliff (**`~90s`** on Carbon, **`~120s`** on Opus, **`~180s`** on Neon/Argon). **AGY Hyper** gives you a 10-second offline burn audit (`agy-hyper audit --svg`), a live sidecar/terminal cache meter, crash-safe BLAKE3 WAL line-level Diff Undo, and layered Rust MCP acceleration (`Observe` / `Safe` / `Balanced` / `Hyper`).
 
-> **100% Official Antigravity Plugin Protocol**: Built strictly on native MCP, Lifecycle Hooks, Rules, and `SIDECAR_UI_ENTRYPOINT_AUX_PANE`. Zero Electron DOM injection, zero `--remote-debugging-port` exposure, zero edits to `~/.gemini/config/config.json`, and zero conflicts with theme or localization plugins.
+| First-Edit Context Bloat | Empirical Cache TTL Cliffs | Native Diffs Preserved | Local Engine & CLI |
+| :---: | :---: | :---: | :---: |
+| **`151.4k` P50**<br><sub>`241.3k` P90 · `44.9%` File Reads · [Report](./docs/ANALYSIS_REPORT.md)</sub> | **`90s` / `120s` / `180s`**<br><sub>Carbon / Opus / Neon · `38%` spend uncached</sub> | **`Observe` & `Safe`**<br><sub>Zero native-diff loss · Inline WAL Diff in `Hyper`</sub> | **`0.13ms` UDS RTT**<br><sub>App Sidecar + `agy` CLI (`v1.5.14` verified)</sub> |
 
----
+<div align="center">
+  <img src="./assets/ui-showcase.png" alt="AGY Hyper Deck Live Sidecar, Context X-Ray, Inline WAL Unified Diff, and 10s Local Burn Audit SVG" width="100%"/>
+</div>
 
-## Understand the Difference in 10 Seconds
-
-Even if you never touch systems programming, three everyday comparisons tell the whole story:
-
-### 1. Speed: Five Trips Back to the Shed vs. Walking In with the Blueprint
-- **Without AGY Hyper**: You ask a handyman to fix a leak. He walks to the shed to inspect one pipe (wait 6s), walks back to ask where the wrench is (wait 6s), tries to carry a toolbox that's too heavy and drops it halfway (10KB output spill, wait 6s) — five round-trips and 38 seconds burned riding the elevator before touching a single bolt.
-- **With AGY Hyper**: He walks in holding the full floorplan, meter readings, and the exact parts he needs in one hand. One `14ms` pass maps the neighborhood and gets straight to work.
-
-### 2. File Safety: Permanent Marker on the Original vs. Vault Backup + Instant Undo
-- **Without AGY Hyper**: Asking an AI to edit 5 files is like editing a signed contract in permanent marker. If page 3 crashes halfway, pages 1 and 2 are already mangled — and an overeager search might peek inside your `.env` secrets drawer.
-- **With AGY Hyper**: Original bytes are locked into a local WAL vault first. Edits are drafted on temp scratch paper, syntax-checked in `<1ms`, and swapped in atomically. Bad edit? Hit **Undo** in the side pane and every file snaps back byte-for-byte. Secret files stay sealed by default.
-
-### 3. Long Sessions & Subagent Trees: Driving Blind vs. Full Telemetry & Cost Cockpit
-- **Without AGY Hyper**: You have no idea when your prompt cache actually cools for the model you're running, what files or command outputs silently bloated the context window, whether a background subagent has stalled or snowballed past redline, or how much API-equivalent value your last 7 days burned.
-- **With AGY Hyper**: A live cockpit sits in Antigravity's side pane tracking exact context load, **auto-calibrated per-model cache TTL**, **Context X-Ray** composition, linked subagent trees (flagging active redlines and `STALLED` runs), post-`/compact` and cross-model cache resets, and an offline `24H / 7D / 30D / 90D` multi-currency usage ledger — plus a `<5ms` native statusline for Antigravity CLI.
+> **100% Official Antigravity Plugin Protocol**: Built strictly on native MCP, Lifecycle Hooks, Rules, and `SIDECAR_UI_ENTRYPOINT_AUX_PANE` (`agy plugin validate --strict` passes with **0 warnings**). Zero Electron DOM injection, zero `--remote-debugging-port`, zero edits to `~/.gemini/config/config.json`, and 100% offline.
 
 ---
 
 ## Install in One Line
 
-No Rust toolchain, no `ripgrep`, no Python, no `git` CLI required. Release archives are **SHA-256 verified** before atomic swap and never touch `~/.gemini/config/config.json`.
+Start in **zero-intrusion `Observe` mode** (live cockpit, burn audit & passive WAL capture — native tools and inline diff cards untouched) or install the default `Balanced` mode:
 
 ```bash
-# macOS & Linux (default Balanced mode; add `-s -- --observe` for zero-intrusion cockpit only)
+# Recommended first try: zero-intrusion Observe mode (macOS & Linux)
+curl -fsSL https://raw.githubusercontent.com/BobbyCats/agy-hyper/main/install.sh | bash -s -- --observe
+
+# Standard Balanced mode (macOS & Linux)
 curl -fsSL https://raw.githubusercontent.com/BobbyCats/agy-hyper/main/install.sh | bash
 ```
 
 ```powershell
-# Windows (PowerShell; set `$env:AGY_HYPER_OBSERVE="1"` before install for Observe-only mode)
+# Windows (PowerShell; set `$env:AGY_HYPER_OBSERVE="1"` first for Observe-only mode)
 irm https://raw.githubusercontent.com/BobbyCats/agy-hyper/main/install.ps1 | iex
 ```
 
 ```bash
-# Build from source
-git clone https://github.com/BobbyCats/agy-hyper.git && cd agy-hyper && ./install.sh
+# Prefer building from source? (Zero prebuilt binary needed)
+git clone https://github.com/BobbyCats/agy-hyper.git && cd agy-hyper && ./install.sh --observe
 ```
+
+### Antigravity CLI (`agy`) Support
+
+Verified end-to-end on **`agy v1.5.14`** (`agy plugin validate --strict` passes with 0 warnings; scans `~/.gemini/{antigravity,antigravity-ide,antigravity-cli}/brain/`):
+
+- `install.sh` / `install.ps1` automatically detects `agy` on your `PATH` and runs `agy plugin enable agy-hyper`.
+- Attach the `<2ms` live context & cache-TTL status bar to your terminal:
+  ```bash
+  agy-hyper cli-setup --apply   # writes statusLine & title to ~/.gemini/antigravity-cli/settings.json (backs up first)
+  ```
+- Open the full visual cockpit (ECharts, Context X-Ray, inline WAL Diff Undo & SVG export) in your browser anytime:
+  ```bash
+  agy-hyper ui                  # http://127.0.0.1:47821
+  ```
+
+### Security & Transparency
+
+We know running any local binary next to your coding workspace requires real trust:
+
+- **Auditable builds**: Every release archive is built in public GitHub Actions (`.github/workflows/release.yml`), paired with `SHA256SUMS` (verified by `install.sh`/`install.ps1` before atomic swap) and GitHub Artifact Attestations. Don't want a prebuilt binary? Clone and run `./install.sh` to compile locally from 100% open-source MIT Rust code.
+- **Zero telemetry / zero cloud uploads**: All transcripts, WAL snapshots, usage ledgers, and SVG audit cards stay strictly on disk under `~/.gemini/antigravity/agy-hyper/`.
+- **Strict workspace jail & Secret Shield**: MCP tools cannot escape your workspace root, shell execution is disabled in `hyper_check` (allowlisted build/test tools only), and `.env` / key files are shielded by default.
 
 ### AI One-Click Install
 
-Paste this prompt into **Antigravity, Claude Code, Codex, or Cursor** to install and verify automatically via the repository's [SKILL.md](./SKILL.md):
+Paste this prompt into **Antigravity (App or CLI), Claude Code, Codex, or Cursor** to install and verify automatically via [SKILL.md](./SKILL.md):
 
-> Read `https://raw.githubusercontent.com/BobbyCats/agy-hyper/main/SKILL.md` and install AGY Hyper using the platform installer (`install.sh` on macOS/Linux or `install.ps1` on Windows), then run `agy-hyper doctor` and report the diagnostic results.
+> Read `https://raw.githubusercontent.com/BobbyCats/agy-hyper/main/SKILL.md` and install AGY Hyper in `--observe` mode using the platform installer (`install.sh` on macOS/Linux or `install.ps1` on Windows), then run `agy-hyper doctor` and `agy-hyper audit` and report the results.
 
-Switch back to Antigravity and everything activates automatically. You can also run diagnostics, usage reports, session waterfalls, or the standalone web cockpit from any terminal:
+Terminal essentials:
 
 ```bash
+agy-hyper audit --svg audit.svg   # 10s local burn audit + shareable dark/light SVG diagnostic card
 agy-hyper doctor                  # verify Tree-sitter grammars, gix, daemon RTT & security posture
-agy-hyper audit --svg audit.svg   # run 14d local burn audit & export a shareable SVG diagnostic card
-agy-hyper usage --window 7d       # view 24h / 7d / 30d / 90d tokens & API-equivalent value
+agy-hyper tx diff <tx_id>         # inspect line-level unified diff for any WAL snapshot before undo
 agy-hyper bench --cache-ttl       # inspect empirical per-model prompt-cache TTL decay curves
-agy-hyper cli-setup               # print (or --apply) Antigravity CLI statusLine & title config
+agy-hyper usage --window 7d       # view 24h / 7d / 30d / 90d tokens & API-equivalent value
 agy-hyper ui                      # launch AGY Hyper Deck standalone at http://127.0.0.1:47821
 ```
 

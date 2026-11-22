@@ -1,58 +1,51 @@
 <div align="center">
 
-<picture>
-  <source media="(prefers-color-scheme: dark)" srcset="./assets/hero-dark.svg">
-  <source media="(prefers-color-scheme: light)" srcset="./assets/hero-light.svg">
-  <img alt="AGY Hyper — Antigravity 原生 Rust 加速引擎与实时驾驶舱" src="./assets/hero-dark.svg" width="100%">
-</picture>
+<img alt="AGY Hyper — 装前（151K 开局盲读与缓存变冷）vs 装后（实时缓存仪表盘、行级 WAL Diff 与一键撤回）" src="./assets/hero-bobbycat.png" width="100%">
 
-<br/>
+<br/><br/>
+
+# AGY Hyper
+
+**Google Antigravity（桌面版 & CLI）的本地烧额度体检仪、实时缓存拐点驾驶舱、行级 WAL Diff 撤回与 Rust 加速侧边栏**
 
 [![CI](https://img.shields.io/github/actions/workflow/status/BobbyCats/agy-hyper/ci.yml?branch=main&style=flat-square&label=CI&logo=githubactions&logoColor=white)](https://github.com/BobbyCats/agy-hyper/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/BobbyCats/agy-hyper?style=flat-square&color=E25B2A&labelColor=1E2022)](https://github.com/BobbyCats/agy-hyper/releases/latest)
 [![License: MIT](https://img.shields.io/badge/License-MIT-0EA5E9.svg?style=flat-square)](./LICENSE)
-[![Rust](https://img.shields.io/badge/单文件引擎-Rust_~10MB-111827.svg?style=flat-square&logo=rust&logoColor=white)](#系统架构)
-[![UDS RTT](https://img.shields.io/badge/守护进程延迟-0.12ms-16A34A.svg?style=flat-square)](#可复现实测数据)
-[![Platform](https://img.shields.io/badge/支持平台-macOS_%C2%B7_Linux_%C2%B7_Windows-4B5563.svg?style=flat-square)](#一行安装装完即用)
+[![桌面版 + CLI](https://img.shields.io/badge/支持端-桌面版_%2B_CLI_(agy)-16A34A.svg?style=flat-square)](#antigravity-cliagy完整支持)
+[![Rust](https://img.shields.io/badge/单文件引擎-Rust_~4MB_压缩包-111827.svg?style=flat-square&logo=rust&logoColor=white)](#安全与透明说明)
 [![Follow on X](https://img.shields.io/badge/X-@BobbyCat2025-000000.svg?style=flat-square&logo=x&logoColor=white)](https://x.com/BobbyCat2025)
 
-[English](./README.md) · **简体中文** · [一行安装](#一行安装装完即用) · [AI 一键装机](#ai-一键安装与体检) · [侧边栏驾驶舱](#agy-hyper-deckantigravity-原生侧边栏驾驶舱) · [实测数据](#可复现实测数据) · [卸载说明](#卸载与保留说明) · [参与贡献](./CONTRIBUTING.md)
+[English](./README.md) · **简体中文** · [一行安装](#一行安装装完即用) · [CLI 支持](#antigravity-cliagy完整支持) · [实测报告](./docs/ANALYSIS_REPORT.md) · [安全透明](#安全与透明说明) · [实测基准](#可复现实测数据) · [卸载说明](#卸载与保留说明)
 
 </div>
 
 ---
 
-让 AI 查一处鉴权逻辑，它先翻目录，再搜关键词，读到一半超 10KB 被截断落盘，接着再猜下一个文件。来回 5 轮，38 秒过去了，业务代码一行没改。拖慢节奏的往往是每一轮重新排队等大模型吐出第一个字。
+**10 秒看清你的 Antigravity 额度到底烧在了哪里——而且不用牺牲原生行内 Diff 对比卡片。**
 
-**AGY Hyper 把这些冤枉路直接砍掉。** 一个 ~10MB、无需额外环境的纯 Rust 常驻引擎，把多轮代码摸底压进一次 `14ms` 内存缓存打包，给每一次多文件修改加上原子备份与一键撤回，并在 Antigravity 右侧边栏嵌入实时遥测与用量成本驾驶舱。
+复盘本机 **80 个真实会话（4,184 轮）** 后揪出两个最大元凶：一半编码任务在**改第一行代码前就已经靠盲读把上下文干到 `151k+`**；而且不同模型族的 Prompt 缓存保鲜拐点根本不一样（Carbon **`~90s`**、Opus **`~120s`**、Neon/Argon **`~180s`**）。**AGY Hyper** 提供 10 秒离线烧额度体检卡（`agy-hyper audit --svg`）、实时侧边栏/终端缓存保鲜表、BLAKE3 WAL 行级 Diff 一键撤回，以及四档分层 Rust 加速（`Observe` / `Safe` / `Balanced` / `Hyper`）。
 
-> **100% 官方插件协议**：全程基于 Antigravity 官方 MCP、Lifecycle Hooks、Rules 与 `SIDECAR_UI_ENTRYPOINT_AUX_PANE` 构建。**不注入 Electron DOM，不开启 `--remote-debugging-port` 调试端口，不修改 `~/.gemini/config/config.json`**，可与各类主题、汉化插件零冲突共存。
+| 首次改代码前上下文膨胀 | 分模型实测缓存掉崖拐点 | 原生 Diff 卡片保留 | 本地引擎与 CLI 验证 |
+| :---: | :---: | :---: | :---: |
+| **`151.4k` P50**<br><sub>`241.3k` P90 · 读文件占 `44.9%` · [实测报告](./docs/ANALYSIS_REPORT.md)</sub> | **`90s` / `120s` / `180s`**<br><sub>Carbon / Opus / Neon · `38%` 费用死在未命中</sub> | **`Observe` & `Safe`**<br><sub>完全不丢原生 Diff · `Hyper` 内置红绿行级 Diff</sub> | **`0.13ms` UDS RTT**<br><sub>桌面侧边栏 + `agy` CLI（`v1.5.14` 实测通过）</sub> |
 
----
+<div align="center">
+  <img src="./assets/ui-showcase.png" alt="AGY Hyper Deck 实时侧边栏、上下文 X-Ray、行级 WAL Unified Diff 与 10 秒本机烧额度体检卡" width="100%"/>
+</div>
 
-## 10 秒看懂：装上之前 vs 装上之后
-
-哪怕你平时不写底层代码，下面三组对比也能直接感受到差别。
-
-### 1. 干活速度：来回跑五趟拿工具 vs 揣着户型图直接干
-- **没装之前**：让 AI 修客厅漏水。它先跑一趟储藏室看眼管子（等 6 秒），回来问扳手放哪了（等 6 秒），再跑一趟发现工具箱太沉搬不动又扔在半路（输出超 10KB 截断落盘，再等 6 秒）。来回跑 5 趟，38 秒全耗在上下楼按电梯上。
-- **装上之后**：出门前直接把整栋楼的户型图、水电表和关键源码切片一次塞进它手里。`14ms` 摸清全局，省掉 4 趟冤枉路，进门直接动手改代码。
-
-### 2. 改文件安全：拿签字笔直接涂原件 vs 先锁保险柜再动笔
-- **没装之前**：AI 一口气改 5 个文件，像拿不可擦的签字笔在合同原件上直接涂改。改到第 3 页突然报错崩掉，前两页已经面目全非。一不留神还顺手翻开你抽屉里的 `.env` 密钥文件。
-- **装上之后**：动笔前先把原件逐字节锁进本地 WAL 保险柜，所有改动在临时草稿纸上写完、1 毫秒扫完语法错，再一整叠原子替换。改崩了？点一下侧边栏的 **一键撤回**，所有文件按字节恢复如初。抽屉里的密钥文件默认贴封条，AI 连瞄一眼都瞄不到。
-
-### 3. 长对话与子代理：蒙眼开盲车 vs 装上实时遥测与成本驾驶舱
-- **没装之前**：聊着聊着 AI 突然变慢还变贵，你不知道当前模型的缓存到底几分钟变冷，不知道窗口里是被哪些读文件或命令输出撑爆的，也不知道后台子代理是不是疑似卡死或悄悄触顶，更不知道近 7 天烧掉了多少等价算力。
-- **装上之后**：Antigravity 右侧边栏长出一块实时驾驶舱。当前水位、**分模型实测校准缓存保鲜窗口**、**上下文构成 X-Ray 透视**、子代理树实时状态（运行中红线与 `STALLED` 疑似卡死告警）、`/compact` 与跨模型缓存重算提示，以及纯离线 `24H / 7D / 30D / 90D` 多币种用量账本一眼看穿；同时为 Antigravity CLI 提供 `<5ms` 原生状态栏与窗口标题接入。
+> **100% 官方插件协议**：全程基于 Antigravity 官方 MCP、Lifecycle Hooks、Rules 与 `SIDECAR_UI_ENTRYPOINT_AUX_PANE` 构建（`agy plugin validate --strict` **0 警告通过**）。不注入 Electron DOM，不开启 `--remote-debugging-port`，不修改 `~/.gemini/config/config.json`，100% 本地离线。
 
 ---
 
 ## 一行安装，装完即用
 
-不需要装 Rust，不需要装 `ripgrep` 或 Python，也不依赖本地 `git` 命令行。安装脚本强制通过 **SHA-256 校验** 后原子替换，绝不修改你的 `~/.gemini/config/config.json`。
+推荐新手先用 **零侵入 `Observe` 纯观测模式**（只开实时驾驶舱、10 秒烧额度体检与被动 WAL 快照，完全不碰原生工具和行内 Diff 卡片），随时可在侧边栏一键切档：
 
 ```bash
-# macOS & Linux（默认 Balanced 模式；追加 `-s -- --observe` 可开启零侵入纯观测模式）
+# 推荐首装：零侵入 Observe 纯观测模式（macOS & Linux）
+curl -fsSL https://raw.githubusercontent.com/BobbyCats/agy-hyper/main/install.sh | bash -s -- --observe
+
+# 标准 Balanced 加速模式（macOS & Linux）
 curl -fsSL https://raw.githubusercontent.com/BobbyCats/agy-hyper/main/install.sh | bash
 ```
 
@@ -62,24 +55,46 @@ irm https://raw.githubusercontent.com/BobbyCats/agy-hyper/main/install.ps1 | iex
 ```
 
 ```bash
-# 从源码构建安装
-git clone https://github.com/BobbyCats/agy-hyper.git && cd agy-hyper && ./install.sh
+# 不想下载预编译包？直接从开源源码本地构建
+git clone https://github.com/BobbyCats/agy-hyper.git && cd agy-hyper && ./install.sh --observe
 ```
+
+### Antigravity CLI（`agy`）完整支持
+
+已在真机 **`agy v1.5.14`** 端到端实测跑通（`agy plugin validate --strict` 0 警告通过，自动扫描 `~/.gemini/{antigravity,antigravity-ide,antigravity-cli}/brain/`）：
+
+- `install.sh` / `install.ps1` 会自动检测本机 `agy` CLI 并执行 `agy plugin enable agy-hyper`。
+- 一行命令挂载 `<2ms` 终端原生实时状态栏（上下文水位 + 当前模型缓存保鲜倒计时）：
+  ```bash
+  agy-hyper cli-setup --apply   # 自动先备份再写入 ~/.gemini/antigravity-cli/settings.json
+  ```
+- CLI 用户随时可打开完整可视化驾驶舱（ECharts、上下文 X-Ray、行级 Diff 撤回与 SVG 导出）：
+  ```bash
+  agy-hyper ui                  # 浏览器访问 http://127.0.0.1:47821
+  ```
+
+### 安全与透明说明
+
+在自己的开发机上装本地工具，谨慎一点完全应该：
+
+- **可核验构建**：所有 Release 归档均由公开 GitHub Actions（`.github/workflows/release.yml`）编译产出，配套 `SHA256SUMS`（安装脚本原子替换前强制校验）与 GitHub Artifact Attestations；如果不放心任何预编译包，直接 `git clone` 后运行 `./install.sh` 即可从 MIT 开源 Rust 源码本地编出二进制。
+- **零遥测、零云端上传**：所有会话日志、WAL 快照、用量账本和 SVG 体检图全部留在本地 `~/.gemini/antigravity/agy-hyper/`。
+- **严格工作区牢笼 + Secret Shield**：MCP 工具无法越界读写工作区外文件，`hyper_check` 禁用通用 Shell（仅放行白名单构建/测试工具），`.env` 与密钥文件默认屏蔽。
 
 ### AI 一键安装与体检
 
-将下面这段提示词直接发给 **Antigravity / Claude Code / Codex / Cursor**，AI 会按仓库内置的 [SKILL.md](./SKILL.md) 自动完成安装并跑完 `doctor` 体检：
+将下面这段提示词直接发给 **Antigravity（桌面版 / CLI）/ Claude Code / Codex / Cursor**，AI 会按 [SKILL.md](./SKILL.md) 自动装好并跑完诊断：
 
-> 请读取 `https://raw.githubusercontent.com/BobbyCats/agy-hyper/main/SKILL.md`，按我当前系统执行 AGY Hyper 安装脚本（macOS/Linux 用 `install.sh`，Windows 用 `install.ps1`），装完后运行 `agy-hyper doctor` 并汇报体检结果。
+> 请读取 `https://raw.githubusercontent.com/BobbyCats/agy-hyper/main/SKILL.md`，用 `--observe` 模式执行对应系统的安装脚本（macOS/Linux 用 `install.sh`，Windows 用 `install.ps1`），装完后运行 `agy-hyper doctor` 和 `agy-hyper audit` 并汇报体检结果。
 
-装完切回 Antigravity 即可自动加载。随时也可以在终端体检、查用量账本，或者独立打开驾驶舱：
+常用终端命令：
 
 ```bash
+agy-hyper audit --svg audit.svg   # 10 秒本机烧额度诊断 + 导出可分享深浅色 SVG 体检卡
 agy-hyper doctor                  # 检查 Tree-sitter 语法、gix、守护进程延迟与安全边界
-agy-hyper audit --svg audit.svg   # 运行 14 天本机烧钱诊断并导出可分享 SVG 战报卡
-agy-hyper usage --window 7d       # 查看近 24h / 7d / 30d / 90d Token 与多币种等价估值
+agy-hyper tx diff <tx_id>         # 撤回前先在终端审阅 WAL 快照的行级红绿 Diff
 agy-hyper bench --cache-ttl       # 查看各模型族实测 Prompt 缓存衰减曲线与 TTL 拐点
-agy-hyper cli-setup               # 输出（或 --apply 写入）Antigravity CLI statusLine 与 title 配置
+agy-hyper usage --window 7d       # 查看近 24h / 7d / 30d / 90d Token 与多币种等价估值
 agy-hyper ui                      # 在浏览器独立打开 AGY Hyper Deck (127.0.0.1:47821)
 ```
 

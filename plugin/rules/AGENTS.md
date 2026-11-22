@@ -8,16 +8,15 @@ You have the `agy-hyper` native Rust MCP engine active (sub-millisecond local UD
 2. **Hybrid Read Strategy (Anti-Blanket-Read)**:
    - Use `hyper_pack` / `hyper_search` first to locate symbols, line ranges, and `etag`s before opening files.
    - Use built-in `read_file` with explicit `StartLine`/`EndLine` on files >200 lines; avoid launching >3 speculative full-file `read_file` calls in one turn, and bound noisy shell output so context stays lean before your first edit.
-3. **Default to `hyper_edit` for Workspace File Edits**:
-   - Use `hyper_edit` as your default editor for source and config files inside the workspace (both single-file and multi-file edits): pass `expected_etag` for CAS safety or `symbol` for surgical AST block replacement. Every commit writes a crash-safe BLAKE3 WAL snapshot (`tx_id`) for 1-click Undo and returns inline `<1ms` Tree-sitter syntax verification.
-   - Reserve built-in `write_file` / `edit_file` for Antigravity artifact files outside the workspace or binary files (verified native workspace edits are also auto-captured into the WAL ledger via `PostToolUse`).
-   - To undo any edit cleanly, call `hyper_tx(action="rollback", tx_id="...")`.
+3. **Use `hyper_edit` When Enabled by the Active Profile**:
+   - In `Balanced` / `Hyper` modes (when `hyper_edit` is enabled in `tools/list`), prefer `hyper_edit` for workspace source/config edits with `expected_etag` or `symbol` for crash-safe BLAKE3 WAL snapshots and `<1ms` syntax verification. In `Observe` / `Safe` modes, use native editing tools cleanly to preserve Antigravity's native inline diffs (verified native edits are still passively captured into the WAL ledger via `PostToolUse`).
+   - Reserve built-in `write_file` / `edit_file` for Antigravity artifact files outside the workspace or binary files.
+   - To inspect or undo any edit cleanly, call `hyper_tx(action="rollback", tx_id="...")` or expand the inline Diff drawer in Hyper Deck.
 4. **Cache-Preserving Sync Verification (`hyper_check`)**:
-   - For builds, typechecks, and tests taking up to 60s, prefer `hyper_check(preset="...")` (e.g. `cargo:check`, `pkg:test`, `pkg:<pkg>:test`, `py:pytest`) or `hyper_check(argv=[...])` over `run_command`.
-   - `run_command` backgrounds commands past 10s; yielding a turn to wait for background completion risks prompt-cache resets on wake-up. `hyper_check` stays synchronous inside the active tool loop, preserves head+tail fatal errors without dropping stderr, and stores oversized logs in a 1ms drill handle (`h_xxxx`).
+   - When `hyper_check` is enabled, prefer `hyper_check(preset="...")` or `hyper_check(argv=[...])` for builds, typechecks, and tests up to 60s instead of `run_command` (which backgrounds past 10s and risks prompt-cache expiry on wake-up).
 5. **Context, Subagent & Cache Hygiene**:
    - Respect `[AGY Hyper Guard]` / `[AGY Hyper Redline Guard]` watermark signals: offload broad multi-file scans to `research` subagents and suggest `/compact` when approaching 280k tokens.
-   - Avoid spawning short-lived subagents for targeted lookups that `hyper_pack` or `hyper_search` resolves in 1 warm-cache turn. Reuse an existing subagent via `send_message` only for close, warm follow-ups: once a `self` subagent exceeds ~250k context or has been idle past the 4-minute cache window (subagents cannot run `/compact`), do not wake it—spawn a fresh subagent with a compact handoff summary instead.
+   - Avoid spawning short-lived subagents for targeted lookups that `hyper_pack` or `hyper_search` resolves in 1 warm-cache turn. Reuse an existing subagent via `send_message` only for close, warm follow-ups: once a `self` subagent exceeds ~250k context or has been idle past the model's live cache window (subagents cannot run `/compact`), do not wake it—spawn a fresh subagent with a compact handoff summary instead.
    - When the user asks to view live telemetry, cache warmth, subagent status, or rollback history, surface `[Open Hyper Deck](sidecar://agy-hyper/hyper_deck/)`.
 
 ## Compact Tool Schemas (Inline — No Extra Schema-Read Turn Required)
