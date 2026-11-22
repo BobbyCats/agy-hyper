@@ -127,9 +127,31 @@ pub fn run_session_start() -> Result<()> {
 #[derive(Debug, Default, Serialize, Deserialize)]
 struct GuardState {
     last_warned_step: i64,
+    #[serde(default)]
+    last_loop_warned_step: i64,
     total_tokens: u64,
     #[serde(default)]
     last_health: Option<HealthLevel>,
+}
+
+fn build_loop_guard_payload(pulse: &TranscriptPulse) -> Value {
+    let sig_note = pulse
+        .repeat_error_signature
+        .as_deref()
+        .filter(|s| !s.trim().is_empty())
+        .map(|s| format!(" (`{}`)", s))
+        .unwrap_or_default();
+    let sys_msg = format!(
+        "[AGY Hyper Loop Guard] Detected {} consecutive error steps{}. Stop repeating the same failing command or edit blindly: inspect the concrete error output, verify assumptions or file state once, and pivot strategy.",
+        pulse.consecutive_error_streak, sig_note
+    );
+    json!({
+        "injectSteps": [{
+            "systemMessage": {
+                "systemMessage": sys_msg
+            }
+        }]
+    })
 }
 
 fn build_guard_payload(
@@ -212,9 +234,20 @@ fn build_guard_payload(
         hints.push("multimodal image context >180k detected (avoid attaching redundant images)".into());
     }
     if pulse.cache_is_cold {
+        let ttl_secs = if pulse.effective_cache_ttl_secs >= 30 {
+            pulse.effective_cache_ttl_secs
+        } else {
+            cfg.cache_warm_window_secs
+        };
         hints.push(format!(
             "prompt cache >{}s cold (batch next actions into 1 turn to re-warm)",
-            cfg.cache_warm_window_secs
+            ttl_secs
+        ));
+    }
+    if pulse.consecutive_error_streak >= 2 {
+        hints.push(format!(
+            "{} consecutive error steps detected — stop retrying blindly and inspect root cause",
+            pulse.consecutive_error_streak
         ));
     }
     let hint_suffix = if hints.is_empty() {
@@ -275,7 +308,8 @@ pub fn run_pre_invocation() -> Result<()> {
         return Ok(());
     };
 
-    if pulse.health == HealthLevel::Green {
+    let has_loop_streak = pulse.consecutive_error_streak >= 2;
+    if pulse.health == HealthLevel::Green && !has_loop_streak {
         println!("{{}}");
         return Ok(());
     }
@@ -289,6 +323,29 @@ pub fn run_pre_invocation() -> Result<()> {
         .unwrap_or_default();
 
     let step_i64 = pulse.max_step as i64;
+
+    if pulse.health == HealthLevel::Green && has_loop_streak {
+        if (step_i64 - prev.last_loop_warned_step) < 3 {
+            println!("{{}}");
+            return Ok(());
+        }
+        let _ = fs::create_dir_all(&state_dir);
+        let _ = fs::write(
+            &state_file,
+            serde_json::to_vec(&GuardState {
+                last_warned_step: prev.last_warned_step,
+                last_loop_warned_step: step_i64,
+                total_tokens: pulse.total_tokens,
+                last_health: prev.last_health,
+            })
+            .unwrap_or_default(),
+        );
+        prune_guard_state(&state_dir, 50);
+        let out = build_loop_guard_payload(&pulse);
+        println!("{}", serde_json::to_string(&out)?);
+        return Ok(());
+    }
+
     let escalated_to_red =
         pulse.health == HealthLevel::Red && prev.last_health != Some(HealthLevel::Red);
     let min_step_gap = if pulse.recent_timeouts > 0 { 4 } else { 10 };
@@ -302,6 +359,11 @@ pub fn run_pre_invocation() -> Result<()> {
         &state_file,
         serde_json::to_vec(&GuardState {
             last_warned_step: step_i64,
+            last_loop_warned_step: if has_loop_streak {
+                step_i64
+            } else {
+                prev.last_loop_warned_step
+            },
             total_tokens: pulse.total_tokens,
             last_health: Some(pulse.health),
         })
@@ -477,10 +539,14 @@ mod tests {
             last_planner_epoch_ms: None,
             seconds_since_last_planner: Some(15),
             cache_warm_remaining_secs: 225,
+            effective_cache_ttl_secs: 240,
+            cache_ttl_source: "default".into(),
             cache_is_cold: false,
             multimodal_cliff_risk: false,
             recently_compacted: false,
             model_switched_from: None,
+            consecutive_error_streak: 0,
+            repeat_error_signature: None,
             health,
             health_reason: reason.into(),
         }
@@ -524,5 +590,31 @@ mod tests {
         fs::write(notes_dir.join("Cargo.toml"), "[package]\n").unwrap();
         assert!(is_code_workspace(&notes_dir));
         let _ = fs::remove_dir_all(&notes_dir);
+    }
+
+    #[test]
+    fn loop_guard_and_empirical_ttl_surface_in_pre_invocation_payload() {
+        let cfg = HyperConfig::default();
+        let mut p = sample_pulse(HealthLevel::Green, "healthy", 40_000);
+        p.consecutive_error_streak = 3;
+        p.repeat_error_signature = Some("cargo test failed: missing import".into());
+        let loop_payload = build_loop_guard_payload(&p);
+        let loop_msg = loop_payload["injectSteps"][0]["systemMessage"]["systemMessage"]
+            .as_str()
+            .unwrap();
+        assert!(loop_msg.contains("[AGY Hyper Loop Guard]"));
+        assert!(loop_msg.contains("3 consecutive error steps"));
+        assert!(loop_msg.contains("cargo test failed"));
+
+        let mut yellow = sample_pulse(HealthLevel::Yellow, "token_yellow", 195_000);
+        yellow.cache_is_cold = true;
+        yellow.effective_cache_ttl_secs = 180;
+        yellow.consecutive_error_streak = 2;
+        let yellow_payload = build_guard_payload(&yellow, &cfg, false, true);
+        let yellow_msg = yellow_payload["injectSteps"][0]["systemMessage"]["systemMessage"]
+            .as_str()
+            .unwrap();
+        assert!(yellow_msg.contains(">180s cold"));
+        assert!(yellow_msg.contains("2 consecutive error steps"));
     }
 }

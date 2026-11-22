@@ -24,7 +24,7 @@
         <div class="brand-copy">
           <div class="brand-title-row">
             <span class="brand-name" data-i18n="app.title">AGY Hyper</span>
-            <span id="version-pill" class="mono-tag">v0.2.0</span>
+            <span id="version-pill" class="mono-tag">v0.3.0</span>
           </div>
           <div class="brand-sub">
             <span id="daemon-dot" class="pulse-dot"></span>
@@ -69,6 +69,7 @@
         <div class="subagent-head-left">
           <span id="subagent-heading" class="sub-title">Subagents</span>
           <span id="subagent-active-pill" class="status-pill ok hidden"></span>
+          <span id="subagent-stalled-pill" class="status-pill warn hidden"></span>
           <span id="subagent-red-pill" class="status-pill err hidden"></span>
         </div>
         <button id="btn-back-parent" type="button" class="btn-ghost btn-xs hidden" data-i18n="subagents.back_parent">← Parent</button>
@@ -141,11 +142,12 @@
           <div class="warmth-title-group">
             <h2 class="panel-title" data-i18n="pulse.heading">Prompt Cache Warmth</h2>
             <span id="warmth-state-pill" class="status-pill ok" data-i18n="pulse.warm">WARM</span>
+            <span id="warmth-ttl-source" class="mono-tag hidden"></span>
           </div>
-          <strong id="warmth-clock" class="mono-readout">240s / 240s</strong>
+          <strong id="warmth-clock" class="mono-readout">— / —</strong>
         </div>
 
-        <div class="meter-track" role="progressbar" aria-valuemin="0" aria-valuemax="240" aria-valuenow="0" id="warmth-meter">
+        <div class="meter-track" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" id="warmth-meter">
           <div id="warmth-fill" class="meter-fill ok" style="width: 0%"></div>
           <span class="meter-tick" style="left: 50%" title="50%"></span>
         </div>
@@ -246,6 +248,14 @@
           <div id="chart-ctx-pro" class="chart-ctx-pro"></div>
         </div>
         <div id="ctx-breakdown" class="breakdown-list"></div>
+        <div id="ctx-xray" class="xray-block hidden">
+          <div class="xray-head">
+            <h3 class="sub-title" data-i18n="context_pro.xray_heading">Context X-Ray (Post-Compact Composition)</h3>
+            <div id="ctx-xray-pills" class="xray-pills"></div>
+          </div>
+          <div id="ctx-xray-bar" class="xray-bar" role="img" aria-label="Context composition"></div>
+          <div id="ctx-xray-legend" class="xray-legend"></div>
+        </div>
       </section>
 
       <!-- Pro Tab 3: Incremental Usage & API-Equivalent Value Ledger -->

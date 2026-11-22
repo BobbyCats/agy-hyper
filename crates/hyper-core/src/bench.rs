@@ -33,6 +33,62 @@ pub struct TurnWaterfall {
     pub tool_names: Vec<String>,
 }
 
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ContextCategoryShare {
+    pub key: String,
+    pub bytes: u64,
+    pub share_pct: f64,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ContextBreakdown {
+    pub file_read_bytes: u64,
+    pub command_output_bytes: u64,
+    pub hyper_tool_bytes: u64,
+    pub other_tool_bytes: u64,
+    pub planner_thinking_bytes: u64,
+    pub planner_text_bytes: u64,
+    pub user_system_bytes: u64,
+    pub media_items: u32,
+    pub total_bytes: u64,
+    pub categories: Vec<ContextCategoryShare>,
+}
+
+impl ContextBreakdown {
+    fn reset(&mut self) {
+        *self = Self::default();
+    }
+
+    fn finalize(&mut self) {
+        self.total_bytes = self
+            .file_read_bytes
+            .saturating_add(self.command_output_bytes)
+            .saturating_add(self.hyper_tool_bytes)
+            .saturating_add(self.other_tool_bytes)
+            .saturating_add(self.planner_thinking_bytes)
+            .saturating_add(self.planner_text_bytes)
+            .saturating_add(self.user_system_bytes);
+        let denom = self.total_bytes.max(1) as f64;
+        let items = [
+            ("file_reads", self.file_read_bytes),
+            ("command_outputs", self.command_output_bytes),
+            ("hyper_tools", self.hyper_tool_bytes),
+            ("other_tools", self.other_tool_bytes),
+            ("thinking_text", self.planner_thinking_bytes.saturating_add(self.planner_text_bytes)),
+            ("user_system", self.user_system_bytes),
+        ];
+        self.categories = items
+            .into_iter()
+            .filter(|(_, b)| *b > 0)
+            .map(|(k, b)| ContextCategoryShare {
+                key: k.to_string(),
+                bytes: b,
+                share_pct: ((b as f64 / denom) * 1000.0).round() / 10.0,
+            })
+            .collect();
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionBenchmark {
     pub conversation_id: String,
@@ -60,6 +116,14 @@ pub struct SessionBenchmark {
     pub hyper_adoption_ratio: f64,
     #[serde(default)]
     pub model_usage: BTreeMap<String, TokenBucket>,
+    #[serde(default)]
+    pub context_breakdown: ContextBreakdown,
+    #[serde(default)]
+    pub first_edit_context_tokens: Option<u64>,
+    #[serde(default)]
+    pub max_parallel_reads: usize,
+    #[serde(default)]
+    pub blanket_read_turns: usize,
     pub turns: Vec<TurnWaterfall>,
 }
 
@@ -91,6 +155,14 @@ pub fn analyze_transcript(path: &Path) -> Result<SessionBenchmark> {
         .unwrap_or("unknown")
         .to_string();
 
+    #[derive(Clone, Copy)]
+    enum ToolCat {
+        FileRead,
+        CommandOutput,
+        HyperTool,
+        OtherTool,
+    }
+
     struct RawStep {
         step_index: u64,
         kind: String,
@@ -101,7 +173,15 @@ pub fn analyze_transcript(path: &Path) -> Result<SessionBenchmark> {
         cache_read_tokens: u64,
         output_tokens: u64,
         tool_names: Vec<String>,
+        tool_cats: Vec<ToolCat>,
         hyper_tool_count: usize,
+        content_bytes: u64,
+        thinking_bytes: u64,
+        tool_args_bytes: u64,
+        media_count: u32,
+        is_compact_marker: bool,
+        has_edit_tool: bool,
+        read_file_count: usize,
     }
 
     let mut steps: Vec<RawStep> = Vec::new();
@@ -137,14 +217,30 @@ pub fn analyze_transcript(path: &Path) -> Result<SessionBenchmark> {
             .unwrap_or(0);
         let output_tokens = v.get("output_tokens").and_then(Value::as_u64).unwrap_or(0);
 
-        // Extract `Completed At: <RFC3339>` from Antigravity tool step headers when present.
-        let completed_ms = v
-            .get("content")
+        let content_str = v.get("content").and_then(Value::as_str).unwrap_or("");
+        let content_bytes = content_str.len() as u64;
+        let thinking_bytes = v
+            .get("thinking")
             .and_then(Value::as_str)
-            .and_then(extract_completed_at_ms);
+            .map(|s| s.len() as u64)
+            .unwrap_or(0);
+        let media_count = v
+            .get("media")
+            .and_then(Value::as_array)
+            .map(|a| a.len() as u32)
+            .unwrap_or(0);
+        let is_compact_marker = kind == "USER_INPUT"
+            && (content_str.contains("<CONTEXT_SUMMARY>") || content_str.trim() == "/compact");
+
+        // Extract `Completed At: <RFC3339>` from Antigravity tool step headers when present.
+        let completed_ms = extract_completed_at_ms(content_str);
 
         let mut tool_names = Vec::new();
+        let mut tool_cats = Vec::new();
         let mut hyper_tool_count = 0usize;
+        let mut tool_args_bytes = 0u64;
+        let mut has_edit_tool = false;
+        let mut read_file_count = 0usize;
         if let Some(arr) = v.get("tool_calls").and_then(Value::as_array) {
             for tc in arr {
                 let raw_name = tc
@@ -157,6 +253,10 @@ pub fn analyze_transcript(path: &Path) -> Result<SessionBenchmark> {
                     let args = tc
                         .get("arguments")
                         .or_else(|| tc.get("args"));
+                    if let Some(a) = args {
+                        tool_args_bytes = tool_args_bytes
+                            .saturating_add(serde_json::to_string(a).map(|s| s.len() as u64).unwrap_or(0));
+                    }
                     let server_name = args
                         .and_then(|a| a.get("ServerName").or_else(|| a.get("serverName")))
                         .and_then(Value::as_str)
@@ -175,11 +275,31 @@ pub fn analyze_transcript(path: &Path) -> Result<SessionBenchmark> {
                     if is_hyper {
                         hyper_tool_count += 1;
                     }
-                    if name == "call_mcp_tool" && !lazy_tool.is_empty() {
-                        tool_names.push(lazy_tool);
+                    let eff_name = if name == "call_mcp_tool" && !lazy_tool.is_empty() {
+                        lazy_tool.clone()
                     } else {
-                        tool_names.push(name.to_string());
+                        name.to_string()
+                    };
+                    if eff_name == "read_file" {
+                        read_file_count += 1;
                     }
+                    if matches!(
+                        eff_name.as_str(),
+                        "edit_file" | "write_file" | "replace_file_content" | "multi_replace_file_content" | "hyper_edit"
+                    ) {
+                        has_edit_tool = true;
+                    }
+                    let cat = if is_hyper {
+                        ToolCat::HyperTool
+                    } else if eff_name == "read_file" {
+                        ToolCat::FileRead
+                    } else if eff_name == "run_command" {
+                        ToolCat::CommandOutput
+                    } else {
+                        ToolCat::OtherTool
+                    };
+                    tool_cats.push(cat);
+                    tool_names.push(eff_name);
                 }
             }
         }
@@ -193,7 +313,15 @@ pub fn analyze_transcript(path: &Path) -> Result<SessionBenchmark> {
             cache_read_tokens,
             output_tokens,
             tool_names,
+            tool_cats,
             hyper_tool_count,
+            content_bytes,
+            thinking_bytes,
+            tool_args_bytes,
+            media_count,
+            is_compact_marker,
+            has_edit_tool,
+            read_file_count,
         });
     }
 
@@ -210,18 +338,59 @@ pub fn analyze_transcript(path: &Path) -> Result<SessionBenchmark> {
     let mut prev_planner_ms: Option<i64> = None;
     let mut prev_planner_total: u64 = 0;
     let mut model_usage: BTreeMap<String, TokenBucket> = BTreeMap::new();
+    let mut context_breakdown = ContextBreakdown::default();
+    let mut first_edit_context_tokens: Option<u64> = None;
+    let mut max_parallel_reads = 0usize;
+    let mut blanket_read_turns = 0usize;
 
     const MAX_VALID_SPAN_MS: i64 = 180_000;
 
     let mut i = 0usize;
     while i < steps.len() {
         if steps[i].kind != "PLANNER_RESPONSE" {
+            if steps[i].is_compact_marker {
+                context_breakdown.reset();
+            }
+            if matches!(steps[i].kind.as_str(), "USER_INPUT" | "SYSTEM_MESSAGE") {
+                context_breakdown.user_system_bytes = context_breakdown
+                    .user_system_bytes
+                    .saturating_add(steps[i].content_bytes);
+            }
+            context_breakdown.media_items = context_breakdown
+                .media_items
+                .saturating_add(steps[i].media_count);
             i += 1;
             continue;
         }
         let planner = &steps[i];
 
         let cur_total = planner.input_tokens + planner.cache_read_tokens;
+        if prev_planner_total >= 80_000 && cur_total > 0 && cur_total * 100 <= prev_planner_total * 55 {
+            context_breakdown.reset();
+        }
+        context_breakdown.planner_text_bytes = context_breakdown
+            .planner_text_bytes
+            .saturating_add(planner.content_bytes);
+        context_breakdown.planner_thinking_bytes = context_breakdown
+            .planner_thinking_bytes
+            .saturating_add(planner.thinking_bytes);
+        context_breakdown.other_tool_bytes = context_breakdown
+            .other_tool_bytes
+            .saturating_add(planner.tool_args_bytes);
+        context_breakdown.media_items = context_breakdown
+            .media_items
+            .saturating_add(planner.media_count);
+
+        if planner.read_file_count > max_parallel_reads {
+            max_parallel_reads = planner.read_file_count;
+        }
+        if planner.read_file_count >= 4 {
+            blanket_read_turns += 1;
+        }
+        if first_edit_context_tokens.is_none() && planner.has_edit_tool && cur_total > 0 {
+            first_edit_context_tokens = Some(cur_total);
+        }
+
         if let Some(prev_ms) = prev_planner_ms {
             let gap_ms = planner.ts_ms.saturating_sub(prev_ms);
             if prev_planner_total >= 50_000
@@ -252,6 +421,7 @@ pub fn analyze_transcript(path: &Path) -> Result<SessionBenchmark> {
         let mut j = i + 1;
         let mut first_tool_start_ms: Option<i64> = None;
         let mut last_tool_end_ms: Option<i64> = None;
+        let mut tool_resp_idx = 0usize;
 
         while j < steps.len()
             && steps[j].kind != "PLANNER_RESPONSE"
@@ -261,8 +431,45 @@ pub fn analyze_transcript(path: &Path) -> Result<SessionBenchmark> {
             let is_tool_step = st.kind == "GENERIC"
                 || st.kind == "TOOL_RESPONSE"
                 || st.kind.contains("TOOL");
-            if is_tool_step && first_tool_start_ms.is_none() {
-                first_tool_start_ms = Some(st.ts_ms);
+            context_breakdown.media_items = context_breakdown
+                .media_items
+                .saturating_add(st.media_count);
+            if is_tool_step {
+                let cat = planner
+                    .tool_cats
+                    .get(tool_resp_idx)
+                    .copied()
+                    .unwrap_or(ToolCat::OtherTool);
+                tool_resp_idx += 1;
+                match cat {
+                    ToolCat::FileRead => {
+                        context_breakdown.file_read_bytes = context_breakdown
+                            .file_read_bytes
+                            .saturating_add(st.content_bytes);
+                    }
+                    ToolCat::CommandOutput => {
+                        context_breakdown.command_output_bytes = context_breakdown
+                            .command_output_bytes
+                            .saturating_add(st.content_bytes);
+                    }
+                    ToolCat::HyperTool => {
+                        context_breakdown.hyper_tool_bytes = context_breakdown
+                            .hyper_tool_bytes
+                            .saturating_add(st.content_bytes);
+                    }
+                    ToolCat::OtherTool => {
+                        context_breakdown.other_tool_bytes = context_breakdown
+                            .other_tool_bytes
+                            .saturating_add(st.content_bytes);
+                    }
+                }
+                if first_tool_start_ms.is_none() {
+                    first_tool_start_ms = Some(st.ts_ms);
+                }
+            } else if st.kind == "SYSTEM_MESSAGE" {
+                context_breakdown.user_system_bytes = context_breakdown
+                    .user_system_bytes
+                    .saturating_add(st.content_bytes);
             }
             let step_end = st.completed_ms.unwrap_or(st.ts_ms).max(st.ts_ms);
             last_tool_end_ms = Some(last_tool_end_ms.map_or(step_end, |prev| prev.max(step_end)));
@@ -343,6 +550,8 @@ pub fn analyze_transcript(path: &Path) -> Result<SessionBenchmark> {
         0.0
     };
 
+    context_breakdown.finalize();
+
     Ok(SessionBenchmark {
         conversation_id: conv_id,
         transcript_path: path.display().to_string(),
@@ -365,6 +574,10 @@ pub fn analyze_transcript(path: &Path) -> Result<SessionBenchmark> {
         total_tool_calls,
         hyper_adoption_ratio,
         model_usage,
+        context_breakdown,
+        first_edit_context_tokens,
+        max_parallel_reads,
+        blanket_read_turns,
         turns,
     })
 }
@@ -592,5 +805,30 @@ mod tests {
         assert_eq!(clean, "Refactor auth middleware");
         assert!(!clean.contains("https://"));
         assert!(!clean.contains("/Users/"));
+    }
+
+    #[test]
+    fn pairs_generic_tool_outputs_into_context_breakdown_and_resets_on_compact() {
+        let dir = tempdir().unwrap();
+        let p = dir.path().join("transcript.jsonl");
+        let data = concat!(
+            "{\"step_index\":1,\"type\":\"PLANNER_RESPONSE\",\"created_at\":\"2026-11-20T10:00:00Z\",\"input_tokens\":10000,\"cache_read_tokens\":90000,\"output_tokens\":200,\"tool_calls\":[{\"name\":\"read_file\"},{\"name\":\"read_file\"},{\"name\":\"read_file\"},{\"name\":\"read_file\"}]}\n",
+            "{\"step_index\":2,\"type\":\"GENERIC\",\"created_at\":\"2026-11-20T10:00:01Z\",\"content\":\"pre-compact-huge-read-aaaaaaaaaa\"}\n",
+            "{\"step_index\":3,\"type\":\"USER_INPUT\",\"created_at\":\"2026-11-20T10:00:02Z\",\"content\":\"/compact\"}\n",
+            "{\"step_index\":4,\"type\":\"PLANNER_RESPONSE\",\"created_at\":\"2026-11-20T10:00:05Z\",\"input_tokens\":20000,\"cache_read_tokens\":0,\"output_tokens\":150,\"thinking\":\"plan\",\"tool_calls\":[{\"name\":\"read_file\"},{\"name\":\"run_command\"},{\"name\":\"edit_file\"}]}\n",
+            "{\"step_index\":5,\"type\":\"GENERIC\",\"created_at\":\"2026-11-20T10:00:06Z\",\"content\":\"file-body-1234567890\"}\n",
+            "{\"step_index\":6,\"type\":\"GENERIC\",\"created_at\":\"2026-11-20T10:00:07Z\",\"content\":\"cmd-output-12345678901234567890\"}\n"
+        );
+        fs::write(&p, data).unwrap();
+        let b = analyze_transcript(&p).unwrap();
+        assert_eq!(b.max_parallel_reads, 4);
+        assert_eq!(b.blanket_read_turns, 1);
+        assert_eq!(b.first_edit_context_tokens, Some(20_000));
+        assert_eq!(b.context_breakdown.file_read_bytes, "file-body-1234567890".len() as u64);
+        assert_eq!(
+            b.context_breakdown.command_output_bytes,
+            "cmd-output-12345678901234567890".len() as u64
+        );
+        assert!(!b.context_breakdown.categories.is_empty());
     }
 }

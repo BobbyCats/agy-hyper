@@ -1,5 +1,6 @@
 mod hooks;
 mod mcp;
+mod statusline;
 
 use anyhow::{anyhow, Result};
 use clap::{Parser, Subcommand};
@@ -8,7 +9,10 @@ use hyper_core::bench::{aggregate_sessions, render_waterfall_svg};
 use hyper_core::config::{HyperConfig, Profile};
 use hyper_core::git::quick_head;
 use hyper_core::sessions::discover_transcripts;
-use hyper_core::usage::{default_brain_dirs, now_epoch_ms, UsageLedger, UsageWindow, UsageWindowReport};
+use hyper_core::usage::{
+    default_brain_dirs, now_epoch_ms, ModelTtlEstimate, UsageLedger, UsageWindow,
+    UsageWindowReport,
+};
 use hyper_core::wal::{list_transactions, rollback_transaction};
 use hyper_daemon::client::{ensure_and_send, send_request, spawn_daemon_detached};
 use hyper_daemon::protocol::{DaemonRequest, DaemonResponse, EngineStatus};
@@ -56,9 +60,33 @@ enum Commands {
         /// Export a dark-mode SVG waterfall chart for the latest session
         #[arg(long)]
         svg: Option<PathBuf>,
+        /// Measure empirical prompt-cache TTL decay curves per model family
+        #[arg(long)]
+        cache_ttl: bool,
         /// Output raw JSON
         #[arg(long)]
         json: bool,
+    },
+    /// Render a <2ms native statusline or plain-text terminal title for Antigravity CLI
+    Statusline {
+        /// Output format: compact | rich | json
+        #[arg(long, default_value = "compact")]
+        format: String,
+        /// Render plain single-line terminal title (no ANSI) for Antigravity CLI `title`
+        #[arg(long)]
+        title: bool,
+        /// Disable ANSI colors
+        #[arg(long)]
+        no_color: bool,
+    },
+    /// Print (or explicitly apply with --apply) Antigravity CLI statusLine & title config
+    CliSetup {
+        /// Write to ~/.gemini/antigravity-cli/settings.json (creates a .bak backup first)
+        #[arg(long)]
+        apply: bool,
+        /// Default statusline format: compact | rich
+        #[arg(long, default_value = "compact")]
+        format: String,
     },
     /// Run comprehensive health, latency, grammar & security diagnostics
     Doctor,
@@ -169,8 +197,21 @@ fn main() -> Result<()> {
             sessions,
             transcript,
             svg,
+            cache_ttl,
             json,
-        } => handle_bench(sessions, transcript, svg, json),
+        } => {
+            if cache_ttl {
+                handle_bench_cache_ttl(json)
+            } else {
+                handle_bench(sessions, transcript, svg, json)
+            }
+        }
+        Commands::Statusline {
+            format,
+            title,
+            no_color,
+        } => statusline::run_statusline(&format, title, no_color),
+        Commands::CliSetup { apply, format } => statusline::run_cli_setup(apply, &format),
         Commands::Doctor => handle_doctor(),
         Commands::Tx { action } => handle_tx(action),
         Commands::Config { action } => handle_config(action),
@@ -624,10 +665,70 @@ fn handle_snapshot(conversation_id: Option<String>, transcript_path: Option<Stri
         cfg,
         Vec::new(),
         None,
+        None,
         conversation_id.as_deref(),
         transcript_path.as_deref(),
     );
     println!("{}", serde_json::to_string(&snap)?);
+    Ok(())
+}
+
+fn handle_bench_cache_ttl(as_json: bool) -> Result<()> {
+    let estimates: Vec<ModelTtlEstimate> = if let Ok(DaemonResponse::Ok { data }) =
+        ensure_and_send(&DaemonRequest::CacheTtlReport { force_sync: true })
+    {
+        serde_json::from_value(data)?
+    } else {
+        let cfg = HyperConfig::load();
+        let ledger_path = HyperConfig::ledger_path();
+        let mut ledger = UsageLedger::load_from(&ledger_path);
+        let now_ms = now_epoch_ms();
+        let outcome = ledger.sync_from_dirs(&default_brain_dirs(), now_ms);
+        if outcome.dirty {
+            let _ = ledger.save_to(&ledger_path);
+        }
+        ledger.all_model_ttl_estimates(cfg.cache_warm_window_secs)
+    };
+
+    if as_json {
+        println!("{}", serde_json::to_string_pretty(&estimates)?);
+        return Ok(());
+    }
+
+    println!("\n⚡ AGY HYPER · EMPIRICAL PROMPT-CACHE TTL RADAR");
+    println!("─────────────────────────────────────────────────────────────────");
+    if estimates.is_empty() {
+        println!("  No inter-turn cache observations yet across ~/.gemini/*/brain/.\n");
+        return Ok(());
+    }
+    for est in &estimates {
+        println!(
+            "  {:<22} effective TTL: {:>3}s [{}]  (n={} turns)",
+            est.model_family, est.effective_ttl_secs, est.source, est.total_samples
+        );
+        for b in &est.buckets {
+            if b.samples == 0 {
+                continue;
+            }
+            let filled = ((b.avg_hit_ratio * 16.0).round() as usize).min(16);
+            let bar = format!("{}{}", "█".repeat(filled), "░".repeat(16 - filled));
+            let cliff = if b.samples >= 5 && b.cold_rate > 0.25 {
+                " ◄ CLIFF"
+            } else {
+                ""
+            };
+            println!(
+                "    {:<8} {}  hit {:>5.1}%  cold {:>5.1}%  (n={}){}",
+                b.label,
+                bar,
+                b.avg_hit_ratio * 100.0,
+                b.cold_rate * 100.0,
+                b.samples,
+                cliff
+            );
+        }
+        println!();
+    }
     Ok(())
 }
 

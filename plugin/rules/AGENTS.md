@@ -5,9 +5,9 @@ You have the `agy-hyper` native Rust MCP engine active (sub-millisecond local UD
 ## Turn-Reduction Routing Rules
 
 1. **Explore in 1 turn, never 5**: Start unfamiliar codebase exploration with `hyper_pack` (combines single-pass ripgrep + Tree-sitter AST outlines + inline source slices for top matched symbols + 1-hop import neighbors + `gix` git signals in one ≤8.5KB inline payload).
-2. **Hybrid Read Strategy**:
-   - Use `hyper_pack` / `hyper_search` for discovery, symbol line ranges, and `etag`s.
-   - Once you know exact file line ranges, call built-in `read_file` in parallel (built-in `read_file` is host-allowlisted with ~7ms latency and 46KB inline allowance).
+2. **Hybrid Read Strategy (Anti-Blanket-Read)**:
+   - Use `hyper_pack` / `hyper_search` first to locate symbols, line ranges, and `etag`s before opening files.
+   - Use built-in `read_file` with explicit `StartLine`/`EndLine` on files >200 lines; avoid launching >3 speculative full-file `read_file` calls in one turn, and bound noisy shell output so context stays lean before your first edit.
 3. **Default to `hyper_edit` for Workspace File Edits**:
    - Use `hyper_edit` as your default editor for source and config files inside the workspace (both single-file and multi-file edits): pass `expected_etag` for CAS safety or `symbol` for surgical AST block replacement. Every commit writes a crash-safe BLAKE3 WAL snapshot (`tx_id`) for 1-click Undo and returns inline `<1ms` Tree-sitter syntax verification.
    - Reserve built-in `write_file` / `edit_file` for Antigravity artifact files outside the workspace or binary files (verified native workspace edits are also auto-captured into the WAL ledger via `PostToolUse`).
@@ -27,5 +27,5 @@ When tools are lazy-loaded by Antigravity, invoke directly via `call_mcp_tool(Se
 - `hyper_pack`: `{ workspace?, query?, focus_paths?: string[], include_outlines?: true, include_git?: true, max_bytes?: 8200 }`
 - `hyper_search`: `{ workspace?, queries?: [{ pattern, path?, glob?, fixed_strings?, case_sensitive?, max_matches? }], glob?, path?, include_git?: false }`
 - `hyper_edit`: `{ workspace?, edits: [{ path, old_text?, new_text?, symbol?, create_content?, expected_etag?, replace_all? }] }`
-- `hyper_check`: `{ workspace?, list_presets?: false, preset?, argv?: string[], timeout_secs?: 60, cwd? }`
+- `hyper_check`: `{ workspace?, list_presets?: false, preset?, argv?: string[], timeout_secs?: 60, idle_timeout_secs?, fail_fast?, cwd? }`
 - `hyper_tx`: `{ action: "list"|"rollback"|"drill", tx_id?, force?, handle_id?, offset_lines?, limit_lines?, grep?, limit? }`

@@ -1,6 +1,6 @@
 use crate::protocol::{
     AuditEvent, CockpitSnapshot, DrillOutput, EngineStatus, HandleStored, PrewarmedCheck,
-    SessionTreeSummary, SubagentSnapshot,
+    SessionTreeSummary, StatuslinePulseResponse, SubagentSnapshot,
 };
 use hyper_core::bench::{analyze_transcript, SessionBenchmark};
 use hyper_core::config::{truncate_utf8_bytes, HyperConfig, Profile};
@@ -15,8 +15,8 @@ use hyper_core::sessions::{
 };
 use hyper_core::transcript::{inspect_transcript_tail, resolve_transcript_path, HealthLevel};
 use hyper_core::usage::{
-    build_session_usage, default_brain_dirs, now_epoch_ms, TokenBucket, UsageLedger, UsageWindow,
-    UsageWindowReport,
+    build_session_usage, default_brain_dirs, model_ttl_family, now_epoch_ms, ModelTtlEstimate,
+    TokenBucket, UsageLedger, UsageWindow, UsageWindowReport,
 };
 use hyper_core::wal::{list_transactions, rollback_transaction, RollbackResult};
 use notify::event::ModifyKind;
@@ -96,6 +96,33 @@ pub struct UsageLedgerCache {
 }
 
 impl UsageLedgerCache {
+    fn ensure_loaded(&mut self) {
+        if !self.loaded {
+            self.ledger = UsageLedger::load_from(&HyperConfig::ledger_path());
+            self.loaded = true;
+        }
+    }
+
+    fn sync_if_needed(&mut self, force_sync: bool, min_interval_secs: u64) -> (i64, u64) {
+        self.ensure_loaded();
+        let now_ms = now_epoch_ms();
+        let should_sync = force_sync
+            || self
+                .last_sync
+                .is_none_or(|t| t.elapsed() >= Duration::from_secs(min_interval_secs));
+        let mut scan_ms = 0u64;
+        if should_sync {
+            let ledger_path = HyperConfig::ledger_path();
+            let outcome = self.ledger.sync_from_dirs(&default_brain_dirs(), now_ms);
+            scan_ms = outcome.scan_ms;
+            if outcome.dirty {
+                let _ = self.ledger.save_to(&ledger_path);
+            }
+            self.last_sync = Some(Instant::now());
+        }
+        (now_ms, scan_ms)
+    }
+
     pub fn query_window(
         &mut self,
         window: UsageWindow,
@@ -104,27 +131,34 @@ impl UsageLedgerCache {
         tz_offset_mins: i32,
         force_sync: bool,
     ) -> UsageWindowReport {
-        let ledger_path = HyperConfig::ledger_path();
-        if !self.loaded {
-            self.ledger = UsageLedger::load_from(&ledger_path);
-            self.loaded = true;
-        }
-        let now_ms = now_epoch_ms();
-        let should_sync = force_sync
-            || self
-                .last_sync
-                .is_none_or(|t| t.elapsed() >= Duration::from_secs(10));
-        let mut scan_ms = 0u64;
-        if should_sync {
-            let outcome = self.ledger.sync_from_dirs(&default_brain_dirs(), now_ms);
-            scan_ms = outcome.scan_ms;
-            if outcome.dirty {
-                let _ = self.ledger.save_to(&ledger_path);
-            }
-            self.last_sync = Some(Instant::now());
-        }
+        let (now_ms, scan_ms) = self.sync_if_needed(force_sync, 10);
         self.ledger
             .query_window(window, cfg, currency, tz_offset_mins, now_ms, scan_ms)
+    }
+
+    pub fn estimate_ttl_cached(
+        &mut self,
+        model: Option<&str>,
+        cfg: &HyperConfig,
+        allow_sync: bool,
+    ) -> ModelTtlEstimate {
+        if allow_sync {
+            let _ = self.sync_if_needed(false, 60);
+        } else {
+            self.ensure_loaded();
+        }
+        self.ledger
+            .estimate_model_ttl(model, cfg.cache_warm_window_secs)
+    }
+
+    pub fn all_ttl_estimates_cached(
+        &mut self,
+        cfg: &HyperConfig,
+        force_sync: bool,
+    ) -> Vec<ModelTtlEstimate> {
+        let _ = self.sync_if_needed(force_sync, 60);
+        self.ledger
+            .all_model_ttl_estimates(cfg.cache_warm_window_secs)
     }
 }
 
@@ -237,6 +271,20 @@ impl HandleStore {
         })
     }
 }
+
+pub type SnapshotParts = (
+    EngineStatus,
+    HyperConfig,
+    Vec<AuditEvent>,
+    Arc<Mutex<BenchCache>>,
+    Arc<Mutex<UsageLedgerCache>>,
+);
+
+pub type StatuslineParts = (
+    HyperConfig,
+    Arc<Mutex<BenchCache>>,
+    Arc<Mutex<UsageLedgerCache>>,
+);
 
 impl DaemonState {
     pub fn new() -> Self {
@@ -570,6 +618,8 @@ impl DaemonState {
                 argv: None,
                 timeout_secs: 45,
                 cwd: None,
+                idle_timeout_secs: None,
+                fail_fast: None,
             };
             let Ok(res) = run_check(&jail, &cfg, &req, None) else {
                 return;
@@ -689,13 +739,22 @@ impl DaemonState {
         (self.config.clone(), self.usage_cache.clone())
     }
 
+    pub fn statusline_parts(&self) -> StatuslineParts {
+        (
+            self.config.clone(),
+            self.bench_cache.clone(),
+            self.usage_cache.clone(),
+        )
+    }
+
     /// Capture lightweight in-memory state in `<10us` so heavy disk/transcript I/O runs lock-free.
-    pub fn snapshot_parts(&self) -> (EngineStatus, HyperConfig, Vec<AuditEvent>, Arc<Mutex<BenchCache>>) {
+    pub fn snapshot_parts(&self) -> SnapshotParts {
         (
             self.engine_status(),
             self.config.clone(),
             self.events.iter().rev().take(40).cloned().collect(),
             self.bench_cache.clone(),
+            self.usage_cache.clone(),
         )
     }
 
@@ -713,12 +772,71 @@ impl DaemonState {
     }
 }
 
+const STALLED_SUBAGENT_IDLE_SECS: u64 = 90;
+
+/// Ultra-lightweight lock-free pulse for Antigravity CLI `statusLine` & `title` (`<2ms`).
+/// Never scans 60 sessions, never invokes sqlite3, and never scans brain directories on hot ticks.
+pub fn build_statusline_pulse(
+    config: &HyperConfig,
+    bench_cache: Option<&Mutex<BenchCache>>,
+    usage_cache: Option<&Mutex<UsageLedgerCache>>,
+    conversation_id: Option<&str>,
+    transcript_path: Option<&str>,
+    model_hint: Option<&str>,
+) -> Option<StatuslinePulseResponse> {
+    let tpath = resolve_transcript_path(transcript_path, conversation_id)
+        .or_else(discover_primary_transcript)?;
+    let mut pulse = inspect_transcript_tail(&tpath, config)?;
+    let effective_model = pulse
+        .model
+        .as_deref()
+        .or_else(|| model_hint.filter(|s| !s.trim().is_empty()));
+
+    if let Some(uc) = usage_cache {
+        if let Ok(mut guard) = uc.lock() {
+            let est = guard.estimate_ttl_cached(effective_model, config, false);
+            pulse.apply_cache_ttl(est.effective_ttl_secs, est.source);
+        }
+    }
+
+    let bench = if let Some(cache) = bench_cache {
+        cache.lock().ok().and_then(|mut c| c.analyze_cached(&tpath))
+    } else {
+        analyze_transcript(&tpath).ok()
+    };
+
+    Some(StatuslinePulseResponse {
+        model: pulse
+            .model
+            .clone()
+            .or_else(|| model_hint.map(String::from)),
+        effective_cache_ttl_secs: pulse.effective_cache_ttl_secs,
+        cache_ttl_source: pulse.cache_ttl_source,
+        cache_warm_remaining_secs: pulse.cache_warm_remaining_secs,
+        cache_is_cold: pulse.cache_is_cold,
+        total_tokens: pulse.total_tokens,
+        effective_red_tokens: pulse.effective_red_tokens,
+        cache_hit_ratio: bench
+            .as_ref()
+            .map(|b| b.cache_hit_ratio)
+            .unwrap_or(pulse.cache_hit_ratio),
+        health: pulse.health,
+        consecutive_error_streak: pulse.consecutive_error_streak,
+        median_turn_ms: bench.as_ref().map(|b| b.median_turn_ms).unwrap_or(0),
+        median_llm_ms: bench.as_ref().map(|b| b.median_llm_ms).unwrap_or(0),
+        effective_tps: bench.as_ref().map(|b| b.effective_tps).unwrap_or(0.0),
+        hyper_adoption_ratio: bench.as_ref().map(|b| b.hyper_adoption_ratio).unwrap_or(0.0),
+        total_turns: bench.as_ref().map(|b| b.total_turns).unwrap_or(0),
+    })
+}
+
 /// Shared lock-free cockpit snapshot builder used by both the daemon and CLI fallback.
 pub fn build_cockpit_snapshot(
     engine: EngineStatus,
     config: HyperConfig,
     recent_events: Vec<AuditEvent>,
     bench_cache: Option<&Mutex<BenchCache>>,
+    usage_cache: Option<&Mutex<UsageLedgerCache>>,
     conversation_id: Option<&str>,
     transcript_path: Option<&str>,
 ) -> CockpitSnapshot {
@@ -733,6 +851,24 @@ pub fn build_cockpit_snapshot(
         })
         .or_else(discover_primary_transcript);
 
+    let model_ttl_estimates: Vec<ModelTtlEstimate> = if let Some(uc) = usage_cache {
+        uc.lock()
+            .ok()
+            .map(|mut c| c.all_ttl_estimates_cached(&config, false))
+            .unwrap_or_default()
+    } else {
+        UsageLedger::load_from(&HyperConfig::ledger_path())
+            .all_model_ttl_estimates(config.cache_warm_window_secs)
+    };
+    let resolve_ttl = |model: Option<&str>| -> (u64, String) {
+        let fam = model_ttl_family(model);
+        model_ttl_estimates
+            .iter()
+            .find(|e| e.model_family == fam)
+            .map(|e| (e.effective_ttl_secs, e.source.clone()))
+            .unwrap_or_else(|| (config.cache_warm_window_secs, "default".to_string()))
+    };
+
     let analyze_path = |p: &Path| -> Option<SessionBenchmark> {
         if let Some(cache) = bench_cache {
             cache.lock().ok().and_then(|mut c| c.analyze_cached(p))
@@ -741,9 +877,12 @@ pub fn build_cockpit_snapshot(
         }
     };
 
-    let pulse = tpath
-        .as_deref()
-        .and_then(|p| inspect_transcript_tail(p, &config));
+    let pulse = tpath.as_deref().and_then(|p| {
+        let mut tp = inspect_transcript_tail(p, &config)?;
+        let (ttl, src) = resolve_ttl(tp.model.as_deref());
+        tp.apply_cache_ttl(ttl, src);
+        Some(tp)
+    });
     let benchmark = tpath.as_deref().and_then(analyze_path);
 
     let selected_id = pulse
@@ -792,10 +931,16 @@ pub fn build_cockpit_snapshot(
         let mut subagents = Vec::with_capacity(descendants.len());
         let mut active_subagents = 0usize;
         let mut redline_subagents = 0usize;
+        let mut stalled_subagents = 0usize;
+        let snap_now_ms = now_ms();
 
         for child in descendants {
             let cp = Path::new(&child.transcript_path);
-            let child_pulse = inspect_transcript_tail(cp, &config);
+            let child_pulse = inspect_transcript_tail(cp, &config).map(|mut tp| {
+                let (ttl, src) = resolve_ttl(tp.model.as_deref());
+                tp.apply_cache_ttl(ttl, src);
+                tp
+            });
             let child_bench = analyze_path(cp);
             if let Some(cb) = &child_bench {
                 for (model, bucket) in &cb.model_usage {
@@ -810,11 +955,16 @@ pub fn build_cockpit_snapshot(
                 .as_ref()
                 .map(|p| p.health)
                 .unwrap_or(HealthLevel::Green);
+            let idle_secs = snap_now_ms.saturating_sub(child.mtime_ms) / 1000;
+            let stalled = is_stalled_subagent(child.active, idle_secs);
             if child.active {
                 active_subagents += 1;
             }
             if is_active_redline(child.active, health) {
                 redline_subagents += 1;
+            }
+            if stalled {
+                stalled_subagents += 1;
             }
 
             let c_in = child_bench.as_ref().map(|b| b.total_input_tokens).unwrap_or(0);
@@ -840,6 +990,8 @@ pub fn build_cockpit_snapshot(
                 nesting_depth: child.nesting_depth,
                 active: child.active,
                 mtime_ms: child.mtime_ms,
+                idle_secs,
+                stalled,
                 model: child_pulse.as_ref().and_then(|p| p.model.clone()),
                 health,
                 health_reason: child_pulse
@@ -874,6 +1026,7 @@ pub fn build_cockpit_snapshot(
             subagent_count: subagents.len(),
             active_subagents,
             redline_subagents,
+            stalled_subagents,
             combined_turns,
             combined_tokens,
             combined_hyper_calls: combined_hyper,
@@ -911,6 +1064,7 @@ pub fn build_cockpit_snapshot(
         recent_sessions,
         session_tree,
         session_usage,
+        model_ttl_estimates,
         transactions,
         recent_events,
     }
@@ -918,6 +1072,10 @@ pub fn build_cockpit_snapshot(
 
 pub(crate) fn is_active_redline(active: bool, health: HealthLevel) -> bool {
     active && health == HealthLevel::Red
+}
+
+pub(crate) fn is_stalled_subagent(active: bool, idle_secs: u64) -> bool {
+    active && idle_secs >= STALLED_SUBAGENT_IDLE_SECS
 }
 
 pub(crate) fn is_content_mutation_event(kind: &EventKind) -> bool {
@@ -1066,5 +1224,13 @@ mod tests {
         assert!(!is_active_redline(true, HealthLevel::Yellow));
         assert!(!is_active_redline(true, HealthLevel::Green));
         assert!(!is_active_redline(false, HealthLevel::Green));
+    }
+
+    #[test]
+    fn stalled_subagent_requires_active_and_90s_silence() {
+        assert!(!is_stalled_subagent(true, 89));
+        assert!(is_stalled_subagent(true, 90));
+        assert!(is_stalled_subagent(true, 300));
+        assert!(!is_stalled_subagent(false, 600));
     }
 }

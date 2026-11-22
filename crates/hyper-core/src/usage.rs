@@ -11,8 +11,96 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use time::OffsetDateTime;
 
 pub const UNATTRIBUTED_MODEL: &str = "unattributed";
-const LEDGER_VERSION: u32 = 1;
+const LEDGER_VERSION: u32 = 2;
 const RETENTION_MS: i64 = 180 * 86_400_000;
+
+/// Upper bounds (in seconds) of empirical Cache TTL observation buckets:
+/// [0-30, 30-60, 60-90, 90-120, 120-180, 180-240, 240-300, 300-420, 420+].
+pub const TTL_BUCKET_UPPERS: [u64; 8] = [30, 60, 90, 120, 180, 240, 300, 420];
+pub const TTL_BUCKET_LABELS: [&str; 9] = [
+    "0-30s", "30-60s", "60-90s", "90-120s", "120-180s", "180-240s", "240-300s", "300-420s",
+    "420s+",
+];
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct TtlGapBucket {
+    pub samples: u64,
+    pub cold_samples: u64,
+    pub hit_ratio_sum: f64,
+}
+
+impl TtlGapBucket {
+    pub fn add_assign(&mut self, other: &Self) {
+        self.samples = self.samples.saturating_add(other.samples);
+        self.cold_samples = self.cold_samples.saturating_add(other.cold_samples);
+        self.hit_ratio_sum += other.hit_ratio_sum;
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TtlBucketSummary {
+    pub label: String,
+    pub upper_secs: u64,
+    pub samples: u64,
+    pub cold_samples: u64,
+    pub avg_hit_ratio: f64,
+    pub cold_rate: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ModelTtlEstimate {
+    pub model_family: String,
+    pub effective_ttl_secs: u64,
+    pub source: String,
+    pub total_samples: u64,
+    pub buckets: Vec<TtlBucketSummary>,
+}
+
+/// Normalize concrete effort/thinking suffixes to the underlying cache-pool model family.
+pub fn model_ttl_family(raw: Option<&str>) -> String {
+    let lower = raw.unwrap_or("").trim().to_ascii_lowercase();
+    if lower.is_empty() || lower == UNATTRIBUTED_MODEL {
+        return UNATTRIBUTED_MODEL.to_string();
+    }
+    if lower.contains("neon") {
+        return "gemini-4-neon".to_string();
+    }
+    if lower.contains("hydrogen") {
+        return "gemini-4-hydrogen".to_string();
+    }
+    if lower.contains("carbon") {
+        return "gemini-4-carbon".to_string();
+    }
+    if lower.contains("argon") {
+        return "gemini-4-argon".to_string();
+    }
+    if lower.contains("claude-opus") {
+        return "claude-opus".to_string();
+    }
+    if lower.contains("claude-sonnet") {
+        return "claude-sonnet".to_string();
+    }
+    if lower.contains("claude-haiku") {
+        return "claude-haiku".to_string();
+    }
+    for suffix in ["-xhigh", "-high", "-medium", "-low", "-thinking", "-max"] {
+        if let Some(stripped) = lower.strip_suffix(suffix) {
+            if !stripped.is_empty() {
+                return stripped.to_string();
+            }
+        }
+    }
+    lower
+}
+
+fn ttl_bucket_index(gap_secs: u64) -> usize {
+    for (idx, &upper) in TTL_BUCKET_UPPERS.iter().enumerate() {
+        if gap_secs < upper {
+            return idx;
+        }
+    }
+    TTL_BUCKET_UPPERS.len()
+}
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TokenBucket {
@@ -42,6 +130,7 @@ impl TokenBucket {
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
 pub struct ConversationLedgerEntry {
     pub mtime_ns: u128,
     pub size_bytes: u64,
@@ -49,6 +138,11 @@ pub struct ConversationLedgerEntry {
     pub first_ts_ms: i64,
     pub last_ts_ms: i64,
     pub hourly: BTreeMap<i64, BTreeMap<String, TokenBucket>>,
+    pub last_planner_ts_ms: i64,
+    pub last_planner_model: String,
+    pub last_planner_prompt_tokens: u64,
+    pub ttl_buckets: BTreeMap<String, Vec<TtlGapBucket>>,
+    pub ttl_backfilled: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -508,7 +602,12 @@ impl UsageLedger {
         match fs::read_to_string(path) {
             Ok(raw) => serde_json::from_str::<Self>(&raw)
                 .ok()
-                .filter(|l| l.version == LEDGER_VERSION)
+                .filter(|l| l.version == 1 || l.version == LEDGER_VERSION)
+                .map(|mut l| {
+                    // Seamlessly migrate v1 ledgers without losing 180-day usage history.
+                    l.version = LEDGER_VERSION;
+                    l
+                })
                 .unwrap_or_default(),
             Err(_) => Self::default(),
         }
@@ -566,13 +665,23 @@ impl UsageLedger {
                 let unchanged = self
                     .conversations
                     .get(&conv_id)
-                    .is_some_and(|e| e.mtime_ns == mtime_ns && e.size_bytes == size_bytes);
+                    .is_some_and(|e| e.mtime_ns == mtime_ns && e.size_bytes == size_bytes && e.ttl_backfilled);
                 if unchanged {
                     continue;
                 }
 
                 files_scanned += 1;
                 let entry = self.conversations.entry(conv_id).or_default();
+                let only_needs_ttl_backfill = entry.mtime_ns == mtime_ns
+                    && entry.size_bytes == size_bytes
+                    && !entry.ttl_backfilled
+                    && entry.byte_offset > 0;
+                if only_needs_ttl_backfill {
+                    if backfill_ttl_only(&transcript, entry).is_ok() {
+                        dirty = true;
+                    }
+                    continue;
+                }
                 if size_bytes < entry.byte_offset {
                     *entry = ConversationLedgerEntry::default();
                 }
@@ -751,6 +860,195 @@ impl UsageLedger {
             models,
         }
     }
+
+    pub fn estimate_model_ttl(&self, model: Option<&str>, fallback_secs: u64) -> ModelTtlEstimate {
+        let family = model_ttl_family(model);
+        let mut agg = vec![TtlGapBucket::default(); TTL_BUCKET_LABELS.len()];
+        for entry in self.conversations.values() {
+            if let Some(vec_b) = entry.ttl_buckets.get(&family) {
+                for (i, b) in vec_b.iter().enumerate().take(agg.len()) {
+                    agg[i].add_assign(b);
+                }
+            }
+        }
+        build_ttl_estimate(family, &agg, fallback_secs)
+    }
+
+    pub fn all_model_ttl_estimates(&self, fallback_secs: u64) -> Vec<ModelTtlEstimate> {
+        let mut by_family: BTreeMap<String, Vec<TtlGapBucket>> = BTreeMap::new();
+        for entry in self.conversations.values() {
+            for (fam, vec_b) in &entry.ttl_buckets {
+                let agg = by_family
+                    .entry(fam.clone())
+                    .or_insert_with(|| vec![TtlGapBucket::default(); TTL_BUCKET_LABELS.len()]);
+                for (i, b) in vec_b.iter().enumerate().take(agg.len()) {
+                    agg[i].add_assign(b);
+                }
+            }
+        }
+        let mut out: Vec<ModelTtlEstimate> = by_family
+            .into_iter()
+            .filter(|(f, _)| f != UNATTRIBUTED_MODEL)
+            .map(|(fam, agg)| build_ttl_estimate(fam, &agg, fallback_secs))
+            .filter(|e| e.total_samples > 0)
+            .collect();
+        out.sort_by_key(|e| std::cmp::Reverse(e.total_samples));
+        out
+    }
+}
+
+fn build_ttl_estimate(
+    model_family: String,
+    agg: &[TtlGapBucket],
+    fallback_secs: u64,
+) -> ModelTtlEstimate {
+    let mut total_samples = 0u64;
+    let mut buckets = Vec::with_capacity(TTL_BUCKET_LABELS.len());
+    for (idx, b) in agg.iter().enumerate().take(TTL_BUCKET_LABELS.len()) {
+        total_samples = total_samples.saturating_add(b.samples);
+        let upper_secs = if idx < TTL_BUCKET_UPPERS.len() {
+            TTL_BUCKET_UPPERS[idx]
+        } else {
+            600
+        };
+        let avg_hit = if b.samples > 0 {
+            b.hit_ratio_sum / b.samples as f64
+        } else {
+            0.0
+        };
+        let cold_rate = if b.samples > 0 {
+            b.cold_samples as f64 / b.samples as f64
+        } else {
+            0.0
+        };
+        buckets.push(TtlBucketSummary {
+            label: TTL_BUCKET_LABELS[idx].to_string(),
+            upper_secs,
+            samples: b.samples,
+            cold_samples: b.cold_samples,
+            avg_hit_ratio: round4(avg_hit),
+            cold_rate: round4(cold_rate),
+        });
+    }
+
+    // Require >=20 total observations and an observed cliff bucket (samples>=5, cold_rate>25%)
+    // before overriding the configured default window.
+    let mut last_safe_upper: Option<u64> = None;
+    let mut saw_cliff = false;
+    for b in &buckets[..TTL_BUCKET_UPPERS.len()] {
+        if b.samples < 5 {
+            continue;
+        }
+        if b.cold_rate > 0.25 {
+            saw_cliff = true;
+            break;
+        }
+        if b.cold_rate <= 0.15 && b.avg_hit_ratio >= 0.70 {
+            last_safe_upper = Some(b.upper_secs);
+        }
+    }
+
+    let (effective_ttl_secs, source) = match (total_samples >= 20, saw_cliff, last_safe_upper) {
+        (true, true, Some(safe)) => (safe.clamp(60, 420), "empirical".to_string()),
+        _ => (fallback_secs, "default".to_string()),
+    };
+
+    ModelTtlEstimate {
+        model_family,
+        effective_ttl_secs,
+        source,
+        total_samples,
+        buckets,
+    }
+}
+
+fn record_ttl_observation(
+    entry: &mut ConversationLedgerEntry,
+    ts_ms: i64,
+    model: &str,
+    input_tokens: u64,
+    cache_read_tokens: u64,
+) {
+    let prompt_tokens = input_tokens.saturating_add(cache_read_tokens);
+    let fam = model_ttl_family(Some(model));
+    if entry.last_planner_ts_ms > 0
+        && entry.last_planner_model == fam
+        && fam != UNATTRIBUTED_MODEL
+        && prompt_tokens >= 20_000
+        && entry.last_planner_prompt_tokens >= 20_000
+        && ts_ms >= entry.last_planner_ts_ms
+    {
+        let gap_secs = ((ts_ms - entry.last_planner_ts_ms) / 1000) as u64;
+        if gap_secs <= 900 {
+            let ratio = cache_read_tokens as f64 / prompt_tokens as f64;
+            let idx = ttl_bucket_index(gap_secs);
+            let vec_b = entry
+                .ttl_buckets
+                .entry(fam.clone())
+                .or_insert_with(|| vec![TtlGapBucket::default(); TTL_BUCKET_LABELS.len()]);
+            if vec_b.len() < TTL_BUCKET_LABELS.len() {
+                vec_b.resize_with(TTL_BUCKET_LABELS.len(), TtlGapBucket::default);
+            }
+            let slot = &mut vec_b[idx];
+            slot.samples = slot.samples.saturating_add(1);
+            if ratio < 0.50 {
+                slot.cold_samples = slot.cold_samples.saturating_add(1);
+            }
+            slot.hit_ratio_sum += ratio;
+        }
+    }
+    if prompt_tokens > 0 {
+        entry.last_planner_ts_ms = ts_ms;
+        entry.last_planner_model = fam;
+        entry.last_planner_prompt_tokens = prompt_tokens;
+    }
+}
+
+fn backfill_ttl_only(path: &Path, entry: &mut ConversationLedgerEntry) -> Result<()> {
+    let file = File::open(path)?;
+    let mut reader = BufReader::new(file);
+    let mut line = String::new();
+    entry.ttl_buckets.clear();
+    entry.last_planner_ts_ms = 0;
+    entry.last_planner_model.clear();
+    entry.last_planner_prompt_tokens = 0;
+
+    loop {
+        line.clear();
+        let n = reader.read_line(&mut line)?;
+        if n == 0 {
+            break;
+        }
+        if !line.contains("\"PLANNER_RESPONSE\"") {
+            continue;
+        }
+        let Ok(v) = serde_json::from_str::<Value>(line.trim()) else {
+            continue;
+        };
+        if v.get("type").and_then(Value::as_str) != Some("PLANNER_RESPONSE") {
+            continue;
+        }
+        let Some(ts_ms) = v
+            .get("created_at")
+            .and_then(Value::as_str)
+            .and_then(parse_iso8601_epoch_ms)
+        else {
+            continue;
+        };
+        let input_tokens = v.get("input_tokens").and_then(Value::as_u64).unwrap_or(0);
+        let cache_read_tokens = v
+            .get("cache_read_tokens")
+            .and_then(Value::as_u64)
+            .unwrap_or(0);
+        let model = normalize_model_key(
+            v.get("model")
+                .or_else(|| v.get("model_name"))
+                .and_then(Value::as_str),
+        );
+        record_ttl_observation(entry, ts_ms, &model, input_tokens, cache_read_tokens);
+    }
+    entry.ttl_backfilled = true;
+    Ok(())
 }
 
 fn ingest_transcript_incremental(
@@ -805,6 +1103,8 @@ fn ingest_transcript_incremental(
                 .and_then(Value::as_str),
         );
 
+        record_ttl_observation(entry, ts_ms, &model, input_tokens, cache_read_tokens);
+
         let hour_bucket = ts_ms.div_euclid(3_600_000);
         let bucket = entry
             .hourly
@@ -828,6 +1128,7 @@ fn ingest_transcript_incremental(
     entry.byte_offset = offset;
     entry.mtime_ns = mtime_ns;
     entry.size_bytes = size_bytes;
+    entry.ttl_backfilled = true;
     Ok(())
 }
 
@@ -966,5 +1267,53 @@ mod tests {
         assert_eq!(cfg.fx_rate_for("CNY").1, 7.1235);
         assert_eq!(cfg.fx_rate_for("EUR").1, 0.92);
         assert_eq!(cfg.fx_rate_for("BAD").0, "USD");
+    }
+
+    #[test]
+    fn migrates_v1_ledger_without_loss_and_detects_empirical_ttl_cliff() {
+        let dir = tempdir().unwrap();
+        let ledger_path = dir.path().join("usage_ledger.json");
+        let v1_json = r#"{
+            "version": 1,
+            "conversations": {
+                "legacy-1": {
+                    "mtime_ns": 123,
+                    "size_bytes": 456,
+                    "byte_offset": 456,
+                    "first_ts_ms": 1700000000000,
+                    "last_ts_ms": 1700000000000,
+                    "hourly": {
+                        "472222": {
+                            "gemini-4-neon-xhigh": {
+                                "turns": 3,
+                                "input_tokens": 1000,
+                                "cache_read_tokens": 9000,
+                                "output_tokens": 200
+                            }
+                        }
+                    }
+                }
+            }
+        }"#;
+        fs::write(&ledger_path, v1_json).unwrap();
+        let mut ledger = UsageLedger::load_from(&ledger_path);
+        assert_eq!(ledger.version, 2);
+        assert!(ledger.conversations.contains_key("legacy-1"));
+
+        // Feed empirical Neon observations: warm up to 180s, sharp cliff in 180-240s.
+        let entry = ledger.conversations.entry("ttl-sim".to_string()).or_default();
+        let mut vec_b = vec![TtlGapBucket::default(); TTL_BUCKET_LABELS.len()];
+        vec_b[0] = TtlGapBucket { samples: 12, cold_samples: 0, hit_ratio_sum: 11.4 }; // 0-30s
+        vec_b[4] = TtlGapBucket { samples: 8, cold_samples: 1, hit_ratio_sum: 6.9 };   // 120-180s
+        vec_b[5] = TtlGapBucket { samples: 8, cold_samples: 4, hit_ratio_sum: 3.6 };   // 180-240s cliff (50% cold)
+        entry.ttl_buckets.insert("gemini-4-neon".to_string(), vec_b);
+
+        let est = ledger.estimate_model_ttl(Some("gemini-4-neon-xhigh"), 240);
+        assert_eq!(est.source, "empirical");
+        assert_eq!(est.effective_ttl_secs, 180);
+
+        let fallback = ledger.estimate_model_ttl(Some("claude-sonnet-4"), 240);
+        assert_eq!(fallback.source, "default");
+        assert_eq!(fallback.effective_ttl_secs, 240);
     }
 }

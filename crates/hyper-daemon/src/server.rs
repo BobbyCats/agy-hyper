@@ -1,5 +1,7 @@
 use crate::protocol::{DaemonRequest, DaemonResponse};
-use crate::state::{build_cockpit_snapshot, execute_rollback_unlocked, DaemonState};
+use crate::state::{
+    build_cockpit_snapshot, build_statusline_pulse, execute_rollback_unlocked, DaemonState,
+};
 use anyhow::{Context, Result};
 use fs2::FileExt;
 use hyper_core::config::HyperConfig;
@@ -204,7 +206,7 @@ fn handle_line(
             conversation_id,
             transcript_path,
         } => {
-            let (engine, config, recent_events, bench_cache) = match state.lock() {
+            let (engine, config, recent_events, bench_cache, usage_cache) = match state.lock() {
                 Ok(g) => g.snapshot_parts(),
                 Err(_) => return DaemonResponse::err("daemon state lock poisoned"),
             };
@@ -213,10 +215,41 @@ fn handle_line(
                 config,
                 recent_events,
                 Some(&bench_cache),
+                Some(&usage_cache),
                 conversation_id.as_deref(),
                 transcript_path.as_deref(),
             );
             return DaemonResponse::ok(snap);
+        }
+        DaemonRequest::StatuslinePulse {
+            conversation_id,
+            transcript_path,
+            model,
+        } => {
+            let (config, bench_cache, usage_cache) = match state.lock() {
+                Ok(g) => g.statusline_parts(),
+                Err(_) => return DaemonResponse::err("daemon state lock poisoned"),
+            };
+            let pulse = build_statusline_pulse(
+                &config,
+                Some(&bench_cache),
+                Some(&usage_cache),
+                conversation_id.as_deref(),
+                transcript_path.as_deref(),
+                model.as_deref(),
+            );
+            return DaemonResponse::ok(pulse);
+        }
+        DaemonRequest::CacheTtlReport { force_sync } => {
+            let (config, usage_cache) = match state.lock() {
+                Ok(g) => g.usage_parts(),
+                Err(_) => return DaemonResponse::err("daemon state lock poisoned"),
+            };
+            let estimates = match usage_cache.lock() {
+                Ok(mut cache) => cache.all_ttl_estimates_cached(&config, force_sync),
+                Err(_) => return DaemonResponse::err("usage ledger lock poisoned"),
+            };
+            return DaemonResponse::ok(estimates);
         }
         DaemonRequest::UsageSummary {
             window,
@@ -337,6 +370,8 @@ fn handle_line(
             DaemonResponse::ok(serde_json::json!({ "shutting_down": true }))
         }
         DaemonRequest::Snapshot { .. }
+        | DaemonRequest::StatuslinePulse { .. }
+        | DaemonRequest::CacheTtlReport { .. }
         | DaemonRequest::UsageSummary { .. }
         | DaemonRequest::RollbackTx { .. } => unreachable!(),
     }

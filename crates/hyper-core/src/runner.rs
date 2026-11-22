@@ -8,7 +8,7 @@ use std::fs;
 use std::io::Read;
 use std::path::Path;
 use std::process::{Command, Stdio};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -34,6 +34,14 @@ pub struct CheckRequest {
     pub timeout_secs: u64,
     #[serde(default)]
     pub cwd: Option<String>,
+    /// Optional no-output idle watchdog in seconds (`Some(0)` disables; `None` applies smart default:
+    /// disabled for compile/static presets, 45s for test/script runs).
+    #[serde(default)]
+    pub idle_timeout_secs: Option<u64>,
+    /// Optional dual-condition fatal stderr hang detector (`None` enables for non-compile test/script runs).
+    /// Only aborts after a fatal signature AND 4s of subsequent silence while the process stays stuck.
+    #[serde(default)]
+    pub fail_fast: Option<bool>,
 }
 
 fn default_timeout_secs() -> u64 {
@@ -45,7 +53,13 @@ pub struct CheckRunResult {
     pub command_display: String,
     pub exit_code: i32,
     pub timed_out: bool,
+    #[serde(default)]
+    pub idle_timed_out: bool,
+    #[serde(default)]
+    pub fail_fast_triggered: bool,
     pub cancelled: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub abort_reason: Option<String>,
     pub duration_ms: u64,
     pub total_output_bytes: usize,
     pub digest: DiagnosticDigest,
@@ -290,7 +304,7 @@ pub fn run_check(
     let preset_map: HashMap<&str, &CheckPreset> =
         presets.iter().map(|p| (p.id.as_str(), p)).collect();
 
-    let (program, args) = if let Some(preset_id) = &req.preset {
+    let (program, args, is_compile_or_static) = if let Some(preset_id) = &req.preset {
         let p = preset_map.get(preset_id.as_str()).ok_or_else(|| {
             let available: Vec<&str> = presets.iter().map(|x| x.id.as_str()).collect();
             anyhow!(
@@ -299,7 +313,11 @@ pub fn run_check(
                 available.join(", ")
             )
         })?;
-        (p.program.clone(), p.args.clone())
+        let compile_like = p.read_only_safe
+            || preset_id.ends_with(":build")
+            || preset_id.ends_with(":typecheck")
+            || preset_id.ends_with(":check");
+        (p.program.clone(), p.args.clone(), compile_like)
     } else if let Some(argv) = &req.argv {
         if !cfg.allow_custom_argv_checks {
             return Err(anyhow!(
@@ -344,7 +362,13 @@ pub fn run_check(
                 }
             }
         }
-        (prog.to_string(), argv[1..].to_vec())
+        let first_sub = argv.get(1).map(|s| s.as_str()).unwrap_or("");
+        let compile_like = matches!(
+            prog,
+            "rustc" | "tsc" | "svelte-check" | "xcodebuild" | "gradle" | "mvn" | "ruff" | "mypy" | "pyright"
+        ) || (prog == "cargo" && matches!(first_sub, "check" | "build" | "clippy"))
+            || (prog == "go" && matches!(first_sub, "build" | "vet"));
+        (prog.to_string(), argv[1..].to_vec(), compile_like)
     } else {
         return Err(anyhow!("hyper_check requires either 'preset' or 'argv'"));
     };
@@ -434,6 +458,11 @@ pub fn run_check(
     let mut stdout_pipe = child.stdout.take();
     let mut stderr_pipe = child.stderr.take();
 
+    let last_output_ms = Arc::new(AtomicU64::new(0));
+    let fatal_seen_ms = Arc::new(AtomicU64::new(0));
+
+    let out_ts = last_output_ms.clone();
+    let out_started = started;
     let out_handle = std::thread::spawn(move || {
         let mut buf = HeadTailBuffer::default();
         if let Some(mut r) = stdout_pipe.take() {
@@ -442,29 +471,70 @@ pub fn run_check(
                 if n == 0 {
                     break;
                 }
+                out_ts.store(out_started.elapsed().as_millis() as u64, Ordering::Relaxed);
                 buf.push(&tmp[..n]);
             }
         }
         buf
     });
 
+    let err_ts = last_output_ms.clone();
+    let err_fatal = fatal_seen_ms.clone();
+    let err_started = started;
     let err_handle = std::thread::spawn(move || {
         let mut buf = HeadTailBuffer::default();
         if let Some(mut r) = stderr_pipe.take() {
             let mut tmp = [0u8; 8192];
+            let mut tail_carry = String::new();
             while let Ok(n) = r.read(&mut tmp) {
                 if n == 0 {
                     break;
                 }
+                let elapsed_ms = err_started.elapsed().as_millis() as u64;
+                err_ts.store(elapsed_ms, Ordering::Relaxed);
                 buf.push(&tmp[..n]);
+                if err_fatal.load(Ordering::Relaxed) == 0 {
+                    let chunk = String::from_utf8_lossy(&tmp[..n]);
+                    let combined = if tail_carry.is_empty() {
+                        chunk.into_owned()
+                    } else {
+                        format!("{}{}", tail_carry, chunk)
+                    };
+                    if contains_fatal_hang_signature(&combined) {
+                        err_fatal.store(elapsed_ms.max(1), Ordering::Relaxed);
+                    }
+                    let keep_from = combined.len().saturating_sub(128);
+                    let mut boundary = keep_from;
+                    while boundary < combined.len() && !combined.is_char_boundary(boundary) {
+                        boundary += 1;
+                    }
+                    tail_carry = combined[boundary..].to_string();
+                }
             }
         }
         buf
     });
 
-    let timeout = Duration::from_secs(req.timeout_secs.clamp(2, 300));
+    let timeout_secs_clamped = req.timeout_secs.clamp(2, 300);
+    let timeout = Duration::from_secs(timeout_secs_clamped);
+    // Compile/static presets default to wall-clock only so silent link/typecheck stages never false-kill.
+    let idle_timeout_ms: Option<u64> = match req.idle_timeout_secs {
+        Some(0) => None,
+        Some(s) => Some((s.clamp(2, 300) * 1000).min(timeout_secs_clamped * 1000)),
+        None if is_compile_or_static => None,
+        None => {
+            let default_idle = 45u64;
+            (default_idle < timeout_secs_clamped).then_some(default_idle * 1000)
+        }
+    };
+    let fail_fast_enabled = req.fail_fast.unwrap_or(!is_compile_or_static);
+    const FATAL_SILENCE_GRACE_MS: u64 = 4_000;
+
     let mut timed_out = false;
+    let mut idle_timed_out = false;
+    let mut fail_fast_triggered = false;
     let mut cancelled = false;
+    let mut abort_reason: Option<String> = None;
     let exit_code: i32;
 
     loop {
@@ -475,6 +545,7 @@ pub fn run_check(
         if let Some(flag) = &cancel_flag {
             if flag.load(Ordering::Relaxed) {
                 cancelled = true;
+                abort_reason = Some("cancelled".into());
                 kill_process_tree(child_pid);
                 let _ = child.kill();
                 let _ = child.wait();
@@ -482,8 +553,39 @@ pub fn run_check(
                 break;
             }
         }
-        if started.elapsed() >= timeout {
+        let elapsed = started.elapsed();
+        let now_ms = elapsed.as_millis() as u64;
+        let last_ms = last_output_ms.load(Ordering::Relaxed);
+        let silence_ms = now_ms.saturating_sub(last_ms);
+
+        if fail_fast_enabled
+            && fatal_seen_ms.load(Ordering::Relaxed) > 0
+            && silence_ms >= FATAL_SILENCE_GRACE_MS
+        {
+            fail_fast_triggered = true;
+            abort_reason = Some("fatal_hang".into());
+            kill_process_tree(child_pid);
+            let _ = child.kill();
+            let _ = child.wait();
+            exit_code = -3;
+            break;
+        }
+
+        if let Some(idle_ms) = idle_timeout_ms {
+            if silence_ms >= idle_ms {
+                idle_timed_out = true;
+                abort_reason = Some("idle_hang".into());
+                kill_process_tree(child_pid);
+                let _ = child.kill();
+                let _ = child.wait();
+                exit_code = -4;
+                break;
+            }
+        }
+
+        if elapsed >= timeout {
             timed_out = true;
+            abort_reason = Some("timeout".into());
             kill_process_tree(child_pid);
             let _ = child.kill();
             let _ = child.wait();
@@ -519,13 +621,27 @@ pub fn run_check(
         command_display,
         exit_code,
         timed_out,
+        idle_timed_out,
+        fail_fast_triggered,
         cancelled,
+        abort_reason,
         duration_ms,
         total_output_bytes,
         digest,
         full_captured_log,
         spill_handle: None,
     })
+}
+
+fn contains_fatal_hang_signature(stderr_chunk: &str) -> bool {
+    let lower = stderr_chunk.to_ascii_lowercase();
+    lower.contains("traceback (most recent call last)")
+        || lower.contains("panicked at")
+        || lower.contains("fatal error:")
+        || lower.contains("exc_bad_access")
+        || lower.contains("segmentation fault")
+        || lower.contains("abort trap")
+        || lower.contains("unhandledpromiserejection")
 }
 
 pub fn kill_process_tree(pid: u32) {
@@ -571,6 +687,8 @@ mod tests {
                 argv: Some(vec!["sh".into(), "-c".into(), "echo pwned".into()]),
                 timeout_secs: 5,
                 cwd: None,
+                idle_timeout_secs: None,
+                fail_fast: None,
             },
             None,
         )
@@ -585,6 +703,8 @@ mod tests {
                 argv: Some(vec!["node".into(), "-e".into(), "console.log(1)".into()]),
                 timeout_secs: 5,
                 cwd: None,
+                idle_timeout_secs: None,
+                fail_fast: None,
             },
             None,
         )
@@ -600,6 +720,8 @@ mod tests {
                 argv: Some(vec!["/tmp/evil/node".into(), "a.js".into()]),
                 timeout_secs: 5,
                 cwd: None,
+                idle_timeout_secs: None,
+                fail_fast: None,
             },
             None,
         )
@@ -614,6 +736,8 @@ mod tests {
                 argv: Some(vec!["python3".into(), "-cimport os".into()]),
                 timeout_secs: 5,
                 cwd: None,
+                idle_timeout_secs: None,
+                fail_fast: None,
             },
             None,
         )
@@ -643,12 +767,74 @@ mod tests {
                 argv: Some(vec!["node".into(), "slow.mjs".into()]),
                 timeout_secs: 15,
                 cwd: None,
+                idle_timeout_secs: Some(0),
+                fail_fast: None,
             },
             Some(cancel),
         )
         .unwrap();
         assert!(res.cancelled);
+        assert_eq!(res.abort_reason.as_deref(), Some("cancelled"));
         assert!(res.duration_ms < 2000);
+    }
+
+    #[test]
+    fn idle_watchdog_kills_silent_hang_early() {
+        let dir = tempdir().unwrap();
+        let script = dir.path().join("hang.mjs");
+        fs::write(&script, "console.log('boot'); setTimeout(() => {}, 30000);\n").unwrap();
+        let jail = WorkspaceJail::new(dir.path(), false, true).unwrap();
+        let cfg = HyperConfig::default();
+
+        let res = run_check(
+            &jail,
+            &cfg,
+            &CheckRequest {
+                preset: None,
+                argv: Some(vec!["node".into(), "hang.mjs".into()]),
+                timeout_secs: 20,
+                cwd: None,
+                idle_timeout_secs: Some(2),
+                fail_fast: Some(false),
+            },
+            None,
+        )
+        .unwrap();
+        assert!(res.idle_timed_out);
+        assert!(!res.timed_out);
+        assert_eq!(res.abort_reason.as_deref(), Some("idle_hang"));
+        assert!(res.duration_ms < 6000);
+    }
+
+    #[test]
+    fn fail_fast_does_not_false_kill_normal_exiting_traceback() {
+        let dir = tempdir().unwrap();
+        let script = dir.path().join("norm_err.mjs");
+        fs::write(
+            &script,
+            "console.error('Traceback (most recent call last): test case'); setTimeout(() => { console.log('done'); process.exit(0); }, 200);\n",
+        )
+        .unwrap();
+        let jail = WorkspaceJail::new(dir.path(), false, true).unwrap();
+        let cfg = HyperConfig::default();
+
+        let res = run_check(
+            &jail,
+            &cfg,
+            &CheckRequest {
+                preset: None,
+                argv: Some(vec!["node".into(), "norm_err.mjs".into()]),
+                timeout_secs: 10,
+                cwd: None,
+                idle_timeout_secs: Some(8),
+                fail_fast: Some(true),
+            },
+            None,
+        )
+        .unwrap();
+        assert_eq!(res.exit_code, 0);
+        assert!(!res.fail_fast_triggered);
+        assert!(res.abort_reason.is_none());
     }
 
     #[test]

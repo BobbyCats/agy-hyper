@@ -459,13 +459,21 @@ fn handle_check(
         }
     }
 
+    let abort_tag = res
+        .abort_reason
+        .as_deref()
+        .map(|r| format!(" [{}]", r))
+        .unwrap_or_default();
     record_telemetry(
         "hyper_check",
         Some(jail.root().display().to_string()),
         res.duration_ms,
         0,
         0,
-        format!("`{}` exit={} ({}ms)", res.command_display, res.exit_code, res.duration_ms),
+        format!(
+            "`{}` exit={} ({}ms){}",
+            res.command_display, res.exit_code, res.duration_ms, abort_tag
+        ),
         false,
     );
 
@@ -473,7 +481,15 @@ fn handle_check(
         "# check `{}` · exit={} · {}ms · {}B\n",
         res.command_display, res.exit_code, res.duration_ms, res.total_output_bytes
     );
-    if res.timed_out {
+    if res.fail_fast_triggered {
+        out.push_str(
+            "⚠ FAIL-FAST ABORT (fatal_hang: fatal stderr signature followed by silence; process tree killed cleanly)\n",
+        );
+    } else if res.idle_timed_out {
+        out.push_str(
+            "⚠ IDLE HANG ABORT (idle_hang: silent hang exceeded idle watchdog; process tree killed cleanly)\n",
+        );
+    } else if res.timed_out {
         out.push_str("⚠ TIMED OUT (process tree killed cleanly)\n");
     }
     if res.cancelled {
@@ -659,7 +675,7 @@ fn tool_definitions() -> Value {
         },
         {
             "name": "hyper_check",
-            "description": "Synchronous shell-free preset/argv verification runner (<=60s in-loop to preserve prompt cache) with head+tail ring buffer, error digest, process-tree cleanup, and LRU spill handles.",
+            "description": "Synchronous shell-free preset/argv verification runner (<=60s in-loop to preserve prompt cache) with smart idle/fatal-hang watchdog, head+tail ring buffer, error digest, process-tree cleanup, and LRU spill handles.",
             "annotations": { "readOnlyHint": false, "destructiveHint": false, "idempotentHint": false, "openWorldHint": false },
             "inputSchema": {
                 "type": "object",
@@ -669,6 +685,8 @@ fn tool_definitions() -> Value {
                     "preset": { "type": "string" },
                     "argv": { "type": "array", "items": { "type": "string" } },
                     "timeout_secs": { "type": "integer", "default": 60 },
+                    "idle_timeout_secs": { "type": "integer", "description": "Optional silence watchdog seconds (default: off for compile/static presets, 45s for tests/scripts)" },
+                    "fail_fast": { "type": "boolean", "description": "Abort hung runs on fatal stderr + 4s silence (default: false for compile/static checks, true for tests/scripts)" },
                     "cwd": { "type": "string" }
                 }
             }

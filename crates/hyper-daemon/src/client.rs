@@ -9,12 +9,20 @@ use std::time::Duration;
 use std::os::unix::net::UnixStream;
 
 /// Synchronous ultra-fast (`<0.5ms`) daemon RPC client used by Hooks, MCP, and CLI.
-#[cfg(unix)]
 pub fn send_request(req: &DaemonRequest) -> Result<DaemonResponse> {
+    send_request_with_timeout(req, 2000)
+}
+
+#[cfg(unix)]
+pub fn send_request_with_timeout(
+    req: &DaemonRequest,
+    read_timeout_ms: u64,
+) -> Result<DaemonResponse> {
     let sock = socket_path();
     let mut stream = UnixStream::connect(&sock)?;
-    stream.set_read_timeout(Some(Duration::from_millis(2000)))?;
-    stream.set_write_timeout(Some(Duration::from_millis(500)))?;
+    let clamped = read_timeout_ms.clamp(10, 10_000);
+    stream.set_read_timeout(Some(Duration::from_millis(clamped)))?;
+    stream.set_write_timeout(Some(Duration::from_millis(clamped.min(500))))?;
 
     let mut payload = serde_json::to_string(req)?;
     payload.push('\n');
@@ -32,15 +40,19 @@ pub fn send_request(req: &DaemonRequest) -> Result<DaemonResponse> {
 }
 
 #[cfg(not(unix))]
-pub fn send_request(req: &DaemonRequest) -> Result<DaemonResponse> {
+pub fn send_request_with_timeout(
+    req: &DaemonRequest,
+    read_timeout_ms: u64,
+) -> Result<DaemonResponse> {
     use hyper_core::config::HyperConfig;
     use std::net::TcpStream;
     let run_dir = HyperConfig::run_dir();
     let addr = std::fs::read_to_string(run_dir.join("agy-hyper-v1.addr"))?;
     let token = std::fs::read_to_string(run_dir.join("agy-hyper-v1.token"))?;
     let mut stream = TcpStream::connect(addr.trim())?;
-    stream.set_read_timeout(Some(Duration::from_millis(2000)))?;
-    let mut payload = format!("{}\n{}\n", token.trim(), serde_json::to_string(req)?);
+    let clamped = read_timeout_ms.clamp(10, 10_000);
+    stream.set_read_timeout(Some(Duration::from_millis(clamped)))?;
+    let payload = format!("{}\n{}\n", token.trim(), serde_json::to_string(req)?);
     stream.write_all(payload.as_bytes())?;
     let mut reader = BufReader::new(stream);
     let mut line = String::new();

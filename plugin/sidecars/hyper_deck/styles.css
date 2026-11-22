@@ -1066,6 +1066,12 @@ button:focus-visible, select:focus-visible, input:focus-visible {
 .subagent-dot.live {
   background: var(--ok);
 }
+.subagent-dot.stalled {
+  background: var(--warn);
+}
+.subagent-row.stalled {
+  border-color: var(--warn);
+}
 
 .subagent-role {
   font-family: var(--font-mono);
@@ -1233,6 +1239,86 @@ button:focus-visible, select:focus-visible, input:focus-visible {
   font-size: 10.5px;
   line-height: 1.45;
   color: var(--fg-muted);
+}
+
+/* Context X-Ray Composition Bar (Pro Context Tab) */
+.xray-block {
+  padding: 10px 12px 12px;
+  border-top: 1px solid var(--line);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.xray-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.xray-pills {
+  display: inline-flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.xray-bar {
+  display: flex;
+  width: 100%;
+  height: 9px;
+  border-radius: 999px;
+  overflow: hidden;
+  background: var(--field);
+  border: 1px solid var(--line);
+}
+
+.xray-seg {
+  height: 100%;
+  min-width: 3px;
+  transition: width 220ms ease;
+}
+
+.xray-legend {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 5px 10px;
+}
+
+.xray-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  font-size: 11px;
+  min-width: 0;
+}
+
+.xray-item-lbl {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  color: var(--fg-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.xray-swatch {
+  width: 7px;
+  height: 7px;
+  border-radius: 2px;
+  flex-shrink: 0;
+}
+
+.xray-item-val {
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  font-variant-numeric: tabular-nums;
+  color: var(--fg);
+  flex-shrink: 0;
 }
 
 @media (max-width: 420px) {

@@ -3,7 +3,7 @@ use hyper_core::config::HyperConfig;
 use hyper_core::context_pack::ContextPackRequest;
 use hyper_core::sessions::SessionSummary;
 use hyper_core::transcript::{HealthLevel, TranscriptPulse};
-use hyper_core::usage::SessionUsageSummary;
+use hyper_core::usage::{ModelTtlEstimate, SessionUsageSummary};
 use hyper_core::wal::{RollbackResult, WalManifest};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
@@ -65,6 +65,18 @@ pub enum DaemonRequest {
         conversation_id: Option<String>,
         #[serde(default)]
         transcript_path: Option<String>,
+    },
+    StatuslinePulse {
+        #[serde(default)]
+        conversation_id: Option<String>,
+        #[serde(default)]
+        transcript_path: Option<String>,
+        #[serde(default)]
+        model: Option<String>,
+    },
+    CacheTtlReport {
+        #[serde(default)]
+        force_sync: bool,
     },
     UsageSummary {
         #[serde(default = "default_usage_window")]
@@ -168,6 +180,10 @@ pub struct SubagentSnapshot {
     pub active: bool,
     pub mtime_ms: u64,
     #[serde(default)]
+    pub idle_secs: u64,
+    #[serde(default)]
+    pub stalled: bool,
+    #[serde(default)]
     pub model: Option<String>,
     pub health: HealthLevel,
     #[serde(default)]
@@ -190,6 +206,8 @@ pub struct SessionTreeSummary {
     pub subagent_count: usize,
     pub active_subagents: usize,
     pub redline_subagents: usize,
+    #[serde(default)]
+    pub stalled_subagents: usize,
     pub combined_turns: usize,
     pub combined_tokens: u64,
     pub combined_hyper_calls: usize,
@@ -209,8 +227,32 @@ pub struct CockpitSnapshot {
     pub session_tree: Option<SessionTreeSummary>,
     #[serde(default)]
     pub session_usage: Option<SessionUsageSummary>,
+    #[serde(default)]
+    pub model_ttl_estimates: Vec<ModelTtlEstimate>,
     pub transactions: Vec<WalManifest>,
     pub recent_events: Vec<AuditEvent>,
+}
+
+/// Ultra-lightweight lock-free payload for Antigravity CLI `statusLine` / `title` (`<2ms`).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StatuslinePulseResponse {
+    #[serde(default)]
+    pub model: Option<String>,
+    pub effective_cache_ttl_secs: u64,
+    pub cache_ttl_source: String,
+    pub cache_warm_remaining_secs: u64,
+    pub cache_is_cold: bool,
+    pub total_tokens: u64,
+    pub effective_red_tokens: u64,
+    pub cache_hit_ratio: f64,
+    pub health: HealthLevel,
+    #[serde(default)]
+    pub consecutive_error_streak: u32,
+    pub median_turn_ms: u64,
+    pub median_llm_ms: u64,
+    pub effective_tps: f64,
+    pub hyper_adoption_ratio: f64,
+    pub total_turns: usize,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

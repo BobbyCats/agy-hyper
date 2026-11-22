@@ -3,10 +3,26 @@
   const { $, escapeHtml, fmtCurrency, fmtRelTime, fmtSec, fmtTokens, t } = root.api;
   const { renderFullContextChart, renderHeroChart, renderUsageChart, renderWaterfallChart } = root.charts;
 
+  function fmtIdleShort(secs) {
+    const s = Math.max(0, Math.round(secs || 0));
+    if (s >= 60) return `${Math.floor(s / 60)}m${String(s % 60).padStart(2, '0')}s`;
+    return `${s}s`;
+  }
+
+  function fmtBytesShort(bytes) {
+    const b = Math.max(0, Number(bytes) || 0);
+    if (b >= 1024 * 1024) return `${(b / (1024 * 1024)).toFixed(1)}MB`;
+    if (b >= 1024) return `${(b / 1024).toFixed(0)}KB`;
+    return `${b}B`;
+  }
+
   function renderWarmthMeter(snap) {
     if (!snap) return;
     const p = snap.pulse;
-    const warmWin = snap.config?.cache_warm_window_secs || 240;
+    const warmWin = (p?.effective_cache_ttl_secs >= 30 ? p.effective_cache_ttl_secs : 0)
+      || snap.config?.cache_warm_window_secs
+      || 240;
+    const ttlSource = p?.cache_ttl_source || 'default';
     const coolThreshold = Math.max(15, Math.floor(warmWin * 0.5));
     let remaining = warmWin;
     if (p?.last_planner_epoch_ms) {
@@ -30,6 +46,25 @@
     pill.className = `status-pill ${state}`;
     pill.textContent = stateLabel;
 
+    const srcEl = $('warmth-ttl-source');
+    if (srcEl) {
+      const isEmp = ttlSource === 'empirical';
+      srcEl.textContent = isEmp
+        ? t('pulse.ttl_empirical', { secs: warmWin })
+        : t('pulse.ttl_default', { secs: warmWin });
+      const matchingEst = (snap.model_ttl_estimates || []).find(
+        (e) => e.source === 'empirical' && e.effective_ttl_secs === warmWin
+      );
+      srcEl.title = isEmp
+        ? t('pulse.ttl_tooltip_empirical', {
+            secs: warmWin,
+            samples: matchingEst?.total_samples || '20+',
+            model: matchingEst?.model_family || p?.model || 'model',
+          })
+        : t('pulse.ttl_tooltip_default', { secs: warmWin });
+      srcEl.classList.remove('hidden');
+    }
+
     const fill = $('warmth-fill');
     fill.className = `meter-fill ${state}`;
     fill.style.width = `${remaining === 0 ? 4 : pct}%`;
@@ -37,6 +72,65 @@
     meter.setAttribute('aria-valuemax', String(warmWin));
     meter.setAttribute('aria-valuenow', String(remaining));
     $('cache-hint').textContent = hintTxt;
+  }
+
+  function renderContextXray(bench) {
+    const box = $('ctx-xray');
+    if (!box) return;
+    const bd = bench?.context_breakdown;
+    const cats = (bd?.categories || []).filter((c) => (c.bytes || 0) > 0);
+    if (!cats.length || !bd?.total_bytes) {
+      box.classList.add('hidden');
+      return;
+    }
+    box.classList.remove('hidden');
+
+    const colorMap = {
+      file_reads: '#38bdf8',
+      command_outputs: '#f59e0b',
+      hyper_tools: '#10b981',
+      other_tools: '#a855f7',
+      thinking_text: '#6366f1',
+      user_system: '#64748b',
+    };
+
+    const pills = [];
+    if (bench.first_edit_context_tokens > 0) {
+      const feK = `${(bench.first_edit_context_tokens / 1000).toFixed(0)}k`;
+      const cls = bench.first_edit_context_tokens >= 180000 ? 'status-pill warn' : 'mono-tag';
+      pills.push(`<span class="${cls}">${escapeHtml(t('context_pro.xray_first_edit', { ctx: feK }))}</span>`);
+    }
+    if ((bench.blanket_read_turns || 0) > 0) {
+      pills.push(
+        `<span class="status-pill warn">${escapeHtml(t('context_pro.xray_blanket_reads', { count: bench.blanket_read_turns, max: bench.max_parallel_reads || 4 }))}</span>`
+      );
+    }
+    if ((bd.media_items || 0) > 0) {
+      pills.push(`<span class="mono-tag">${escapeHtml(t('context_pro.xray_media', { count: bd.media_items }))}</span>`);
+    }
+    $('ctx-xray-pills').innerHTML = pills.join('');
+
+    $('ctx-xray-bar').innerHTML = cats
+      .map((c) => {
+        const col = colorMap[c.key] || '#94a3b8';
+        const lbl = t(`context_pro.cat_${c.key}`, { defaultValue: c.key });
+        const tip = `${lbl}: ${c.share_pct}% (${fmtBytesShort(c.bytes)})`;
+        return `<span class="xray-seg" style="width:${Math.max(1.5, c.share_pct)}%;background:${col}" title="${escapeHtml(tip)}"></span>`;
+      })
+      .join('');
+
+    const sorted = [...cats].sort((a, b) => (b.bytes || 0) - (a.bytes || 0));
+    $('ctx-xray-legend').innerHTML = sorted
+      .map((c) => {
+        const col = colorMap[c.key] || '#94a3b8';
+        const lbl = t(`context_pro.cat_${c.key}`, { defaultValue: c.key });
+        return `
+          <div class="xray-item">
+            <span class="xray-item-lbl"><i class="xray-swatch" style="background:${col}"></i>${escapeHtml(lbl)}</span>
+            <span class="xray-item-val">${c.share_pct}% · ${fmtBytesShort(c.bytes)}</span>
+          </div>`;
+      })
+      .join('');
   }
 
   function renderToolsBars(eng) {
@@ -171,6 +265,17 @@
       actPill.classList.add('hidden');
     }
 
+    const stalledCount = tree.stalled_subagents || (tree.subagents || []).filter((s) => s.stalled).length;
+    const stalledPill = $('subagent-stalled-pill');
+    if (stalledPill) {
+      if (stalledCount > 0) {
+        stalledPill.textContent = t('subagents.stalled_badge', { count: stalledCount });
+        stalledPill.classList.remove('hidden');
+      } else {
+        stalledPill.classList.add('hidden');
+      }
+    }
+
     const liveRedlines = (tree.subagents || []).filter((s) => s.active && s.health === 'red').length;
     const redPill = $('subagent-red-pill');
     if (liveRedlines > 0) {
@@ -202,20 +307,28 @@
         const hyperTxt = sub.hyper_tool_calls > 0 ? ` · ⚡${sub.hyper_tool_calls}` : '';
         const cumTxt = fmtTokens(sub.cumulative_tokens || 0);
         const turns = sub.total_turns || 0;
-        const tipKey = sub.active
-          ? 'subagents.row_tooltip_active'
-          : sub.health === 'red'
-            ? 'subagents.row_tooltip_done_peak'
-            : 'subagents.row_tooltip_done';
+        const tipKey = sub.stalled
+          ? 'subagents.row_tooltip_stalled'
+          : sub.active
+            ? 'subagents.row_tooltip_active'
+            : sub.health === 'red'
+              ? 'subagents.row_tooltip_done_peak'
+              : 'subagents.row_tooltip_done';
         const rowTip = t(tipKey, {
           ctx: ctxFull,
           cum: cumTxt,
           turns,
           cache: cachePctNum,
+          idle: fmtIdleShort(sub.idle_secs),
         });
 
         let statsHtml;
-        if (sub.active) {
+        if (sub.stalled) {
+          statsHtml = `
+              <span>${escapeHtml(ctxFull)}</span>
+              <span>${escapeHtml(cachePct)}${escapeHtml(hyperTxt)}</span>
+              <span class="status-pill warn">${escapeHtml(t('subagents.stalled_pill', { idle: fmtIdleShort(sub.idle_secs) }))}</span>`;
+        } else if (sub.active) {
           const hCls = sub.health === 'red' ? 'err' : sub.health === 'yellow' ? 'warn' : 'ok';
           const hLbl = sub.health === 'red' ? 'RED' : sub.health === 'yellow' ? 'WARN' : 'OK';
           statsHtml = `
@@ -232,10 +345,11 @@
               <span class="status-pill ${pillCls}">${escapeHtml(doneLbl)}</span>`;
         }
 
+        const dotCls = sub.stalled ? ' stalled' : sub.active ? ' live' : '';
         return `
-          <button type="button" class="subagent-row${sub.active ? '' : ' done'}${isSel ? ' selected' : ''}" data-subconv="${escapeHtml(sub.conversation_id)}" title="${escapeHtml(rowTip)}">
+          <button type="button" class="subagent-row${sub.active ? '' : ' done'}${sub.stalled ? ' stalled' : ''}${isSel ? ' selected' : ''}" data-subconv="${escapeHtml(sub.conversation_id)}" title="${escapeHtml(rowTip)}">
             <span class="subagent-row-main">
-              <i class="subagent-dot${sub.active ? ' live' : ''}"></i>
+              <i class="subagent-dot${dotCls}"></i>
               <span class="subagent-role">${escapeHtml(role)}</span>
               <span class="subagent-title">${escapeHtml(title)}</span>
             </span>
@@ -374,7 +488,7 @@
     const tree = snap.session_tree || null;
     const activeConvId = pulse?.conversation_id || bench?.conversation_id || '';
 
-    $('version-pill').textContent = `v${eng.version || snap.version || '0.2.0'}`;
+    $('version-pill').textContent = `v${eng.version || snap.version || '0.3.0'}`;
     const isUds = snap.transport === 'uds-daemon';
     $('daemon-dot').classList.toggle('warn', !isUds);
     $('daemon-label').textContent = isUds
@@ -436,7 +550,10 @@
     $('s-saved-cell').title = t('kpi.est_saved_hint', { turns: turnsBasis });
 
     const alertEl = $('cliff-alert');
-    if (pulse?.multimodal_cliff_risk) {
+    if (pulse?.consecutive_error_streak >= 2) {
+      alertEl.textContent = t('pulse.cliff_error_loop', { count: pulse.consecutive_error_streak });
+      alertEl.className = 'inline-alert err';
+    } else if (pulse?.multimodal_cliff_risk) {
       alertEl.textContent = t('pulse.cliff_multimodal', { count: pulse.media_items_recent });
       alertEl.className = 'inline-alert';
     } else if (pulse?.recent_timeouts > 0) {
@@ -514,6 +631,7 @@
       : `<div class="empty-state">${escapeHtml(t('security.audit_empty'))}</div>`;
 
     renderWarmthMeter(snap);
+    renderContextXray(bench);
     try {
       if (state.mode === 'simple') renderHeroChart(snap, state.heroTab);
       if (state.mode === 'pro' && state.proTab === 'waterfall') renderWaterfallChart(bench);

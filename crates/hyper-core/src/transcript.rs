@@ -43,15 +43,50 @@ pub struct TranscriptPulse {
     pub last_planner_epoch_ms: Option<i64>,
     pub seconds_since_last_planner: Option<u64>,
     pub cache_warm_remaining_secs: u64,
+    #[serde(default = "default_effective_ttl_secs")]
+    pub effective_cache_ttl_secs: u64,
+    #[serde(default = "default_ttl_source")]
+    pub cache_ttl_source: String,
     pub cache_is_cold: bool,
     pub multimodal_cliff_risk: bool,
     #[serde(default)]
     pub recently_compacted: bool,
     #[serde(default)]
     pub model_switched_from: Option<String>,
+    #[serde(default)]
+    pub consecutive_error_streak: u32,
+    #[serde(default)]
+    pub repeat_error_signature: Option<String>,
     pub health: HealthLevel,
     #[serde(default)]
     pub health_reason: String,
+}
+
+impl TranscriptPulse {
+    /// Apply a resolved empirical (or configured) cache TTL in-place without re-reading the transcript.
+    pub fn apply_cache_ttl(&mut self, ttl_secs: u64, source: impl Into<String>) {
+        if ttl_secs < 30 {
+            return;
+        }
+        self.effective_cache_ttl_secs = ttl_secs;
+        self.cache_ttl_source = source.into();
+        self.cache_warm_remaining_secs = match self.seconds_since_last_planner {
+            Some(elapsed) => ttl_secs.saturating_sub(elapsed),
+            None => ttl_secs,
+        };
+        self.cache_is_cold = self
+            .seconds_since_last_planner
+            .map(|e| e >= ttl_secs)
+            .unwrap_or(false);
+    }
+}
+
+fn default_effective_ttl_secs() -> u64 {
+    crate::config::DEFAULT_CACHE_WARM_SECS
+}
+
+fn default_ttl_source() -> String {
+    "default".to_string()
 }
 
 /// Infer model context window, 2x long-context pricing cliff, and effective guard thresholds.
@@ -131,6 +166,14 @@ fn is_user_cancel_error(msg: &str) -> bool {
 /// - >180k Multimodal Image TTFT cliff detection
 /// - Live cache hit ratio & exact token breakdown
 pub fn inspect_transcript_tail(path: &Path, cfg: &HyperConfig) -> Option<TranscriptPulse> {
+    inspect_transcript_tail_with_ttl(path, cfg, None)
+}
+
+pub fn inspect_transcript_tail_with_ttl(
+    path: &Path,
+    cfg: &HyperConfig,
+    ttl_override: Option<(u64, &str)>,
+) -> Option<TranscriptPulse> {
     let mut file = File::open(path).ok()?;
     let size = file.metadata().ok()?.len();
     let seeked = size > TAIL_READ_BYTES;
@@ -310,6 +353,45 @@ pub fn inspect_transcript_tail(path: &Path, cfg: &HyperConfig) -> Option<Transcr
         }
     }
 
+    // Detect consecutive tail error streaks (ignoring user-cancelled steps) for loop-breaker guards.
+    let mut consecutive_error_streak = 0u32;
+    let mut repeat_error_signature: Option<String> = None;
+    for obj in active_window.iter().rev() {
+        let typ = obj.get("type").and_then(Value::as_str).unwrap_or("");
+        let status = obj.get("status").and_then(Value::as_str).unwrap_or("");
+        if typ == "SYSTEM_MESSAGE" || typ == "USER_INPUT" {
+            continue;
+        }
+        let is_err = typ == "ERROR_MESSAGE" || status.eq_ignore_ascii_case("ERROR");
+        if is_err {
+            let err_text = obj
+                .get("error")
+                .and_then(Value::as_str)
+                .or_else(|| obj.get("content").and_then(Value::as_str))
+                .unwrap_or("");
+            if is_user_cancel_error(err_text) {
+                break;
+            }
+            consecutive_error_streak = consecutive_error_streak.saturating_add(1);
+            if repeat_error_signature.is_none() {
+                let first_line = err_text
+                    .lines()
+                    .find(|l| !l.trim().is_empty())
+                    .unwrap_or(typ)
+                    .trim();
+                let short: String = first_line.chars().take(96).collect();
+                if !short.is_empty() {
+                    repeat_error_signature = Some(short);
+                }
+            }
+        } else {
+            break;
+        }
+    }
+    if consecutive_error_streak < 2 {
+        repeat_error_signature = None;
+    }
+
     let total_tokens = input_tokens + cache_read_tokens;
     let cache_hit_ratio = if total_tokens > 0 {
         cache_read_tokens as f64 / total_tokens as f64
@@ -328,7 +410,10 @@ pub fn inspect_transcript_tail(path: &Path, cfg: &HyperConfig) -> Option<Transcr
             0
         }
     });
-    let warm_win = cfg.cache_warm_window_secs;
+    let (warm_win, ttl_source) = match ttl_override {
+        Some((secs, src)) if secs >= 30 => (secs, src.to_string()),
+        _ => (cfg.cache_warm_window_secs, "default".to_string()),
+    };
     let cache_warm_remaining_secs = match seconds_since_last_planner {
         Some(elapsed) => warm_win.saturating_sub(elapsed),
         None => warm_win,
@@ -398,10 +483,14 @@ pub fn inspect_transcript_tail(path: &Path, cfg: &HyperConfig) -> Option<Transcr
         last_planner_epoch_ms,
         seconds_since_last_planner,
         cache_warm_remaining_secs,
+        effective_cache_ttl_secs: warm_win,
+        cache_ttl_source: ttl_source,
         cache_is_cold,
         multimodal_cliff_risk,
         recently_compacted,
         model_switched_from,
+        consecutive_error_streak,
+        repeat_error_signature,
         health,
         health_reason: health_reason.to_string(),
     })
@@ -553,5 +642,23 @@ mod tests {
         );
         assert_eq!(pulse.model.as_deref(), Some("gemini-4-carbon-medium"));
         assert_eq!(pulse.health, HealthLevel::Green);
+    }
+
+    #[test]
+    fn detects_consecutive_error_streak_and_applies_empirical_ttl() {
+        let dir = tempdir().unwrap();
+        let p = dir.path().join("transcript.jsonl");
+        let content = concat!(
+            "{\"step_index\":1,\"type\":\"PLANNER_RESPONSE\",\"model\":\"gemini-4-neon-xhigh\",\"input_tokens\":5000,\"cache_read_tokens\":55000,\"output_tokens\":100,\"created_at\":\"2026-11-20T12:00:00Z\"}\n",
+            "{\"step_index\":2,\"type\":\"GENERIC\",\"status\":\"ERROR\",\"content\":\"exit code 1: test failed\"}\n",
+            "{\"step_index\":3,\"type\":\"ERROR_MESSAGE\",\"error\":\"exit code 1: test failed\"}\n"
+        );
+        fs::write(&p, content).unwrap();
+        let cfg = HyperConfig::default();
+        let pulse = inspect_transcript_tail_with_ttl(&p, &cfg, Some((180, "empirical"))).unwrap();
+        assert_eq!(pulse.effective_cache_ttl_secs, 180);
+        assert_eq!(pulse.cache_ttl_source, "empirical");
+        assert_eq!(pulse.consecutive_error_streak, 2);
+        assert!(pulse.repeat_error_signature.as_deref().unwrap().contains("exit code 1"));
     }
 }
