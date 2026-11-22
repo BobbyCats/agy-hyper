@@ -13,19 +13,23 @@ DATA_DIR="${AGY_HYPER_DATA_DIR:-${HOME}/.gemini/antigravity/agy-hyper}"
 
 ACTION="install"
 PURGE=0
+OBSERVE=0
 for arg in "$@"; do
   case "$arg" in
     --uninstall) ACTION="uninstall" ;;
     --purge)     PURGE=1 ;;
+    --observe)   OBSERVE=1 ;;
     -h|--help)
       cat <<'EOF'
-Usage: install.sh [--uninstall [--purge]]
+Usage: install.sh [--observe] [--uninstall [--purge]]
 
 Default:
   Install or upgrade AGY Hyper (uses local Cargo checkout if run inside repo,
   otherwise downloads a SHA-256 verified release bundle).
 
 Options:
+  --observe     Start in zero-intrusion Observe mode (read-only Hyper Deck,
+                burn audit & passive WAL capture; native tools & diff untouched).
   --uninstall   Stop daemon/sidecar and remove plugin files and CLI symlink.
                 Preserves ~/.gemini/antigravity/agy-hyper (config, ledger, WAL).
   --purge       With --uninstall, also remove ~/.gemini/antigravity/agy-hyper.
@@ -126,6 +130,10 @@ if [[ -n "$SCRIPT_DIR" && -f "${SCRIPT_DIR}/Cargo.toml" && -d "${SCRIPT_DIR}/plu
   chmod +x "${TMP_BIN}"
   mv -f "${TMP_BIN}" "${PLUGIN_DIR}/bin/agy-hyper"
   ln -sf "${PLUGIN_DIR}/bin/agy-hyper" "${BIN_LINK}"
+  if [[ "$OBSERVE" -eq 1 ]]; then
+    "${PLUGIN_DIR}/bin/agy-hyper" config profile observe >/dev/null 2>&1 || true
+    echo "✓ Profile set to 'observe' (zero-intrusion cockpit only; switch anytime in Hyper Deck)."
+  fi
   recycle_sidecar
   echo "✓ Installed local build to ${PLUGIN_DIR}"
   if pgrep -f "agy-hyper mcp" >/dev/null 2>&1; then
@@ -190,6 +198,10 @@ fi
 
 chmod +x "${PLUGIN_DIR}/bin/agy-hyper"
 ln -sf "${PLUGIN_DIR}/bin/agy-hyper" "${BIN_LINK}"
+if [[ "$OBSERVE" -eq 1 ]]; then
+  "${PLUGIN_DIR}/bin/agy-hyper" config profile observe >/dev/null 2>&1 || true
+  echo "✓ Profile set to 'observe' (zero-intrusion cockpit only; switch anytime in Hyper Deck)."
+fi
 
 recycle_sidecar
 

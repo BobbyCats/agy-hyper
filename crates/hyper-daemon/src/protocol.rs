@@ -108,7 +108,28 @@ pub enum DaemonRequest {
         #[serde(default)]
         force: bool,
     },
+    InspectTxDiff {
+        tx_id: String,
+        #[serde(default)]
+        max_lines: Option<usize>,
+    },
+    AuditReport {
+        #[serde(default = "default_audit_days")]
+        days: u32,
+        #[serde(default = "default_audit_sessions")]
+        max_sessions: usize,
+        #[serde(default)]
+        tz_offset_mins: i32,
+    },
     Shutdown,
+}
+
+fn default_audit_days() -> u32 {
+    14
+}
+
+fn default_audit_sessions() -> usize {
+    80
 }
 
 fn default_drill_limit() -> usize {

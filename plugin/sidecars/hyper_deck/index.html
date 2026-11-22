@@ -24,7 +24,7 @@
         <div class="brand-copy">
           <div class="brand-title-row">
             <span class="brand-name" data-i18n="app.title">AGY Hyper</span>
-            <span id="version-pill" class="mono-tag">v0.3.0</span>
+            <span id="version-pill" class="mono-tag">v0.4.0</span>
           </div>
           <div class="brand-sub">
             <span id="daemon-dot" class="pulse-dot"></span>
@@ -172,10 +172,14 @@
           <span class="mono-tag" data-i18n="shield.zero_trust">Zero-Trust</span>
         </div>
 
-        <div class="seg-3" role="radiogroup" aria-label="Safety Profile">
+        <div class="seg-4" role="radiogroup" aria-label="Safety Profile">
+          <button type="button" class="seg-btn" data-profile="observe">
+            <strong data-i18n="shield.observe_title">Observe</strong>
+            <span data-i18n="shield.observe_desc">Cockpit only</span>
+          </button>
           <button type="button" class="seg-btn" data-profile="safe">
             <strong data-i18n="shield.safe_title">Safe</strong>
-            <span data-i18n="shield.safe_desc">Presets only</span>
+            <span data-i18n="shield.safe_desc">Native diff</span>
           </button>
           <button type="button" class="seg-btn" data-profile="balanced">
             <strong data-i18n="shield.balanced_title">Balanced</strong>
@@ -319,6 +323,17 @@
         </div>
         <div id="usage-models" class="prop-list"></div>
 
+        <div id="usage-audit-block" class="audit-card-block hidden">
+          <div class="hairline"></div>
+          <div class="subhead-row">
+            <h3 class="sub-title" data-i18n="usage.audit_heading">Local Burn Audit &amp; TTL Cliffs</h3>
+            <button id="btn-export-audit" type="button" class="btn-ghost btn-xs" data-i18n="usage.export_card">Export Card (.svg)</button>
+          </div>
+          <div id="audit-kpi-pills" class="xray-pills"></div>
+          <div id="audit-ttl-chips" class="audit-ttl-chips"></div>
+          <div id="audit-findings-list" class="audit-findings-list"></div>
+        </div>
+
         <p class="usage-footnote" data-i18n="usage.footnote">
           API-equivalent reference estimate from local transcripts. Customize rates or FX in ~/.gemini/antigravity/agy-hyper/config.json.
         </p>
@@ -347,6 +362,27 @@
         <div class="hairline"></div>
         <h3 class="sub-title" data-i18n="engine.controls_heading">Live Engine Controls</h3>
         <div class="toggle-list">
+          <label class="toggle-row">
+            <div>
+              <strong data-i18n="engine.tog_mcp_read_title">MCP Context Pack &amp; Search</strong>
+              <small data-i18n="engine.tog_mcp_read_desc">Enable hyper_pack &amp; hyper_search for bundled AST + ripgrep reads</small>
+            </div>
+            <input id="tog-mcp-read" type="checkbox" data-toggle="enable_mcp_read">
+          </label>
+          <label class="toggle-row">
+            <div>
+              <strong data-i18n="engine.tog_mcp_edit_title">MCP Atomic Edit (WAL)</strong>
+              <small data-i18n="engine.tog_mcp_edit_desc">Disable to keep Antigravity's native inline edit diff cards (passive WAL stays active)</small>
+            </div>
+            <input id="tog-mcp-edit" type="checkbox" data-toggle="enable_mcp_edit">
+          </label>
+          <label class="toggle-row">
+            <div>
+              <strong data-i18n="engine.tog_mcp_check_title">MCP Sync Check Runner</strong>
+              <small data-i18n="engine.tog_mcp_check_desc">Run <=60s build/test checks in-loop to avoid background cache drops</small>
+            </div>
+            <input id="tog-mcp-check" type="checkbox" data-toggle="enable_mcp_check">
+          </label>
           <label class="toggle-row">
             <div>
               <strong data-i18n="engine.tog_prewarm_title">Tier-2 Speculative Pre-warm</strong>

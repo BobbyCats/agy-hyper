@@ -1,12 +1,14 @@
 (() => {
-  const { $, apiFetch, copyTextReliable, initThemeSync, showToast, t } = window.HyperDeck.api;
+  const { $, apiFetch, copyTextReliable, initThemeSync, isDark, showToast, t } = window.HyperDeck.api;
   const { renderFullContextChart, renderHeroChart, renderUsageChart, renderWaterfallChart, resizeAllCharts } = window.HyperDeck.charts;
-  const { renderSnapshot, renderUsageReport, renderWarmthMeter } = window.HyperDeck.render;
+  const { renderAuditPanel, renderSnapshot, renderUsageReport, renderWarmthMeter } = window.HyperDeck.render;
 
   const SUPPORTED_LANGS = ['en', 'zh-CN', 'ja'];
   const state = {
     lastSnap: null,
     lastUsage: null,
+    lastAudit: null,
+    openDiffs: {},
     mode: 'simple',
     heroTab: 'context',
     proTab: 'waterfall',
@@ -19,16 +21,101 @@
   let usageInFlight = false;
   let usageSeq = 0;
   let lastUsageFetchMs = 0;
+  let auditInFlight = false;
+  let lastAuditFetchMs = 0;
 
   function selectSession(convId) {
     state.selectedConvId = convId || '';
     poll(true);
   }
 
+  async function toggleTxDiff(txId) {
+    if (!txId) return;
+    if (state.openDiffs[txId]) {
+      delete state.openDiffs[txId];
+      render();
+      return;
+    }
+    state.openDiffs[txId] = { loading: true };
+    render();
+    try {
+      const r = await apiFetch(`/api/tx/diff?txId=${encodeURIComponent(txId)}`, { method: 'GET' }).then((x) => x.json());
+      if (state.openDiffs[txId]) {
+        state.openDiffs[txId] = r?.ok ? { loading: false, data: r.diff } : { loading: false, error: r?.error || 'diff unavailable' };
+        render();
+      }
+    } catch (e) {
+      if (state.openDiffs[txId]) {
+        state.openDiffs[txId] = { loading: false, error: String(e?.message || e) };
+        render();
+      }
+    }
+  }
+
+  async function pollAudit(force = false) {
+    if (state.mode !== 'pro' || state.proTab !== 'usage') return;
+    if (auditInFlight && !force) return;
+    if (!force && state.lastAudit && Date.now() - lastAuditFetchMs < 30000) {
+      renderAuditPanel(state.lastAudit);
+      return;
+    }
+    auditInFlight = true;
+    try {
+      const days = state.usageWindow === '24h' ? 1 : state.usageWindow === '7d' ? 7 : state.usageWindow === '30d' ? 30 : 90;
+      const tz = -new Date().getTimezoneOffset();
+      const rep = await apiFetch(`/api/audit?days=${days}&tzOffsetMins=${tz}`, { method: 'GET' }).then((r) => r.json());
+      if (rep && !rep.error) {
+        state.lastAudit = rep;
+        lastAuditFetchMs = Date.now();
+        renderAuditPanel(rep);
+      }
+    } catch {
+      // keep previous audit intact
+    } finally {
+      auditInFlight = false;
+    }
+  }
+
+  async function exportAuditSvg() {
+    const btn = $('btn-export-audit');
+    if (!btn || btn.disabled) return;
+    btn.disabled = true;
+    const prev = btn.textContent;
+    btn.textContent = t('usage.exporting_card');
+    try {
+      const days = state.usageWindow === '24h' ? 1 : state.usageWindow === '7d' ? 7 : state.usageWindow === '30d' ? 30 : 90;
+      const tz = -new Date().getTimezoneOffset();
+      const theme = isDark() ? 'dark' : 'light';
+      const res = await apiFetch(`/api/audit/svg?days=${days}&theme=${theme}&tzOffsetMins=${tz}`, { method: 'GET' });
+      const svgText = await res.text();
+      if (!svgText.trim().startsWith('<svg')) {
+        throw new Error('invalid SVG response');
+      }
+      const blob = new Blob([svgText], { type: 'image/svg+xml;charset=utf-8' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `agy-hyper-audit-${days}d-${theme}.svg`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 1500);
+      showToast(t('usage.toast_audit_ok'));
+    } catch (e) {
+      showToast(t('usage.toast_audit_err', { err: String(e?.message || e) }));
+    } finally {
+      btn.disabled = false;
+      btn.textContent = prev;
+    }
+  }
+
   function render() {
-    if (state.lastSnap) renderSnapshot(state.lastSnap, state, triggerRollback, selectSession);
+    if (state.lastSnap) renderSnapshot(state.lastSnap, state, triggerRollback, selectSession, toggleTxDiff);
     if (state.lastUsage && state.mode === 'pro' && state.proTab === 'usage') {
       renderUsageReport(state.lastUsage, state);
+    }
+    if (state.lastAudit && state.mode === 'pro' && state.proTab === 'usage') {
+      renderAuditPanel(state.lastAudit);
     }
   }
 
@@ -116,6 +203,7 @@
     $('view-pro').classList.toggle('hidden', next !== 'pro');
     if (next === 'pro' && state.proTab === 'usage') {
       pollUsage(false);
+      pollAudit(false);
     }
     resizeVisibleCharts();
   }
@@ -143,6 +231,7 @@
     });
     if (tab === 'usage' && state.mode === 'pro') {
       pollUsage(false);
+      pollAudit(false);
     }
     resizeVisibleCharts();
   }
@@ -315,12 +404,18 @@
     syncLiveFx();
   });
 
+  $('btn-export-audit')?.addEventListener('click', () => {
+    exportAuditSvg();
+  });
+
   document.querySelectorAll('.win-btn[data-uwin]').forEach((btn) => {
     btn.addEventListener('click', () => {
       state.usageWindow = btn.dataset.uwin;
       localStorage.setItem('agy-hyper-uwin', state.usageWindow);
       lastUsageFetchMs = 0;
+      lastAuditFetchMs = 0;
       pollUsage(false);
+      pollAudit(true);
     });
   });
 
@@ -387,7 +482,10 @@
     .catch(() => {})
     .finally(() => {
       poll(true);
-      if (state.mode === 'pro' && state.proTab === 'usage') pollUsage(false);
+      if (state.mode === 'pro' && state.proTab === 'usage') {
+        pollUsage(false);
+        pollAudit(false);
+      }
       setInterval(() => poll(false), 2500);
       setInterval(() => {
         if (state.mode === 'pro' && state.proTab === 'usage') pollUsage(false);

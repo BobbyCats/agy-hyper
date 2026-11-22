@@ -627,11 +627,17 @@ button:focus-visible, select:focus-visible, input:focus-visible {
   color: var(--accent);
 }
 
-/* Segmented 3-Mode Shield */
+/* Segmented 3/4-Mode Shield */
 .seg-3 {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 6px;
+}
+
+.seg-4 {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 5px;
 }
 
 .seg-btn {
@@ -697,16 +703,90 @@ button:focus-visible, select:focus-visible, input:focus-visible {
   gap: 6px;
 }
 
+.tx-card {
+  display: flex;
+  flex-direction: column;
+  border-radius: 7px;
+  background: var(--field);
+  border: 1px solid var(--line);
+  overflow: hidden;
+}
+
 .tx-item {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 10px;
+  gap: 8px;
   padding: 8px 10px;
-  border-radius: 7px;
-  background: var(--field);
-  border: 1px solid var(--line);
 }
+
+.tx-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  flex-shrink: 0;
+}
+
+.tx-delta {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 600;
+  margin-left: 4px;
+}
+.tx-delta-add { color: var(--ok); }
+.tx-delta-del { color: var(--err); margin-left: 3px; }
+
+.btn-diff {
+  border: 1px solid var(--line-strong);
+  background: transparent;
+  color: var(--fg-muted);
+  font-size: 11px;
+  font-weight: 600;
+  padding: 4px 8px;
+  border-radius: 6px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.btn-diff:hover, .btn-diff.active {
+  border-color: var(--accent);
+  color: var(--accent);
+  background: var(--accent-soft);
+}
+
+.tx-diff-drawer {
+  border-top: 1px solid var(--line);
+  background: var(--bg-subtle, var(--surface));
+  padding: 8px 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-height: 280px;
+  overflow: auto;
+}
+
+.diff-file-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  color: var(--fg-muted);
+  margin-bottom: 4px;
+}
+
+.diff-pre {
+  margin: 0;
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  line-height: 1.45;
+  white-space: pre;
+  overflow-x: auto;
+}
+.diff-line { display: block; padding: 0 4px; border-radius: 2px; }
+.diff-line-add { background: rgba(52, 211, 153, 0.14); color: var(--ok); }
+.diff-line-del { background: rgba(251, 113, 133, 0.14); color: var(--err); }
+.diff-line-hunk { color: var(--accent); font-weight: 600; }
+.diff-line-ctx { color: var(--fg-muted); }
 
 .tx-main {
   min-width: 0;
@@ -1321,8 +1401,64 @@ button:focus-visible, select:focus-visible, input:focus-visible {
   flex-shrink: 0;
 }
 
+/* Local Burn Audit & TTL Cliffs (Pro Usage Tab) */
+.audit-card-block {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.audit-ttl-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+}
+
+.audit-ttl-chip {
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  padding: 3px 7px;
+  border-radius: 6px;
+  border: 1px solid var(--line);
+  background: var(--field);
+  color: var(--fg);
+}
+.audit-ttl-chip.high { border-color: var(--err); color: var(--err); background: var(--err-soft); }
+.audit-ttl-chip.warn { border-color: var(--warn); color: var(--warn); }
+.audit-ttl-chip.ok { border-color: var(--ok); color: var(--ok); }
+
+.audit-findings-list {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+
+.audit-finding-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 7px;
+  font-size: 11px;
+  line-height: 1.4;
+  padding: 6px 8px;
+  border-radius: 6px;
+  background: var(--field);
+  border: 1px solid var(--line);
+}
+
+.audit-finding-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  margin-top: 4px;
+  flex-shrink: 0;
+}
+.audit-finding-dot.high { background: var(--err); }
+.audit-finding-dot.warn { background: var(--warn); }
+.audit-finding-dot.ok { background: var(--ok); }
+
 @media (max-width: 420px) {
   .mono-tag#version-pill { display: none; }
+  .seg-4 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .kpi-tabs { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .kpi-tab:nth-child(2) { border-right: none; }
   .kpi-tab:nth-child(1), .kpi-tab:nth-child(2) { border-bottom: 1px solid var(--line); }

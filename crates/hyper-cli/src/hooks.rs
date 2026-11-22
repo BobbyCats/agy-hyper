@@ -89,10 +89,34 @@ fn build_session_start_payload(ws_str: &str, cfg: &HyperConfig, attach_watcher: 
     }
 
     if code_ws {
-        summary_parts.push(
-            "Use hyper_pack (AST+ripgrep+git), hyper_search, hyper_edit (atomic WAL+ETag+Tree-sitter), and hyper_check (sync <=60s to preserve prompt cache) for workspace code tasks."
-                .into(),
-        );
+        if !cfg.any_mcp_accel_enabled() {
+            summary_parts.push(
+                "Zero-intrusion cockpit mode: native tools & inline diff untouched; live telemetry, cache radar, and passive WAL capture active."
+                    .into(),
+            );
+        } else {
+            let mut active = Vec::new();
+            if cfg.enable_mcp_read {
+                active.push("hyper_pack (AST+ripgrep+git)");
+                active.push("hyper_search");
+            }
+            if cfg.enable_mcp_edit {
+                active.push("hyper_edit (atomic WAL+ETag+Tree-sitter)");
+            }
+            if cfg.enable_mcp_check {
+                active.push("hyper_check (sync <=60s to preserve prompt cache)");
+            }
+            let tail = if cfg.enable_mcp_edit {
+                ""
+            } else {
+                " (native edit_file preserved for inline diff)"
+            };
+            summary_parts.push(format!(
+                "Use {} for workspace code tasks{}.",
+                active.join(", "),
+                tail
+            ));
+        }
     } else {
         summary_parts.push("Telemetry and context guard active.".into());
     }
@@ -196,10 +220,20 @@ fn build_guard_payload(
                 "[AGY Hyper Redline Guard · Subagent] Reason={} · context={}k/{}k tokens (step {}, cache {}%{}{}). Strictly: (1) stop broad file scans; (2) finish active edits and run concise sync verification via hyper_check if needed; (3) return a compact result via send_message to the parent agent immediately.",
                 pulse.health_reason, total_k, red_k, pulse.max_step, cache_pct, model_tag, extra
             )
-        } else if is_code_ws {
+        } else if is_code_ws && cfg.any_mcp_accel_enabled() {
+            let read_tip = if cfg.enable_mcp_read {
+                "use hyper_pack/hyper_search or delegate multi-file scans to research subagent"
+            } else {
+                "use targeted ranged reads or delegate multi-file scans to research subagent"
+            };
+            let check_tip = if cfg.enable_mcp_check {
+                "keep outputs concise and use sync hyper_check (<=60s) to avoid background wakeup cache resets"
+            } else {
+                "keep outputs concise and avoid long background waits that cool prompt cache"
+            };
             format!(
-                "[AGY Hyper Redline Guard] Reason={} · context={}k/{}k tokens (step {}, cache {}%{}{}). Strictly: (1) use hyper_pack/hyper_search or delegate multi-file scans to research subagent; (2) keep outputs concise and use sync hyper_check (<=60s) to avoid background wakeup cache resets; (3) persist key progress and remind the user to run `/compact` at the end of this turn.",
-                pulse.health_reason, total_k, red_k, pulse.max_step, cache_pct, model_tag, extra
+                "[AGY Hyper Redline Guard] Reason={} · context={}k/{}k tokens (step {}, cache {}%{}{}). Strictly: (1) {}; (2) {}; (3) persist key progress and remind the user to run `/compact` at the end of this turn.",
+                pulse.health_reason, total_k, red_k, pulse.max_step, cache_pct, model_tag, extra, read_tip, check_tip
             )
         } else {
             format!(
@@ -266,10 +300,22 @@ fn build_guard_payload(
             "[AGY Hyper Guard · Subagent] Context at {}k/{}k tokens (step {}, cache {}%{}). Keep reads targeted, batch edits, and prepare to report back via send_message before {}k.{}",
             total_k, red_k, pulse.max_step, cache_pct, model_tag, red_k, hint_suffix
         )
-    } else if is_code_ws {
+    } else if is_code_ws && cfg.any_mcp_accel_enabled() {
+        let mut tips = Vec::new();
+        if cfg.enable_mcp_read && cfg.enable_mcp_edit {
+            tips.push("hyper_pack/hyper_edit batching");
+        } else if cfg.enable_mcp_read {
+            tips.push("hyper_pack targeted reads");
+        } else if cfg.enable_mcp_edit {
+            tips.push("hyper_edit batching");
+        }
+        if cfg.enable_mcp_check {
+            tips.push("sync hyper_check (<=60s)");
+        }
+        tips.push("research subagents for broad reads");
         format!(
-            "[AGY Hyper Guard] Context at {}k/{}k tokens (step {}, cache {}%{}). Prefer hyper_pack/hyper_edit batching, sync hyper_check (<=60s), and research subagents for broad reads to stay under {}k.{}",
-            total_k, red_k, pulse.max_step, cache_pct, model_tag, red_k, hint_suffix
+            "[AGY Hyper Guard] Context at {}k/{}k tokens (step {}, cache {}%{}). Prefer {} to stay under {}k.{}",
+            total_k, red_k, pulse.max_step, cache_pct, model_tag, tips.join(", "), red_k, hint_suffix
         )
     } else {
         format!(
@@ -616,5 +662,46 @@ mod tests {
             .unwrap();
         assert!(yellow_msg.contains(">180s cold"));
         assert!(yellow_msg.contains("2 consecutive error steps"));
+    }
+
+    #[test]
+    fn observe_and_safe_profiles_never_nag_disabled_mcp_tools() {
+        let ws = std::env::temp_dir().join(format!(
+            "agy-hyper-observe-hook-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&ws);
+        fs::create_dir_all(&ws).unwrap();
+        fs::write(ws.join("Cargo.toml"), "[package]\n").unwrap();
+
+        let mut observe_cfg = HyperConfig::default();
+        observe_cfg.apply_profile(hyper_core::config::Profile::Observe);
+        let start_obs = build_session_start_payload(&ws.display().to_string(), &observe_cfg, false);
+        let msg_obs = start_obs["injectSteps"][0]["systemMessage"]["systemMessage"]
+            .as_str()
+            .unwrap();
+        assert!(msg_obs.contains("Zero-intrusion cockpit mode"));
+        assert!(!msg_obs.contains("hyper_edit"));
+        assert!(!msg_obs.contains("hyper_pack"));
+
+        let mut safe_cfg = HyperConfig::default();
+        safe_cfg.apply_profile(hyper_core::config::Profile::Safe);
+        let start_safe = build_session_start_payload(&ws.display().to_string(), &safe_cfg, false);
+        let msg_safe = start_safe["injectSteps"][0]["systemMessage"]["systemMessage"]
+            .as_str()
+            .unwrap();
+        assert!(msg_safe.contains("hyper_pack"));
+        assert!(!msg_safe.contains("hyper_edit"));
+        assert!(msg_safe.contains("native edit_file preserved"));
+
+        let yellow = sample_pulse(HealthLevel::Yellow, "token_yellow", 195_000);
+        let guard_obs = build_guard_payload(&yellow, &observe_cfg, false, true);
+        let guard_obs_msg = guard_obs["injectSteps"][0]["systemMessage"]["systemMessage"]
+            .as_str()
+            .unwrap();
+        assert!(!guard_obs_msg.contains("hyper_edit"));
+        assert!(!guard_obs_msg.contains("hyper_pack"));
+
+        let _ = fs::remove_dir_all(&ws);
     }
 }

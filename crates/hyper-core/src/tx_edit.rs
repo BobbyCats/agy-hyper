@@ -2,7 +2,7 @@ use crate::ast::{check_syntax, find_symbol, SyntaxDiagnostic};
 use crate::jail::WorkspaceJail;
 use crate::wal::{
     atomic_restore_bytes, generate_tx_id, now_ms, prune_old_wal, with_wal_lock, write_and_sync,
-    WalFileRecord, WalManifest,
+    WalFileRecord, WalManifest, MAX_POST_BLOB_BYTES,
 };
 use anyhow::{anyhow, Context, Result};
 use serde::{Deserialize, Serialize};
@@ -13,8 +13,9 @@ use std::path::{Path, PathBuf};
 
 pub use crate::native_capture::record_native_post_edit;
 pub use crate::wal::{
-    blake3_etag, default_wal_root, file_etag, list_transactions, rollback_transaction,
-    RollbackResult, WalFileRecord as WalRecord, WalManifest as TxWalManifest,
+    blake3_etag, default_wal_root, file_etag, inspect_transaction_diff, list_transactions,
+    rollback_transaction, RollbackResult, TxDiffPayload, TxFileDiff, WalFileRecord as WalRecord,
+    WalManifest as TxWalManifest,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -314,6 +315,13 @@ fn apply_transactional_edits_locked(
         } else {
             None
         };
+        let post_blob = if plan.new_bytes.len() <= MAX_POST_BLOB_BYTES {
+            let blob_name = format!("post_{}.blob", idx);
+            write_and_sync(&tx_dir.join(&blob_name), &plan.new_bytes)?;
+            Some(blob_name)
+        } else {
+            None
+        };
         wal_records.push(WalFileRecord {
             abs_path: plan.abs_path.display().to_string(),
             rel_path: plan.rel_path.clone(),
@@ -321,6 +329,9 @@ fn apply_transactional_edits_locked(
             etag_before: plan.etag_before.clone(),
             etag_after: plan.etag_after.clone(),
             backup_blob,
+            post_blob,
+            lines_added: plan.lines_added,
+            lines_removed: plan.lines_removed,
             mode_before: plan.original_mode,
         });
     }

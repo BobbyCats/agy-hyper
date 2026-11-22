@@ -1,4 +1,5 @@
 pub mod ast;
+pub mod audit;
 pub mod bench;
 pub mod config;
 pub mod context_pack;

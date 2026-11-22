@@ -4,8 +4,10 @@ use crate::state::{
 };
 use anyhow::{Context, Result};
 use fs2::FileExt;
+use hyper_core::audit::build_audit_report;
 use hyper_core::config::HyperConfig;
 use hyper_core::usage::UsageWindow;
+use hyper_core::wal::inspect_transaction_diff;
 use std::fs::{self, OpenOptions};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -284,6 +286,28 @@ fn handle_line(
                 Err(e) => DaemonResponse::err(e),
             };
         }
+        DaemonRequest::InspectTxDiff { tx_id, max_lines } => {
+            return match inspect_transaction_diff(
+                &HyperConfig::wal_dir(),
+                &tx_id,
+                max_lines.unwrap_or(240),
+            ) {
+                Ok(diff) => DaemonResponse::ok(diff),
+                Err(e) => DaemonResponse::err(e.to_string()),
+            };
+        }
+        DaemonRequest::AuditReport {
+            days,
+            max_sessions,
+            tz_offset_mins,
+        } => {
+            let cfg = match state.lock() {
+                Ok(g) => g.usage_parts().0,
+                Err(_) => return DaemonResponse::err("daemon state lock poisoned"),
+            };
+            let report = build_audit_report(days, max_sessions, &cfg, tz_offset_mins);
+            return DaemonResponse::ok(report);
+        }
         _ => {}
     }
 
@@ -373,6 +397,8 @@ fn handle_line(
         | DaemonRequest::StatuslinePulse { .. }
         | DaemonRequest::CacheTtlReport { .. }
         | DaemonRequest::UsageSummary { .. }
-        | DaemonRequest::RollbackTx { .. } => unreachable!(),
+        | DaemonRequest::RollbackTx { .. }
+        | DaemonRequest::InspectTxDiff { .. }
+        | DaemonRequest::AuditReport { .. } => unreachable!(),
     }
 }

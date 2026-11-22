@@ -95,10 +95,13 @@ pub fn run_mcp_stdio() -> Result<()> {
                 }),
             ),
             "ping" => write_json(&stdout, &json!({ "jsonrpc": "2.0", "id": req_id, "result": {} })),
-            "tools/list" => write_json(
-                &stdout,
-                &json!({ "jsonrpc": "2.0", "id": req_id, "result": { "tools": tool_definitions() } }),
-            ),
+            "tools/list" => {
+                let cfg = HyperConfig::load();
+                write_json(
+                    &stdout,
+                    &json!({ "jsonrpc": "2.0", "id": req_id, "result": { "tools": tool_definitions(&cfg) } }),
+                )
+            }
             "tools/call" => {
                 let params = msg.get("params").cloned().unwrap_or_else(|| json!({}));
                 let stdout_c = stdout.clone();
@@ -172,6 +175,20 @@ fn dispatch_tool(params: &Value, cancel_flag: Arc<AtomicBool>) -> Result<String>
         .map(String::from)
         .or_else(|| std::env::current_dir().ok().map(|p| p.display().to_string()))
         .unwrap_or_else(|| ".".into());
+
+    if !cfg.is_mcp_tool_enabled(name) {
+        let hint = if name == "hyper_edit" {
+            "Use Antigravity's built-in edit_file (native inline diff preserved; PostToolUse still records WAL snapshots) or enable enable_mcp_edit in Hyper Deck."
+        } else {
+            "Use Antigravity's built-in tools or switch profile / toggle MCP acceleration in Hyper Deck."
+        };
+        return Err(anyhow!(
+            "tool '{}' is disabled under current AGY Hyper profile '{}' ({})",
+            name,
+            cfg.profile.as_str(),
+            hint
+        ));
+    }
 
     let output = match name {
         "hyper_pack" => handle_pack(&workspace, args, &cfg, started)?,
@@ -598,9 +615,9 @@ fn record_telemetry(
     });
 }
 
-fn tool_definitions() -> Value {
-    json!([
-        {
+fn tool_definitions(cfg: &HyperConfig) -> Value {
+    let all = vec![
+        json!({
             "name": "hyper_pack",
             "description": "Semantic context packer (Tree-sitter AST outlines + inline matched symbol slices + single-pass ripgrep + 1-hop import neighbors + read-only gix git signals) packed strictly <= 8.5KB inline.",
             "annotations": { "readOnlyHint": true, "destructiveHint": false, "idempotentHint": true, "openWorldHint": false },
@@ -615,8 +632,8 @@ fn tool_definitions() -> Value {
                     "max_bytes": { "type": "integer", "default": 8200 }
                 }
             }
-        },
-        {
+        }),
+        json!({
             "name": "hyper_search",
             "description": "Batched pure-Rust ripgrep search, glob file listing, and physically read-only gix git inspection.",
             "annotations": { "readOnlyHint": true, "destructiveHint": false, "idempotentHint": true, "openWorldHint": false },
@@ -644,8 +661,8 @@ fn tool_definitions() -> Value {
                     "include_git": { "type": "boolean" }
                 }
             }
-        },
-        {
+        }),
+        json!({
             "name": "hyper_edit",
             "description": "Crash-safe WAL-journaled atomic multi-file editor with BLAKE3 ETag CAS locking, exact or Tree-sitter symbol replacement, zero ENOSPC truncation, and instant inline syntax verification.",
             "annotations": { "readOnlyHint": false, "destructiveHint": false, "idempotentHint": false, "openWorldHint": false },
@@ -672,8 +689,8 @@ fn tool_definitions() -> Value {
                     }
                 }
             }
-        },
-        {
+        }),
+        json!({
             "name": "hyper_check",
             "description": "Synchronous shell-free preset/argv verification runner (<=60s in-loop to preserve prompt cache) with smart idle/fatal-hang watchdog, head+tail ring buffer, error digest, process-tree cleanup, and LRU spill handles.",
             "annotations": { "readOnlyHint": false, "destructiveHint": false, "idempotentHint": false, "openWorldHint": false },
@@ -690,8 +707,8 @@ fn tool_definitions() -> Value {
                     "cwd": { "type": "string" }
                 }
             }
-        },
-        {
+        }),
+        json!({
             "name": "hyper_tx",
             "description": "Inspect WAL edit transactions, atomically rollback a tx_id, or 1ms drill into spilled check handles.",
             "annotations": { "readOnlyHint": false, "destructiveHint": false, "idempotentHint": false, "openWorldHint": false },
@@ -709,6 +726,16 @@ fn tool_definitions() -> Value {
                     "limit": { "type": "integer" }
                 }
             }
-        }
-    ])
+        }),
+    ];
+    let filtered: Vec<Value> = all
+        .into_iter()
+        .filter(|def| {
+            def.get("name")
+                .and_then(Value::as_str)
+                .map(|n| cfg.is_mcp_tool_enabled(n))
+                .unwrap_or(true)
+        })
+        .collect();
+    Value::Array(filtered)
 }

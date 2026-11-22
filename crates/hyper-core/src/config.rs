@@ -42,9 +42,14 @@ pub fn default_fx_rates() -> BTreeMap<String, f64> {
     ])
 }
 
+pub fn default_true() -> bool {
+    true
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Profile {
+    Observe,
     Safe,
     Balanced,
     Hyper,
@@ -59,6 +64,7 @@ impl Default for Profile {
 impl Profile {
     pub fn as_str(&self) -> &'static str {
         match self {
+            Self::Observe => "observe",
             Self::Safe => "safe",
             Self::Balanced => "balanced",
             Self::Hyper => "hyper",
@@ -67,6 +73,7 @@ impl Profile {
 
     pub fn from_str_loose(s: &str) -> Option<Self> {
         match s.trim().to_ascii_lowercase().as_str() {
+            "observe" | "cockpit" | "readonly" | "read-only" => Some(Self::Observe),
             "safe" => Some(Self::Safe),
             "balanced" | "default" => Some(Self::Balanced),
             "hyper" | "turbo" | "fast" => Some(Self::Hyper),
@@ -90,6 +97,12 @@ pub struct HyperConfig {
     pub multimodal_cliff_tokens: u64,
     pub prewarm_tier2: bool,
     pub allow_custom_argv_checks: bool,
+    #[serde(default = "default_true")]
+    pub enable_mcp_read: bool,
+    #[serde(default = "default_true")]
+    pub enable_mcp_edit: bool,
+    #[serde(default = "default_true")]
+    pub enable_mcp_check: bool,
     pub max_wal_entries: usize,
     pub enable_ui_pill: bool,
     #[serde(default = "default_currency")]
@@ -119,6 +132,9 @@ impl Default for HyperConfig {
             multimodal_cliff_tokens: DEFAULT_MULTIMODAL_CLIFF_TOKENS,
             prewarm_tier2: false,
             allow_custom_argv_checks: true,
+            enable_mcp_read: true,
+            enable_mcp_edit: true,
+            enable_mcp_check: true,
             max_wal_entries: 100,
             enable_ui_pill: true,
             display_currency: default_currency(),
@@ -135,8 +151,50 @@ impl HyperConfig {
         self.profile = profile;
         self.allow_outside_workspace = false;
         self.block_secret_files = true;
-        self.prewarm_tier2 = matches!(profile, Profile::Hyper);
-        self.allow_custom_argv_checks = !matches!(profile, Profile::Safe);
+        match profile {
+            Profile::Observe => {
+                self.enable_mcp_read = false;
+                self.enable_mcp_edit = false;
+                self.enable_mcp_check = false;
+                self.allow_custom_argv_checks = false;
+                self.prewarm_tier2 = false;
+            }
+            Profile::Safe => {
+                self.enable_mcp_read = true;
+                self.enable_mcp_edit = false;
+                self.enable_mcp_check = true;
+                self.allow_custom_argv_checks = false;
+                self.prewarm_tier2 = false;
+            }
+            Profile::Balanced => {
+                self.enable_mcp_read = true;
+                self.enable_mcp_edit = true;
+                self.enable_mcp_check = true;
+                self.allow_custom_argv_checks = true;
+                self.prewarm_tier2 = false;
+            }
+            Profile::Hyper => {
+                self.enable_mcp_read = true;
+                self.enable_mcp_edit = true;
+                self.enable_mcp_check = true;
+                self.allow_custom_argv_checks = true;
+                self.prewarm_tier2 = true;
+            }
+        }
+    }
+
+    pub fn any_mcp_accel_enabled(&self) -> bool {
+        self.enable_mcp_read || self.enable_mcp_edit || self.enable_mcp_check
+    }
+
+    pub fn is_mcp_tool_enabled(&self, tool_name: &str) -> bool {
+        match tool_name {
+            "hyper_pack" | "hyper_search" => self.enable_mcp_read,
+            "hyper_edit" => self.enable_mcp_edit,
+            "hyper_check" => self.enable_mcp_check,
+            "hyper_tx" => true,
+            _ => true,
+        }
     }
 
     pub fn set_toggle(&mut self, key: &str, value: bool) -> Result<()> {
@@ -145,6 +203,9 @@ impl HyperConfig {
             "block_secret_files" => self.block_secret_files = value,
             "allow_custom_argv_checks" => self.allow_custom_argv_checks = value,
             "enable_ui_pill" => self.enable_ui_pill = value,
+            "enable_mcp_read" => self.enable_mcp_read = value,
+            "enable_mcp_edit" => self.enable_mcp_edit = value,
+            "enable_mcp_check" => self.enable_mcp_check = value,
             _ => anyhow::bail!("unknown config toggle '{}'", key),
         }
         Ok(())
@@ -339,5 +400,25 @@ mod tests {
         assert!(!cfg.prewarm_tier2);
         assert!(!cfg.allow_outside_workspace);
         assert!(cfg.block_secret_files);
+        assert!(cfg.enable_mcp_read);
+        assert!(!cfg.enable_mcp_edit);
+        assert!(cfg.enable_mcp_check);
+    }
+
+    #[test]
+    fn profile_observe_is_zero_intrusion_and_legacy_json_defaults_cleanly() {
+        let mut cfg = HyperConfig::default();
+        cfg.apply_profile(Profile::Observe);
+        assert!(!cfg.any_mcp_accel_enabled());
+        assert!(!cfg.is_mcp_tool_enabled("hyper_pack"));
+        assert!(!cfg.is_mcp_tool_enabled("hyper_edit"));
+        assert!(!cfg.is_mcp_tool_enabled("hyper_check"));
+        assert!(cfg.is_mcp_tool_enabled("hyper_tx"));
+
+        // Legacy v0.3 config.json without enable_mcp_* fields preserves existing enabled defaults.
+        let legacy: HyperConfig = serde_json::from_str(r#"{"profile":"balanced"}"#).unwrap();
+        assert!(legacy.enable_mcp_read);
+        assert!(legacy.enable_mcp_edit);
+        assert!(legacy.enable_mcp_check);
     }
 }

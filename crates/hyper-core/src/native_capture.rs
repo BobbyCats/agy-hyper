@@ -1,8 +1,8 @@
 use crate::jail::WorkspaceJail;
 use crate::json_util::{json_arg_bool, json_arg_str, unquote_json_string};
 use crate::wal::{
-    blake3_etag, generate_tx_id, now_ms, prune_old_wal, with_wal_lock, write_and_sync,
-    WalFileRecord, WalManifest,
+    blake3_etag, count_diff_lines, generate_tx_id, now_ms, prune_old_wal, with_wal_lock,
+    write_and_sync, WalFileRecord, WalManifest, MAX_POST_BLOB_BYTES,
 };
 use anyhow::{Context, Result};
 use serde_json::Value;
@@ -195,6 +195,21 @@ pub fn record_native_post_edit(
         } else {
             (None, None)
         };
+        let post_blob = if after_bytes.len() <= MAX_POST_BLOB_BYTES {
+            let blob_name = "post_0.blob".to_string();
+            write_and_sync(&tx_dir.join(&blob_name), &after_bytes)?;
+            Some(blob_name)
+        } else {
+            None
+        };
+        let (lines_added, lines_removed) = match (
+            pre_bytes.as_deref().and_then(|b| std::str::from_utf8(b).ok()),
+            std::str::from_utf8(&after_bytes).ok(),
+        ) {
+            (Some(before_s), Some(after_s)) => count_diff_lines(before_s, after_s),
+            (None, Some(after_s)) => count_diff_lines("", after_s),
+            _ => (0, 0),
+        };
 
         let manifest = WalManifest {
             tx_id: tx_id.clone(),
@@ -209,6 +224,9 @@ pub fn record_native_post_edit(
                 etag_before,
                 etag_after,
                 backup_blob,
+                post_blob,
+                lines_added,
+                lines_removed,
                 mode_before: mode_after,
             }],
         };

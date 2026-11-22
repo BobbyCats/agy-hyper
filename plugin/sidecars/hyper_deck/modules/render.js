@@ -165,7 +165,44 @@
     return entry?.rel_path || entry?.abs_path || '';
   }
 
-  function renderTxList(container, txs, showFull, onRollback) {
+  function renderDiffHtml(diffState) {
+    if (!diffState) return '';
+    if (diffState.loading) {
+      return `<div class="tx-diff-drawer"><div class="empty-state">${escapeHtml(t('shield.diff_loading'))}</div></div>`;
+    }
+    if (diffState.error) {
+      return `<div class="tx-diff-drawer"><div class="empty-state">${escapeHtml(diffState.error)}</div></div>`;
+    }
+    const files = diffState.data?.files || [];
+    if (!files.length) {
+      return `<div class="tx-diff-drawer"><div class="empty-state">${escapeHtml(t('shield.diff_empty'))}</div></div>`;
+    }
+    const blocks = files
+      .map((f) => {
+        const delta = `<span class="tx-delta"><span class="tx-delta-add">+${f.lines_added || 0}</span><span class="tx-delta-del">-${f.lines_removed || 0}</span></span>`;
+        if (f.unavailable_reason) {
+          return `<div class="diff-file"><div class="diff-file-head"><span>${escapeHtml(f.rel_path)}</span>${delta}</div><div class="empty-state">${escapeHtml(f.unavailable_reason)}</div></div>`;
+        }
+        const raw = f.unified_diff || '';
+        const linesHtml = raw
+          ? raw
+              .split('\n')
+              .map((line) => {
+                let cls = 'diff-line-ctx';
+                if (line.startsWith('@@')) cls = 'diff-line-hunk';
+                else if (line.startsWith('+') && !line.startsWith('+++')) cls = 'diff-line-add';
+                else if (line.startsWith('-') && !line.startsWith('---')) cls = 'diff-line-del';
+                return `<span class="diff-line ${cls}">${escapeHtml(line)}</span>`;
+              })
+              .join('')
+          : `<span class="diff-line diff-line-ctx">${escapeHtml(t('shield.diff_empty'))}</span>`;
+        return `<div class="diff-file"><div class="diff-file-head"><span>${escapeHtml(f.rel_path)}</span>${delta}</div><pre class="diff-pre">${linesHtml}</pre></div>`;
+      })
+      .join('');
+    return `<div class="tx-diff-drawer">${blocks}</div>`;
+  }
+
+  function renderTxList(container, txs, showFull, onRollback, onToggleDiff, openDiffs = {}) {
     if (!txs?.length) {
       container.innerHTML = `<div class="empty-state">${escapeHtml(t('shield.empty_tx'))}</div>`;
       return;
@@ -174,7 +211,17 @@
       .map((tx) => {
         const rawPaths = (tx.files || []).map(txFileDisplay).filter(Boolean);
         const files = rawPaths.map((p) => p.split(/[\\/]/).pop()).join(', ');
-        const btn = tx.rolled_back
+        const added = (tx.files || []).reduce((acc, f) => acc + (Number(f?.lines_added) || 0), 0);
+        const removed = (tx.files || []).reduce((acc, f) => acc + (Number(f?.lines_removed) || 0), 0);
+        const deltaHtml =
+          added > 0 || removed > 0
+            ? `<span class="tx-delta"><span class="tx-delta-add">+${added}</span><span class="tx-delta-del">-${removed}</span></span>`
+            : '';
+        const diffState = openDiffs[tx.tx_id];
+        const diffBtn = `<button type="button" class="btn-diff ${diffState ? 'active' : ''}" data-diff="${escapeHtml(tx.tx_id)}">${escapeHtml(
+          diffState ? t('shield.diff_hide') : t('shield.diff_btn')
+        )}</button>`;
+        const undoBtn = tx.rolled_back
           ? `<span class="mono-tag">${escapeHtml(t('shield.undone'))}</span>`
           : `<button type="button" class="btn-undo" data-undo="${escapeHtml(tx.tx_id)}">${escapeHtml(t('shield.undo_btn'))}</button>`;
         const tsMs = tx.timestamp_ms || tx.created_at_ms || 0;
@@ -183,12 +230,15 @@
           ? `${tx.tx_id} · ${fmtRelTime(tsMs)} · ${rawPaths.length}f${srcTag}`
           : `${fmtRelTime(tsMs)} · ${rawPaths.length}f${srcTag}`;
         return `
-          <div class="tx-item">
-            <div class="tx-main">
-              <span class="tx-files" title="${escapeHtml(rawPaths.join('\n'))}">${escapeHtml(files || tx.tx_id)}</span>
-              <span class="tx-meta">${escapeHtml(meta)}</span>
+          <div class="tx-card">
+            <div class="tx-item">
+              <div class="tx-main">
+                <span class="tx-files" title="${escapeHtml(rawPaths.join('\n'))}">${escapeHtml(files || tx.tx_id)}${deltaHtml}</span>
+                <span class="tx-meta">${escapeHtml(meta)}</span>
+              </div>
+              <div class="tx-actions">${diffBtn}${undoBtn}</div>
             </div>
-            ${btn}
+            ${renderDiffHtml(diffState)}
           </div>`;
       })
       .join('');
@@ -196,6 +246,11 @@
     container.querySelectorAll('.btn-undo[data-undo]').forEach((b) => {
       b.addEventListener('click', () => onRollback(b.dataset.undo, false));
     });
+    if (onToggleDiff) {
+      container.querySelectorAll('.btn-diff[data-diff]').forEach((b) => {
+        b.addEventListener('click', () => onToggleDiff(b.dataset.diff));
+      });
+    }
   }
 
   function renderSessionSelect(sessions, tree, selectedConvId, activeConvId) {
@@ -480,7 +535,59 @@
     }
   }
 
-  function renderSnapshot(snap, state, onRollback, onSelectSession) {
+  function renderAuditPanel(audit) {
+    const block = $('usage-audit-block');
+    if (!block) return;
+    if (!audit || audit.error || (!audit.sessions_analyzed && !(audit.model_ttl_cliffs || []).length)) {
+      block.classList.add('hidden');
+      return;
+    }
+    block.classList.remove('hidden');
+
+    const pills = [];
+    if (audit.first_edit_p50_tokens > 0) {
+      pills.push(
+        `<span class="mono-tag">${escapeHtml(t('usage.audit_first_edit', { ctx: fmtTokens(audit.first_edit_p50_tokens) }))}</span>`
+      );
+    }
+    if (audit.blanket_read_turns > 0) {
+      pills.push(
+        `<span class="status-pill warn">${escapeHtml(t('usage.audit_blanket', { count: audit.blanket_read_turns }))}</span>`
+      );
+    }
+    if (audit.uncached_input_cost > 0) {
+      pills.push(
+        `<span class="mono-tag">${escapeHtml(
+          t('usage.audit_uncached', { val: fmtCurrency(audit.uncached_input_cost, audit.currency || 'USD') })
+        )}</span>`
+      );
+    }
+    $('audit-kpi-pills').innerHTML = pills.join('');
+
+    const cliffs = audit.model_ttl_cliffs || [];
+    $('audit-ttl-chips').innerHTML = cliffs
+      .slice(0, 6)
+      .map((m) => {
+        const cls = m.effective_ttl_secs <= 120 ? 'high' : m.effective_ttl_secs <= 180 ? 'warn' : 'ok';
+        const tag = m.source === 'empirical' ? 'emp' : 'def';
+        return `<span class="audit-ttl-chip ${cls}" title="n=${m.total_samples}">${escapeHtml(m.model_family)} · ${m.effective_ttl_secs}s (${tag})</span>`;
+      })
+      .join('');
+
+    const findings = audit.findings || [];
+    $('audit-findings-list').innerHTML = findings
+      .slice(0, 3)
+      .map(
+        (f) => `
+          <div class="audit-finding-row">
+            <span class="audit-finding-dot ${escapeHtml(f.severity || 'ok')}"></span>
+            <span>${escapeHtml(f.title)}</span>
+          </div>`
+      )
+      .join('');
+  }
+
+  function renderSnapshot(snap, state, onRollback, onSelectSession, onToggleDiff) {
     const cfg = snap.config || {};
     const eng = snap.engine || {};
     const pulse = snap.pulse || null;
@@ -488,7 +595,7 @@
     const tree = snap.session_tree || null;
     const activeConvId = pulse?.conversation_id || bench?.conversation_id || '';
 
-    $('version-pill').textContent = `v${eng.version || snap.version || '0.3.0'}`;
+    $('version-pill').textContent = `v${eng.version || snap.version || '0.4.0'}`;
     const isUds = snap.transport === 'uds-daemon';
     $('daemon-dot').classList.toggle('warn', !isUds);
     $('daemon-label').textContent = isUds
@@ -583,8 +690,8 @@
 
     const txs = snap.transactions || [];
     $('tx-count-badge').textContent = t('shield.tx_count', { count: txs.length });
-    renderTxList($('simple-tx-list'), txs.slice(0, 4), false, onRollback);
-    renderTxList($('pro-wal-list'), txs, true, onRollback);
+    renderTxList($('simple-tx-list'), txs.slice(0, 4), false, onRollback, onToggleDiff, state.openDiffs);
+    renderTxList($('pro-wal-list'), txs, true, onRollback, onToggleDiff, state.openDiffs);
 
     $('wf-p50').textContent = bench?.median_turn_ms ? fmtSec(bench.median_turn_ms) : '—';
     $('wf-p90').textContent = bench?.p90_turn_ms ? fmtSec(bench.p90_turn_ms) : '—';
@@ -604,6 +711,9 @@
     $('eng-pack').textContent = `${eng.pack_cache_hits || 0}/${packTotal} (${packRate}%)`;
     $('eng-prewarm').textContent = String(eng.prewarm_cached || 0);
 
+    if ($('tog-mcp-read')) $('tog-mcp-read').checked = cfg.enable_mcp_read !== false;
+    if ($('tog-mcp-edit')) $('tog-mcp-edit').checked = cfg.enable_mcp_edit !== false;
+    if ($('tog-mcp-check')) $('tog-mcp-check').checked = cfg.enable_mcp_check !== false;
     $('tog-prewarm').checked = Boolean(cfg.prewarm_tier2);
     $('tog-secret').checked = Boolean(cfg.block_secret_files);
     $('tog-argv').checked = Boolean(cfg.allow_custom_argv_checks);
@@ -648,5 +758,6 @@
     renderWarmthMeter,
     renderSnapshot,
     renderUsageReport,
+    renderAuditPanel,
   };
 })();

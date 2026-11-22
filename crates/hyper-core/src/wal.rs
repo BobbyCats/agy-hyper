@@ -2,11 +2,14 @@ use crate::config::{sanitize_id, HyperConfig};
 use anyhow::{anyhow, Context, Result};
 use fs2::FileExt;
 use serde::{Deserialize, Serialize};
+use similar::{ChangeTag, TextDiff};
 use std::fs::{self, File, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
+
+pub const MAX_POST_BLOB_BYTES: usize = 2 * 1024 * 1024;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WalFileRecord {
@@ -16,7 +19,34 @@ pub struct WalFileRecord {
     pub etag_before: Option<String>,
     pub etag_after: String,
     pub backup_blob: Option<String>,
+    #[serde(default)]
+    pub post_blob: Option<String>,
+    #[serde(default)]
+    pub lines_added: usize,
+    #[serde(default)]
+    pub lines_removed: usize,
     pub mode_before: Option<u32>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TxFileDiff {
+    pub rel_path: String,
+    pub action: String,
+    pub lines_added: usize,
+    pub lines_removed: usize,
+    pub unified_diff: String,
+    pub truncated: bool,
+    #[serde(default)]
+    pub unavailable_reason: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TxDiffPayload {
+    pub tx_id: String,
+    pub timestamp_ms: u64,
+    pub source: String,
+    pub rolled_back: bool,
+    pub files: Vec<TxFileDiff>,
 }
 
 fn default_tx_source() -> String {
@@ -233,4 +263,196 @@ pub fn list_transactions(wal_root: &Path, limit: usize) -> Vec<WalManifest> {
     manifests.sort_by(|a, b| b.timestamp_ms.cmp(&a.timestamp_ms));
     manifests.truncate(limit.clamp(1, 200));
     manifests
+}
+
+pub fn count_diff_lines(before: &str, after: &str) -> (usize, usize) {
+    let before_lf = before.replace("\r\n", "\n");
+    let after_lf = after.replace("\r\n", "\n");
+    let diff = TextDiff::from_lines(&before_lf, &after_lf);
+    let (mut added, mut removed) = (0usize, 0usize);
+    for change in diff.iter_all_changes() {
+        match change.tag() {
+            ChangeTag::Insert => added += 1,
+            ChangeTag::Delete => removed += 1,
+            ChangeTag::Equal => {}
+        }
+    }
+    (added, removed)
+}
+
+/// Produce a line-level Unified Diff for a recorded WAL transaction (`hyper_edit` or native capture).
+pub fn inspect_transaction_diff(
+    wal_root: &Path,
+    tx_id: &str,
+    max_lines_per_file: usize,
+) -> Result<TxDiffPayload> {
+    let Some(clean_id) = sanitize_id(tx_id) else {
+        return Err(anyhow!("invalid tx_id '{}'", tx_id));
+    };
+    if !clean_id.starts_with("tx_") {
+        return Err(anyhow!("invalid tx_id '{}'", tx_id));
+    }
+    let tx_dir = wal_root.join(clean_id);
+    let manifest_path = tx_dir.join("manifest.json");
+    let raw = fs::read_to_string(&manifest_path)
+        .with_context(|| format!("transaction '{}' not found in WAL", clean_id))?;
+    let manifest: WalManifest = serde_json::from_str(&raw)?;
+    let line_cap = max_lines_per_file.clamp(20, 600);
+
+    let mut files = Vec::with_capacity(manifest.files.len());
+    for rec in &manifest.files {
+        let action = if rec.existed_before { "edited" } else { "created" }.to_string();
+        let before_bytes = if rec.existed_before {
+            match &rec.backup_blob {
+                Some(blob) => fs::read(tx_dir.join(blob)).ok(),
+                None => None,
+            }
+        } else {
+            Some(Vec::new())
+        };
+
+        let after_bytes = if let Some(pb) = &rec.post_blob {
+            fs::read(tx_dir.join(pb)).ok()
+        } else {
+            // Backwards-compatible fallback for pre-v0.4 WAL manifests: read live file iff ETag still matches.
+            let live = PathBuf::from(&rec.abs_path);
+            if live.is_file() && file_etag(&live).ok().as_deref() == Some(rec.etag_after.as_str()) {
+                fs::read(&live).ok()
+            } else {
+                None
+            }
+        };
+
+        let (Some(b_raw), Some(a_raw)) = (before_bytes, after_bytes) else {
+            files.push(TxFileDiff {
+                rel_path: rec.rel_path.clone(),
+                action,
+                lines_added: rec.lines_added,
+                lines_removed: rec.lines_removed,
+                unified_diff: String::new(),
+                truncated: false,
+                unavailable_reason: Some(
+                    "Historical snapshot predates post-image capture (pre-image still intact for rollback)"
+                        .to_string(),
+                ),
+            });
+            continue;
+        };
+
+        let (Ok(b_txt), Ok(a_txt)) = (String::from_utf8(b_raw), String::from_utf8(a_raw)) else {
+            files.push(TxFileDiff {
+                rel_path: rec.rel_path.clone(),
+                action,
+                lines_added: rec.lines_added,
+                lines_removed: rec.lines_removed,
+                unified_diff: String::new(),
+                truncated: false,
+                unavailable_reason: Some("Binary or non-UTF-8 file".to_string()),
+            });
+            continue;
+        };
+
+        let before_lf = b_txt.replace("\r\n", "\n");
+        let after_lf = a_txt.replace("\r\n", "\n");
+        let diff = TextDiff::from_lines(&before_lf, &after_lf);
+        let (mut added, mut removed) = (0usize, 0usize);
+        for ch in diff.iter_all_changes() {
+            match ch.tag() {
+                ChangeTag::Insert => added += 1,
+                ChangeTag::Delete => removed += 1,
+                ChangeTag::Equal => {}
+            }
+        }
+        let old_hdr = if rec.existed_before {
+            format!("a/{}", rec.rel_path)
+        } else {
+            "/dev/null".to_string()
+        };
+        let new_hdr = format!("b/{}", rec.rel_path);
+        let rendered = diff
+            .unified_diff()
+            .context_radius(3)
+            .header(&old_hdr, &new_hdr)
+            .to_string();
+        let all_lines: Vec<&str> = rendered.lines().collect();
+        let truncated = all_lines.len() > line_cap;
+        let unified_diff = if truncated {
+            all_lines[..line_cap].join("\n")
+        } else {
+            rendered.trim_end_matches('\n').to_string()
+        };
+
+        files.push(TxFileDiff {
+            rel_path: rec.rel_path.clone(),
+            action,
+            lines_added: added,
+            lines_removed: removed,
+            unified_diff,
+            truncated,
+            unavailable_reason: None,
+        });
+    }
+
+    Ok(TxDiffPayload {
+        tx_id: manifest.tx_id,
+        timestamp_ms: manifest.timestamp_ms,
+        source: manifest.source,
+        rolled_back: manifest.rolled_back,
+        files,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    #[test]
+    fn inspect_diff_rejects_traversal_and_handles_legacy_fallback() {
+        let wal = tempdir().unwrap();
+        assert!(inspect_transaction_diff(wal.path(), "../etc/passwd", 100).is_err());
+        assert!(inspect_transaction_diff(wal.path(), "not_a_tx", 100).is_err());
+
+        // Create a legacy WAL entry (post_blob = None) with matching live file on disk.
+        let ws = tempdir().unwrap();
+        let live = ws.path().join("app.rs");
+        fs::write(&live, "fn main() {\n    println!(\"v2\");\n}\n").unwrap();
+        let after_etag = file_etag(&live).unwrap();
+
+        let tx_id = "tx_1700000000000_abc123";
+        let tx_dir = wal.path().join(tx_id);
+        fs::create_dir_all(&tx_dir).unwrap();
+        fs::write(tx_dir.join("pre_0.blob"), "fn main() {\n    println!(\"v1\");\n}\n").unwrap();
+        let manifest = WalManifest {
+            tx_id: tx_id.to_string(),
+            timestamp_ms: 1700000000000,
+            workspace_root: ws.path().display().to_string(),
+            rolled_back: false,
+            source: "hyper_edit".into(),
+            files: vec![WalFileRecord {
+                abs_path: live.display().to_string(),
+                rel_path: "app.rs".into(),
+                existed_before: true,
+                etag_before: Some("old".into()),
+                etag_after: after_etag,
+                backup_blob: Some("pre_0.blob".into()),
+                post_blob: None,
+                lines_added: 0,
+                lines_removed: 0,
+                mode_before: None,
+            }],
+        };
+        fs::write(
+            tx_dir.join("manifest.json"),
+            serde_json::to_vec_pretty(&manifest).unwrap(),
+        )
+        .unwrap();
+
+        let diff = inspect_transaction_diff(wal.path(), tx_id, 100).unwrap();
+        assert_eq!(diff.files.len(), 1);
+        assert_eq!(diff.files[0].lines_added, 1);
+        assert_eq!(diff.files[0].lines_removed, 1);
+        assert!(diff.files[0].unified_diff.contains("-    println!(\"v1\");"));
+        assert!(diff.files[0].unified_diff.contains("+    println!(\"v2\");"));
+    }
 }

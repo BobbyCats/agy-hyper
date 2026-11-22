@@ -7,7 +7,7 @@ import { execFile, spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
 import http from 'node:http';
 import net from 'node:net';
-import { homedir } from 'node:os';
+import { homedir, tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -286,6 +286,62 @@ async function rollbackTx(txId, force = false) {
   return { ok: true, result };
 }
 
+async function getTxDiff(txId, maxLines = 240) {
+  const id = String(txId || '').trim();
+  if (!id) return { ok: false, error: 'missing tx_id' };
+  const cap = Number.isFinite(Number(maxLines)) ? Math.trunc(Number(maxLines)) : 240;
+  try {
+    const resp = await callDaemon({ op: 'inspect_tx_diff', tx_id: id, max_lines: cap }, 3000);
+    if (resp?.status === 'ok') return { ok: true, diff: resp.data };
+    if (resp?.status === 'err') return { ok: false, error: resp.message };
+  } catch {
+    // fallback CLI
+  }
+  const diff = await runCliJson(['tx', 'diff', id, '--max-lines', String(cap), '--json']);
+  return { ok: true, diff };
+}
+
+async function getAuditReport(days = 14, maxSessions = 80, tzOffsetMins = 0) {
+  const d = Number.isFinite(Number(days)) ? Math.max(1, Math.min(90, Math.trunc(Number(days)))) : 14;
+  const s = Number.isFinite(Number(maxSessions)) ? Math.max(5, Math.min(200, Math.trunc(Number(maxSessions)))) : 80;
+  const tz = Number.isFinite(Number(tzOffsetMins)) ? Math.trunc(Number(tzOffsetMins)) : 0;
+  try {
+    const resp = await callDaemon({ op: 'audit_report', days: d, max_sessions: s, tz_offset_mins: tz }, 8000);
+    if (resp?.status === 'ok') return resp.data;
+    if (resp?.status === 'err') return { error: resp.message };
+  } catch {
+    // fallback CLI
+  }
+  return await runCliJson(['audit', '--days', String(d), '--sessions', String(s), '--tz-offset-mins', String(tz), '--json']);
+}
+
+async function getAuditSvg(days = 14, theme = 'dark', tzOffsetMins = 0) {
+  const d = Number.isFinite(Number(days)) ? Math.max(1, Math.min(90, Math.trunc(Number(days)))) : 14;
+  const th = String(theme || 'dark').toLowerCase() === 'light' ? 'light' : 'dark';
+  const tz = Number.isFinite(Number(tzOffsetMins)) ? Math.trunc(Number(tzOffsetMins)) : 0;
+  const tmpSvg = join(tmpdir(), `agy-hyper-audit-${process.pid}-${Date.now()}.svg`);
+  try {
+    await new Promise((resolve, reject) => {
+      execFile(
+        resolveHyperBin(),
+        ['audit', '--days', String(d), '--sessions', '80', '--theme', th, '--tz-offset-mins', String(tz), '--svg', tmpSvg, '--json'],
+        { timeout: 10000, maxBuffer: 4 * 1024 * 1024 },
+        (err, _out, stderr) => {
+          if (err) reject(new Error(stderr || err.message));
+          else resolve();
+        }
+      );
+    });
+    return readFileSync(tmpSvg, 'utf8');
+  } finally {
+    try {
+      if (existsSync(tmpSvg)) unlinkSync(tmpSvg);
+    } catch {
+      // ignore
+    }
+  }
+}
+
 const SUPPORTED_FX_CODES = ['CNY', 'JPY', 'EUR', 'GBP', 'HKD', 'SGD', 'KRW'];
 
 async function getUsageSummary(windowName = '7d', currency = '', tzOffsetMins = 0, forceSync = false) {
@@ -498,6 +554,34 @@ async function startSidecarNative() {
     }
   }, 'POST');
 
+  app.api('/api/tx/diff', async (data) => {
+    try {
+      return await getTxDiff(data?.txId || data?.tx_id || '', data?.maxLines ?? 240);
+    } catch (e) {
+      return { ok: false, error: String(e?.message || e) };
+    }
+  }, 'GET');
+
+  app.api('/api/audit', async (data) => {
+    try {
+      return await getAuditReport(data?.days ?? 14, data?.sessions ?? 80, data?.tzOffsetMins ?? 0);
+    } catch (e) {
+      return { error: String(e?.message || e) };
+    }
+  }, 'GET');
+
+  app.api('/api/audit/svg', async (data) => {
+    try {
+      const svg = await getAuditSvg(data?.days ?? 14, data?.theme || 'dark', data?.tzOffsetMins ?? 0);
+      return new Response(svg, {
+        contentType: 'image/svg+xml; charset=utf-8',
+        headers: NO_CACHE_HEADERS,
+      });
+    } catch (e) {
+      return { ok: false, error: String(e?.message || e) };
+    }
+  }, 'GET');
+
   app.api('/api/usage', async (data) => {
     try {
       return await getUsageSummary(
@@ -599,6 +683,32 @@ function startStandaloneHttp() {
       if (pathname === '/api/rollback' && req.method === 'POST') {
         const body = await readBody(req);
         return sendJson(200, await rollbackTx(body.tx_id || '', Boolean(body.force)));
+      }
+      if (pathname === '/api/tx/diff' && req.method === 'GET') {
+        return sendJson(
+          200,
+          await getTxDiff(url.searchParams.get('txId') || '', url.searchParams.get('maxLines') || '240')
+        );
+      }
+      if (pathname === '/api/audit' && req.method === 'GET') {
+        return sendJson(
+          200,
+          await getAuditReport(
+            url.searchParams.get('days') || '14',
+            url.searchParams.get('sessions') || '80',
+            url.searchParams.get('tzOffsetMins') || '0'
+          )
+        );
+      }
+      if (pathname === '/api/audit/svg' && req.method === 'GET') {
+        const svg = await getAuditSvg(
+          url.searchParams.get('days') || '14',
+          url.searchParams.get('theme') || 'dark',
+          url.searchParams.get('tzOffsetMins') || '0'
+        );
+        res.writeHead(200, { 'Content-Type': 'image/svg+xml; charset=utf-8', ...NO_CACHE_HEADERS });
+        res.end(svg);
+        return;
       }
       if (pathname === '/api/usage' && req.method === 'GET') {
         const rep = await getUsageSummary(

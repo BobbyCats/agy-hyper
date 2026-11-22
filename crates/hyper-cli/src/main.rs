@@ -5,6 +5,7 @@ mod statusline;
 use anyhow::{anyhow, Result};
 use clap::{Parser, Subcommand};
 use hyper_core::ast::outline_source;
+use hyper_core::audit::{build_audit_report, render_audit_svg, BurnAuditReport};
 use hyper_core::bench::{aggregate_sessions, render_waterfall_svg};
 use hyper_core::config::{HyperConfig, Profile};
 use hyper_core::git::quick_head;
@@ -13,7 +14,7 @@ use hyper_core::usage::{
     default_brain_dirs, now_epoch_ms, ModelTtlEstimate, UsageLedger, UsageWindow,
     UsageWindowReport,
 };
-use hyper_core::wal::{list_transactions, rollback_transaction};
+use hyper_core::wal::{inspect_transaction_diff, list_transactions, rollback_transaction};
 use hyper_daemon::client::{ensure_and_send, send_request, spawn_daemon_detached};
 use hyper_daemon::protocol::{DaemonRequest, DaemonResponse, EngineStatus};
 use hyper_daemon::server::{run_daemon_server, socket_path};
@@ -63,6 +64,27 @@ enum Commands {
         /// Measure empirical prompt-cache TTL decay curves per model family
         #[arg(long)]
         cache_ttl: bool,
+        /// Output raw JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// Run a local multi-session burn audit (cache TTL cliffs, pre-edit bloat, cost & SVG card)
+    Audit {
+        /// Lookback window in days (1..90)
+        #[arg(long, default_value_t = 14)]
+        days: u32,
+        /// Maximum recent sessions to inspect
+        #[arg(long, default_value_t = 80)]
+        sessions: usize,
+        /// Export a shareable SVG diagnostic report card
+        #[arg(long)]
+        svg: Option<PathBuf>,
+        /// Card theme for --svg: dark | light
+        #[arg(long, default_value = "dark")]
+        theme: String,
+        /// Local timezone offset in minutes
+        #[arg(long, default_value_t = 0)]
+        tz_offset_mins: i32,
         /// Output raw JSON
         #[arg(long)]
         json: bool,
@@ -152,6 +174,13 @@ enum TxAction {
         #[arg(long, default_value_t = 15)]
         limit: usize,
     },
+    Diff {
+        tx_id: String,
+        #[arg(long, default_value_t = 240)]
+        max_lines: usize,
+        #[arg(long)]
+        json: bool,
+    },
     Rollback {
         tx_id: String,
         #[arg(long)]
@@ -206,6 +235,14 @@ fn main() -> Result<()> {
                 handle_bench(sessions, transcript, svg, json)
             }
         }
+        Commands::Audit {
+            days,
+            sessions,
+            svg,
+            theme,
+            tz_offset_mins,
+            json,
+        } => handle_audit(days, sessions, svg, &theme, tz_offset_mins, json),
         Commands::Statusline {
             format,
             title,
@@ -492,6 +529,40 @@ fn handle_tx(action: TxAction) -> Result<()> {
             }
             Ok(())
         }
+        TxAction::Diff {
+            tx_id,
+            max_lines,
+            json,
+        } => {
+            let diff = inspect_transaction_diff(&HyperConfig::wal_dir(), &tx_id, max_lines)?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&diff)?);
+                return Ok(());
+            }
+            println!(
+                "WAL Diff · {} [{}] {}",
+                diff.tx_id,
+                diff.source,
+                if diff.rolled_back { "(rolled-back)" } else { "" }
+            );
+            for f in &diff.files {
+                println!(
+                    "\n── {} [{}] (+{} -{})",
+                    f.rel_path, f.action, f.lines_added, f.lines_removed
+                );
+                if let Some(reason) = &f.unavailable_reason {
+                    println!("  ({})", reason);
+                } else if f.unified_diff.is_empty() {
+                    println!("  (no line changes)");
+                } else {
+                    println!("{}", f.unified_diff);
+                    if f.truncated {
+                        println!("  … (diff truncated at {} lines)", max_lines);
+                    }
+                }
+            }
+            Ok(())
+        }
         TxAction::Rollback { tx_id, force } => {
             let res = rollback_transaction(&HyperConfig::wal_dir(), &tx_id, force)?;
             println!("{}", serde_json::to_string_pretty(&res)?);
@@ -507,8 +578,12 @@ fn handle_config(action: Option<ConfigAction>) -> Result<()> {
             println!("{}", serde_json::to_string_pretty(&cfg)?);
         }
         ConfigAction::Profile { name } => {
-            let p = Profile::from_str_loose(&name)
-                .ok_or_else(|| anyhow!("invalid profile '{}'; use safe|balanced|hyper", name))?;
+            let p = Profile::from_str_loose(&name).ok_or_else(|| {
+                anyhow!(
+                    "invalid profile '{}'; use observe|safe|balanced|hyper",
+                    name
+                )
+            })?;
             cfg.apply_profile(p);
             cfg.save()?;
             let _ = send_request(&DaemonRequest::SetProfile {
@@ -729,6 +804,114 @@ fn handle_bench_cache_ttl(as_json: bool) -> Result<()> {
         }
         println!();
     }
+    Ok(())
+}
+
+fn handle_audit(
+    days: u32,
+    sessions: usize,
+    svg: Option<PathBuf>,
+    theme: &str,
+    tz_offset_mins: i32,
+    as_json: bool,
+) -> Result<()> {
+    let cfg = HyperConfig::load();
+    let report: BurnAuditReport = match send_request(&DaemonRequest::AuditReport {
+        days,
+        max_sessions: sessions,
+        tz_offset_mins,
+    }) {
+        Ok(DaemonResponse::Ok { data }) => serde_json::from_value(data)
+            .unwrap_or_else(|_| build_audit_report(days, sessions, &cfg, tz_offset_mins)),
+        _ => build_audit_report(days, sessions, &cfg, tz_offset_mins),
+    };
+
+    if let Some(svg_path) = svg {
+        let dark = !theme.trim().eq_ignore_ascii_case("light");
+        let svg_xml = render_audit_svg(&report, dark);
+        if let Some(parent) = svg_path.parent() {
+            if !parent.as_os_str().is_empty() {
+                fs::create_dir_all(parent)?;
+            }
+        }
+        fs::write(&svg_path, svg_xml)?;
+        if !as_json {
+            println!("Exported shareable audit card -> {}", svg_path.display());
+        }
+    }
+
+    if as_json {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+        return Ok(());
+    }
+
+    println!("\n⚡ AGY HYPER · LOCAL TELEMETRY BURN AUDIT ({}d)", report.window_days);
+    println!("─────────────────────────────────────────────────────────────────");
+    println!(
+        "  Sessions / Turns  : {} sessions ({} coding) · {} valid turns",
+        report.sessions_analyzed, report.coding_sessions, report.total_turns
+    );
+    println!(
+        "  Prompt Cache Hit  : {:.1}%  ({} cold-cache breaks)",
+        report.overall_cache_hit_ratio * 100.0,
+        report.cache_break_turns
+    );
+    println!(
+        "  Uncached Input    : {:.2} {} (API-equiv {:.2} {} · cache saved {:.2} {})",
+        report.uncached_input_cost,
+        report.currency,
+        report.total_api_equiv,
+        report.currency,
+        report.cache_saved,
+        report.currency
+    );
+    if let Some(p50) = report.first_edit_p50_tokens {
+        let p90 = report.first_edit_p90_tokens.unwrap_or(p50);
+        println!(
+            "  First-Edit Context: P50 {:.1}k · P90 {:.1}k · Blanket-read turns: {} (in {} sess)",
+            p50 as f64 / 1000.0,
+            p90 as f64 / 1000.0,
+            report.blanket_read_turns,
+            report.sessions_with_blanket_reads
+        );
+    }
+    if !report.model_ttl_cliffs.is_empty() {
+        println!("\n  Empirical Model Cache TTL Cliffs:");
+        for m in report.model_ttl_cliffs.iter().take(6) {
+            println!(
+                "    {:<20} {:>3}s [{}]  (n={})",
+                m.model_family, m.effective_ttl_secs, m.source, m.total_samples
+            );
+        }
+    }
+    let nat = &report.comparison.native_only;
+    let hyp = &report.comparison.with_hyper;
+    println!("\n  Observed Local Cohorts (unadjusted local history):");
+    println!(
+        "    Native-only : {:>3} sess · {:>4} turns · Turn P50 {:>5.1}s · Cache {:>5.1}%",
+        nat.sessions,
+        nat.total_turns,
+        nat.turn_p50_ms as f64 / 1000.0,
+        nat.cache_hit_ratio * 100.0
+    );
+    println!(
+        "    With Hyper  : {:>3} sess · {:>4} turns · Turn P50 {:>5.1}s · Cache {:>5.1}%",
+        hyp.sessions,
+        hyp.total_turns,
+        hyp.turn_p50_ms as f64 / 1000.0,
+        hyp.cache_hit_ratio * 100.0
+    );
+    println!("\n  Top Local Findings:");
+    for f in &report.findings {
+        let tag = match f.severity.as_str() {
+            "high" => "[HIGH]",
+            "warn" => "[WARN]",
+            _ => "[INFO]",
+        };
+        println!("    {} {}", tag, f.title);
+        println!("           {}", f.detail);
+    }
+    println!();
     Ok(())
 }
 

@@ -1,5 +1,6 @@
 ﻿# AGY Hyper — Zero-Barrier Windows Installer (SHA-256 verified, atomic swap)
 param(
+  [switch]$Observe,
   [switch]$Uninstall,
   [switch]$Purge
 )
@@ -120,6 +121,11 @@ try {
     $NextPath = if ($UserPath) { "$UserPath;$BinDir" } else { $BinDir }
     [Environment]::SetEnvironmentVariable("Path", $NextPath, "User")
     $env:Path = "$env:Path;$BinDir"
+  }
+
+  if ($Observe -or $env:AGY_HYPER_OBSERVE -eq "1") {
+    & (Join-Path $BinDir "agy-hyper.exe") config profile observe 2>$null | Out-Null
+    Write-Host "✓ Profile set to 'observe' (zero-intrusion cockpit only; switch anytime in Hyper Deck)." -ForegroundColor Green
   }
 
   & (Join-Path $BinDir "agy-hyper.exe") doctor
