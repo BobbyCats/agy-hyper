@@ -42,8 +42,8 @@
 - **装上之后**：动笔前先把原件逐字节锁进本地 WAL 保险柜，所有改动在临时草稿纸上写完、1 毫秒扫完语法错，再一整叠原子替换。改崩了？点一下侧边栏的 **一键撤回**，所有文件按字节恢复如初。抽屉里的密钥文件默认贴封条，AI 连瞄一眼都瞄不到。
 
 ### 3. 长对话与子代理：蒙眼开盲车 vs 装上实时遥测与成本驾驶舱
-- **没装之前**：聊着聊着 AI 突然变慢还变贵，你不知道 4 分钟缓存是不是已经凉了，也不知道后台子代理是不是正在悄悄滚雪球触顶，更不知道近 7 天到底烧掉了多少等价算力。
-- **装上之后**：Antigravity 右侧边栏长出一块实时驾驶舱。当前水位、`240s` 缓存保鲜进度、子代理树实时状态（仅对运行中红线告警）、`/compact` 与跨模型缓存重算提示，以及纯离线 `24H / 7D / 30D / 90D` 多币种用量账本，一眼看穿。
+- **没装之前**：聊着聊着 AI 突然变慢还变贵，你不知道当前模型的缓存到底几分钟变冷，不知道窗口里是被哪些读文件或命令输出撑爆的，也不知道后台子代理是不是疑似卡死或悄悄触顶，更不知道近 7 天烧掉了多少等价算力。
+- **装上之后**：Antigravity 右侧边栏长出一块实时驾驶舱。当前水位、**分模型实测校准缓存保鲜窗口**、**上下文构成 X-Ray 透视**、子代理树实时状态（运行中红线与 `STALLED` 疑似卡死告警）、`/compact` 与跨模型缓存重算提示，以及纯离线 `24H / 7D / 30D / 90D` 多币种用量账本一眼看穿；同时为 Antigravity CLI 提供 `<5ms` 原生状态栏与窗口标题接入。
 
 ---
 
@@ -77,7 +77,8 @@ git clone https://github.com/BobbyCats/agy-hyper.git && cd agy-hyper && ./instal
 ```bash
 agy-hyper doctor                  # 检查 Tree-sitter 语法、gix、守护进程延迟与安全边界
 agy-hyper usage --window 7d       # 查看近 24h / 7d / 30d / 90d Token 与多币种等价估值
-agy-hyper bench                   # 对最近真实会话生成逐轮瀑布耗时分析
+agy-hyper bench --cache-ttl       # 查看各模型族实测 Prompt 缓存衰减曲线与 TTL 拐点
+agy-hyper cli-setup               # 输出（或 --apply 写入）Antigravity CLI statusLine 与 title 配置
 agy-hyper ui                      # 在浏览器独立打开 AGY Hyper Deck (127.0.0.1:47821)
 ```
 
@@ -87,15 +88,15 @@ agy-hyper ui                      # 在浏览器独立打开 AGY Hyper Deck (127
 
 通过官方 `SIDECAR_UI_ENTRYPOINT_AUX_PANE` 协议原生嵌入右侧边栏，100% 本地离线内置 **Apache ECharts 6** 与 **i18next**（`English / 简体中文 / 日本語`，零外网 CDN），自动同步宿主明暗主题。
 
-- **简洁模式**面向日常使用：展示上下文水位、单轮 P50、本步与会话累计缓存命中、**子代理树状态条**、**本会话/整树等价估值缎带**（支持一键切货币）、`240s` 缓存保鲜条（含 `/compact` 完成态与跨模型切换提示）以及 WAL 一键撤回。
-- **极客模式**展开五大深度视图：**耗时瀑布**（LLM / Hyper / 普通工具严格拆分）、**上下文轨迹**（双轴堆叠面积与命中曲线）、**用量账本**（`24H / 7D / 30D / 90D` 增量统计 + 8 种货币 + 手动 **同步汇率**）、**引擎与缓存**、**回滚与审计**。
+- **简洁模式**面向日常使用：展示上下文水位、单轮 P50、本步与会话累计缓存命中、**子代理树状态条**（高亮运行中红线与静默 `>=90s` 的 `STALLED` 卡死子代理）、**本会话/整树等价估值缎带**（支持一键切货币）、**分模型自适应缓存保鲜条**（实测/默认 TTL 徽章、连续失败熔断预警、`/compact` 与跨模型切换提示）以及 WAL 一键撤回。
+- **极客模式**展开五大深度视图：**耗时瀑布**（LLM / Hyper / 普通工具严格拆分）、**上下文轨迹**（双轴堆叠面积曲线 + **上下文 X-Ray 透视条**，拆分读文件/命令输出/Hyper 工具/思考回复并标注首次改动水位与地毯读次数）、**用量账本**（`24H / 7D / 30D / 90D` 增量统计 + 8 种货币 + 手动 **同步汇率**）、**引擎与缓存**、**回滚与审计**。
 
 <div align="center">
 <table>
   <tr>
     <td align="center" width="50%">
       <strong>简洁模式 · 子代理树、水位与一键撤回（深色）</strong><br/>
-      <sub>子代理隔离监控 · 240s 缓存保鲜 · 整树估值缎带 · WAL 原子撤回</sub><br/><br/>
+      <sub>子代理隔离监控 · 自适应实测缓存条 · 整树估值缎带 · WAL 原子撤回</sub><br/><br/>
       <img src="./assets/cockpit-simple-dark.png" alt="AGY Hyper Deck 简洁模式深色" width="100%"/>
     </td>
     <td align="center" width="50%">
@@ -143,8 +144,8 @@ agy-hyper ui                      # 在浏览器独立打开 AGY Hyper Deck (127
 
 1. **单回合语义打包（`hyper_pack`）**：一次并行扫描完成内置 `ripgrep`、7 种 Tree-sitter 语法解析（Rust / TypeScript / TSX / JavaScript / Python / Go / JSON）、1-hop 导入图与 `gix` 热点排序，并内联高分符号切片。输出严格压在 `<= 8.5KB` 内，避开 Antigravity 10KB 落盘截断，守护进程真 LRU 热命中约 `14ms`。
 2. **三阶段原子 WAL（`hyper_edit`）**：排他 `flock` 加 BLAKE3 ETag 乐观锁，先 `fsync` 写入修改前预像，再经同目录临时文件原子 `rename`。遇到磁盘满（`ENOSPC`）直接清理临时文件并中止，绝不破坏源文件。改完立刻做 `<1ms` 语法校验，原生 `edit_file` / `write_file` 验证后的修改前预像也会自动入账，统一支持一键撤回。
-3. **编译期零信任沙箱**：只读 `gix` 在编译阶段去掉写引用与网络代码，全程零 `git` 子进程。`realpath` 牢笼拦截 `../`、软链接逃逸及悬空目录软链，密钥盾默认封禁 `.env` / `*.pem` / `*.key` / `id_rsa`（放行 `.env.example`）。`hyper_check` 固定 `shell: false`，保留头 64KB 加尾 512KB 环形缓冲，取消或超时按进程组整树清理。
-4. **无锁遥测、子代理树与离线账本**：驾驶舱轮询、回滚及字节偏移增量用量账本（`usage_ledger.json`，180 天滚动保留，8 种货币换算）均在守护进程全局锁外执行，不会拖慢并发 MCP 请求。上下文警戒线按模型自动适配（`128k`：`96k / 115k`；`200k`：`140k / 175k`；`1M`：`180k / 280k`），子代理红线告警严格限定为运行中任务，自动识别 `/compact` 与跨模型切换引起的 KV 缓存重算，并过滤用户主动取消操作以避免网络误报。
+3. **编译期零信任沙箱与防卡死看门狗**：只读 `gix` 在编译阶段去掉写引用与网络代码，全程零 `git` 子进程。`realpath` 牢笼拦截 `../`、软链接逃逸及悬空目录软链，密钥盾默认封禁 `.env` / `*.pem` / `*.key` / `id_rsa`（放行 `.env.example`）。`hyper_check` 固定 `shell: false`，保留头 64KB 加尾 512KB 环形缓冲，为测试与脚本提供智能静默看门狗（`idle_timeout_secs`）与双条件崩溃断电（`fail_fast`），同时对编译与静态检查 Preset 默认免杀防误伤；超时、中止或取消均按进程组整树清理。
+4. **无锁遥测、实测 TTL、上下文 X-Ray 与 CLI 状态栏**：驾驶舱轮询、CLI `StatuslinePulse`、回滚及字节偏移增量账本（`usage_ledger.json` v2，180 天滚动保留，8 种货币换算）均在守护进程全局锁外执行，绝不拖慢并发 MCP 请求。账本按模型族自动统计冷暖衰减拐点校准真实缓存 TTL（`agy-hyper bench --cache-ttl`）；单遍扫描产出 `/compact` 后的上下文 X-Ray 构成与首次改动水位；`PreInvocation` 在模型自适应水位线（`96k / 115k`、`140k / 175k`、`180k / 280k`）之外新增连续报错熔断（`[AGY Hyper Loop Guard]`）；`agy-hyper statusline` 支持 `<5ms` 输出 Antigravity CLI 原生状态栏与纯文本窗口标题。
 
 ---
 
@@ -167,7 +168,7 @@ agy-hyper ui                      # 在浏览器独立打开 AGY Hyper Deck (127
 | `hyper_pack` | `只读` | 单遍 ripgrep + Tree-sitter 符号与核心切片 + 1-hop 导入图 + `gix` 热点 + BLAKE3 `etag`。 |
 | `hyper_search` | `只读` | 多关键词并行纯 Rust 搜索，兼顾 `.gitignore` 文件列举与零子进程 `gix` 只读 Git 状态。 |
 | `hyper_edit` | `原子 WAL` | 多文件精确替换或 Tree-sitter `symbol` 块级替换，含 ETag 乐观锁、BOM/CRLF 保护与 `<1ms` 语法校验。 |
-| `hyper_check` | `沙箱验证` | 自动识别安全 Preset（`cargo:check` / `pkg:test` / `py:pytest` / `go:vet` 及 Monorepo 子包），支持头尾环形缓冲与 `h_xxxx` 钻取句柄。 |
+| `hyper_check` | `沙箱验证` | 自动识别安全 Preset（`cargo:check` / `pkg:test` / `py:pytest` / `go:vet` 及 Monorepo 子包），内置智能静默/崩溃看门狗、头尾环形缓冲与 `h_xxxx` 钻取句柄。 |
 | `hyper_tx` | `撤回 / 钻取` | 查看 WAL 修改账本，支持一键原子 `rollback` 任意 `tx_id`，或 `1ms` 切片过滤超长检查日志。 |
 
 ---
@@ -182,7 +183,8 @@ Apple Silicon 实机 Release（LTO 优化）通过 `./bench/run-bench.sh` 实测
 | `hyper_pack`（守护进程 AST + 打包热命中） | **14 ms** | 含完整 MCP stdio 冷启与握手返回 |
 | `hyper_search` + `gix` 只读 Git（单次调用） | **20 ms** | 对比基线 `git status && git log && grep -rn` 耗时 **43 ms**（**2.2x 提速**） |
 | `hyper_pack`（冷启单遍 ripgrep + AST + 切片 + `gix` + 1-hop） | **58 ms** | 零外部 `rg` 与 `git` 二进制依赖 |
-| Rust 单元与安全混沌测试全集（`39/39`） | **0.17 s** | 覆盖磁盘满 staging、悬空目录软链、4 语言 1-hop、WAL 回滚、用量账本、子代理红线与取消过滤 |
+| `agy-hyper statusline`（守护进程热脉冲 + CLI stdin） | **4.2 ms** | 含进程冷启、无锁 UDS 通信与渲染（任何异常保证 `exit 0`） |
+| Rust 单元与安全混沌测试全集（`48/48`） | **2.1 s** | 覆盖磁盘满 staging、悬空软链、4 语言 1-hop、WAL 回滚、静默/崩溃看门狗、实测 TTL 迁移、上下文 X-Ray、循环熔断与 CLI 状态栏 |
 
 在任意本地仓库一键复现：
 
@@ -198,7 +200,9 @@ agy-hyper doctor                                # 全链路 Tree-sitter、gix、
 agy-hyper daemon start|stop|status              # 管理本地共享 Rust 守护进程
 agy-hyper ui [--port 47821]                     # 在浏览器独立打开 AGY Hyper Deck
 agy-hyper usage [--window 24h|7d|30d|90d] [--currency CNY] [--json]
-agy-hyper bench [--sessions 10] [--svg waterfall.svg] [--json]
+agy-hyper bench [--sessions 10] [--svg waterfall.svg] [--cache-ttl] [--json]
+agy-hyper statusline [--format compact|rich|json] [--title] [--no-color]
+agy-hyper cli-setup [--apply] [--format compact|rich]  # 打印或显式写入 Antigravity CLI 状态栏与标题配置
 agy-hyper tx list                               # 查看 BLAKE3 WAL 修改账本
 agy-hyper tx rollback <tx_id> [--force]         # 原子恢复文件到修改前字节状态
 agy-hyper config show                           # 查看当前生效配置

@@ -76,9 +76,14 @@ agy-hyper config fx CNY 7.25
 agy-hyper tx list
 agy-hyper tx rollback <tx_id>
 
-# Waterfall latency benchmark & standalone cockpit
+# Waterfall latency benchmark, empirical per-model cache TTL radar & standalone cockpit
 agy-hyper bench --sessions 10
+agy-hyper bench --cache-ttl
 agy-hyper ui --port 47821
+
+# Antigravity CLI native statusLine & plain-text title (optional opt-in)
+agy-hyper cli-setup
+agy-hyper cli-setup --apply --format compact
 ```
 
 ## 5. Clean Uninstall
