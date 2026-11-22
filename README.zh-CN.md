@@ -52,12 +52,12 @@
 不需要装 Rust，不需要装 `ripgrep` 或 Python，也不依赖本地 `git` 命令行。安装脚本强制通过 **SHA-256 校验** 后原子替换，绝不修改你的 `~/.gemini/config/config.json`。
 
 ```bash
-# macOS & Linux
+# macOS & Linux（默认 Balanced 模式；追加 `-s -- --observe` 可开启零侵入纯观测模式）
 curl -fsSL https://raw.githubusercontent.com/BobbyCats/agy-hyper/main/install.sh | bash
 ```
 
 ```powershell
-# Windows (PowerShell)
+# Windows (PowerShell；安装前设 `$env:AGY_HYPER_OBSERVE="1"` 可启零侵入纯观测模式)
 irm https://raw.githubusercontent.com/BobbyCats/agy-hyper/main/install.ps1 | iex
 ```
 
@@ -76,6 +76,7 @@ git clone https://github.com/BobbyCats/agy-hyper.git && cd agy-hyper && ./instal
 
 ```bash
 agy-hyper doctor                  # 检查 Tree-sitter 语法、gix、守护进程延迟与安全边界
+agy-hyper audit --svg audit.svg   # 运行 14 天本机烧钱诊断并导出可分享 SVG 战报卡
 agy-hyper usage --window 7d       # 查看近 24h / 7d / 30d / 90d Token 与多币种等价估值
 agy-hyper bench --cache-ttl       # 查看各模型族实测 Prompt 缓存衰减曲线与 TTL 拐点
 agy-hyper cli-setup               # 输出（或 --apply 写入）Antigravity CLI statusLine 与 title 配置
@@ -84,47 +85,62 @@ agy-hyper ui                      # 在浏览器独立打开 AGY Hyper Deck (127
 
 ---
 
+## 本机烧钱诊断战报卡（`agy-hyper audit`）
+
+运行 `agy-hyper audit --days 14 --svg audit-card.svg`，100% 本地离线扫描你自己的 Antigravity 历史日志（零云端上传），直接揪出各模型真实缓存掉崖时间、未命中输入成本、首次改代码前上下文膨胀与地毯式预读次数，并生成一张可直接分享的矢量 SVG 诊断卡：
+
+<div align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="./assets/audit-card-dark.svg">
+    <source media="(prefers-color-scheme: light)" srcset="./assets/audit-card-light.svg">
+    <img src="./assets/audit-card-dark.svg" alt="AGY Hyper 本机遥测诊断战报卡" width="100%"/>
+  </picture>
+</div>
+
+---
+
 ## AGY Hyper Deck（Antigravity 原生侧边栏驾驶舱）
 
 通过官方 `SIDECAR_UI_ENTRYPOINT_AUX_PANE` 协议原生嵌入右侧边栏，100% 本地离线内置 **Apache ECharts 6** 与 **i18next**（`English / 简体中文 / 日本語`，零外网 CDN），自动同步宿主明暗主题。
 
-- **简洁模式**面向日常使用：展示上下文水位、单轮 P50、本步与会话累计缓存命中、**子代理树状态条**（高亮运行中红线与静默 `>=90s` 的 `STALLED` 卡死子代理）、**本会话/整树等价估值缎带**（支持一键切货币）、**分模型自适应缓存保鲜条**（实测/默认 TTL 徽章、连续失败熔断预警、`/compact` 与跨模型切换提示）以及 WAL 一键撤回。
-- **极客模式**展开五大深度视图：**耗时瀑布**（LLM / Hyper / 普通工具严格拆分）、**上下文轨迹**（双轴堆叠面积曲线 + **上下文 X-Ray 透视条**，拆分读文件/命令输出/Hyper 工具/思考回复并标注首次改动水位与地毯读次数）、**用量账本**（`24H / 7D / 30D / 90D` 增量统计 + 8 种货币 + 手动 **同步汇率**）、**引擎与缓存**、**回滚与审计**。
+- **分层零侵入架构**：支持先用 **纯观测（Observe）** 模式（只开侧边栏驾驶舱、烧钱诊断与被动 WAL 快照，完全不碰原生工具与 Diff 卡片），或切到 **安全稳健（Safe）**（开启打包读与同步校验，同时保留原生 `edit_file` 行内 Diff），也可以一键解锁 **均衡 / 狂暴** 全量 Rust MCP 加速，并在 **引擎** 页独立开关读/写/校验三个工具层。
+- **简洁模式**面向日常使用：展示上下文水位、单轮 P50、本步与会话累计缓存命中、**子代理树状态条**（高亮运行中红线与静默 `>=90s` 的 `STALLED` 卡死子代理）、**本会话/整树等价估值缎带**（支持一键切货币）、**分模型自适应缓存保鲜条**（实测/默认 TTL 徽章与连续失败熔断预警）、四档分层模式切换，以及 **WAL 行级 Unified Diff 内联审阅 + 一键撤回**。
+- **极客模式**展开五大深度视图：**耗时瀑布**（LLM / Hyper / 普通工具严格拆分）、**上下文轨迹**（双轴堆叠面积曲线 + **上下文 X-Ray 透视条**，拆分读文件/命令输出/Hyper 工具/思考回复并标注首次改动水位与地毯读次数）、**用量账本**（`24H / 7D / 30D / 90D` 增量统计 + 8 种货币 + 手动 **同步汇率** + **本机烧钱诊断与 TTL 断崖** 及一键导出 `.svg` 战报卡）、**引擎与缓存**（AST/打包命中 + 细粒度 MCP 开关）、**回滚与审计**。
 
 <div align="center">
 <table>
   <tr>
     <td align="center" width="50%">
-      <strong>简洁模式 · 子代理树、水位与一键撤回（深色）</strong><br/>
-      <sub>子代理隔离监控 · 自适应实测缓存条 · 整树估值缎带 · WAL 原子撤回</sub><br/><br/>
+      <strong>简洁模式 · 实测 TTL、四档模式与行级 WAL Diff（深色）</strong><br/>
+      <sub>~180s 实测缓存保鲜 · Observe/Safe/Balanced/Hyper · 展开红绿 Diff 与一键撤回</sub><br/><br/>
       <img src="./assets/cockpit-simple-dark.png" alt="AGY Hyper Deck 简洁模式深色" width="100%"/>
     </td>
     <td align="center" width="50%">
-      <strong>简洁模式 · 已压缩态与引擎接管（浅色 · 中文）</strong><br/>
-      <sub>/compact 完成态确认 · Hyper 接管占比 · 原生 i18next 多语言</sub><br/><br/>
+      <strong>简洁模式 · 浅色主题与改动行数标记（浅色）</strong><br/>
+      <sub>自适应宿主浅色主题 · 实测 TTL 徽章 · 原生 i18next 三语切换</sub><br/><br/>
       <img src="./assets/cockpit-simple-light.png" alt="AGY Hyper Deck 简洁模式浅色" width="100%"/>
     </td>
   </tr>
   <tr>
     <td align="center" width="50%">
-      <strong>极客模式 · 24H–90D 多币种用量账本（深色 · 中文）</strong><br/>
-      <sub>本地增量账本 · 8 种货币 · 缓存节省测算 · 手动同步实时汇率</sub><br/><br/>
-      <img src="./assets/cockpit-usage-dark.png" alt="AGY Hyper Deck 用量账本" width="100%"/>
+      <strong>极客模式 · 用量账本、烧钱诊断与模型 TTL 断崖</strong><br/>
+      <sub>多币种本地账本 · 实测断崖胶囊 · 核心发现 · 一键导出 SVG 战报卡</sub><br/><br/>
+      <img src="./assets/cockpit-usage-dark.png" alt="AGY Hyper Deck 用量账本与诊断" width="100%"/>
     </td>
     <td align="center" width="50%">
-      <strong>极客模式 · 逐轮耗时火焰图（深色）</strong><br/>
-      <sub>严格拆分模型推理 / Hyper / 普通工具耗时 · P50 / P90 · 配对 TPS</sub><br/><br/>
-      <img src="./assets/cockpit-pro-dark.png" alt="AGY Hyper Deck 极客瀑布图" width="100%"/>
+      <strong>极客模式 · 双轴上下文曲线与上下文 X-Ray 透视</strong><br/>
+      <sub>命中率双轴轨迹 · 压缩后窗口成分拆解 · 首改水位与地毯读计数</sub><br/><br/>
+      <img src="./assets/cockpit-context-dark.png" alt="AGY Hyper Deck 上下文 X-Ray" width="100%"/>
     </td>
   </tr>
 </table>
 </div>
 
 <details>
-<summary><strong>更多视图：极客模式 · 双轴上下文与缓存命中曲线</strong></summary>
+<summary><strong>更多视图：极客模式 · 逐轮耗时火焰图</strong></summary>
 <br/>
 <div align="center">
-  <img src="./assets/cockpit-context-dark.png" alt="AGY Hyper Deck 上下文曲线" width="520"/>
+  <img src="./assets/cockpit-pro-dark.png" alt="AGY Hyper Deck 极客瀑布图" width="520"/>
 </div>
 </details>
 
@@ -199,14 +215,17 @@ Apple Silicon 实机 Release（LTO 优化）通过 `./bench/run-bench.sh` 实测
 agy-hyper doctor                                # 全链路 Tree-sitter、gix、守护进程与安全体检
 agy-hyper daemon start|stop|status              # 管理本地共享 Rust 守护进程
 agy-hyper ui [--port 47821]                     # 在浏览器独立打开 AGY Hyper Deck
+agy-hyper audit [--days 14] [--sessions 80] [--svg card.svg] [--theme dark|light] [--json]
 agy-hyper usage [--window 24h|7d|30d|90d] [--currency CNY] [--json]
 agy-hyper bench [--sessions 10] [--svg waterfall.svg] [--cache-ttl] [--json]
 agy-hyper statusline [--format compact|rich|json] [--title] [--no-color]
 agy-hyper cli-setup [--apply] [--format compact|rich]  # 打印或显式写入 Antigravity CLI 状态栏与标题配置
 agy-hyper tx list                               # 查看 BLAKE3 WAL 修改账本
+agy-hyper tx diff <tx_id> [--json]              # 查看任意 WAL 事务的行级 Unified Diff
 agy-hyper tx rollback <tx_id> [--force]         # 原子恢复文件到修改前字节状态
 agy-hyper config show                           # 查看当前生效配置
-agy-hyper config profile safe|balanced|hyper    # 切换安全与后台预热策略
+agy-hyper config profile observe|safe|balanced|hyper    # 切换分层观测 / 加速模式
+agy-hyper config toggle enable_mcp_read|enable_mcp_edit|enable_mcp_check true|false
 agy-hyper config currency USD|CNY|JPY|EUR|GBP|HKD|SGD|KRW
 agy-hyper config fx <货币代码> <对美元汇率>       # 自定义本地离线汇率
 ```

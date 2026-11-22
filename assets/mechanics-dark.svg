@@ -86,7 +86,7 @@
 
     <!-- Post-check & Undo -->
     <rect x="402" y="48" width="96" height="52" rx="7" fill="#0A1F1C" stroke="#22C55E" stroke-opacity="0.6"/>
-    <text x="450" y="69" text-anchor="middle" fill="#34D399" font-size="10.5" font-weight="700" font-family="ui-monospace,Menlo,monospace">&lt;1ms AST</text>
+    <text x="450" y="69" text-anchor="middle" fill="#34D399" font-size="10.5" font-weight="700" font-family="ui-monospace,Menlo,monospace">Inline Diff</text>
     <text x="450" y="86" text-anchor="middle" fill="#E2E8F0" font-size="9.5" font-family="ui-monospace,Menlo,monospace">1-Click Undo</text>
 
     <!-- ENOSPC safe-abort branch -->
@@ -158,7 +158,7 @@
 
     <rect x="362" y="48" width="136" height="38" rx="7" fill="#0F172A" stroke="#38BDF8" stroke-opacity="0.5"/>
     <text x="430" y="64" text-anchor="middle" fill="#38BDF8" font-size="10.5" font-weight="700" font-family="ui-monospace,Menlo,monospace">Sidecar Deck</text>
-    <text x="430" y="78" text-anchor="middle" fill="#94A3B8" font-size="9" font-family="ui-monospace,Menlo,monospace">2.5s poll · 240s bar</text>
+    <text x="430" y="78" text-anchor="middle" fill="#94A3B8" font-size="9" font-family="ui-monospace,Menlo,monospace">Emp TTL · X-Ray · Audit</text>
 
     <!-- Bottom Model-Aware Guardline Bars -->
     <rect x="16" y="98" width="482" height="72" rx="8" fill="#0B1120" stroke="#1E293B"/>

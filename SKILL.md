@@ -62,18 +62,23 @@ agy-hyper daemon status
 agy-hyper daemon start
 agy-hyper daemon stop
 
+# Local burn audit & shareable SVG diagnostic card
+agy-hyper audit --days 14 --svg audit-card.svg
+
 # Usage & multi-currency API-equivalent cost ledger (24h | 7d | 30d | 90d)
 agy-hyper usage --window 7d
 agy-hyper usage --window 30d --currency CNY
 
-# Safety profile & currency configuration
+# Layered profile & granular MCP switches (observe = cockpit-only zero-intrusion)
 agy-hyper config show
-agy-hyper config profile safe|balanced|hyper
+agy-hyper config profile observe|safe|balanced|hyper
+agy-hyper config toggle enable_mcp_edit false
 agy-hyper config currency USD|CNY|JPY|EUR|GBP|HKD|SGD|KRW
 agy-hyper config fx CNY 7.25
 
-# WAL undo ledger & atomic rollback
+# WAL undo ledger, inline Unified Diff & atomic rollback
 agy-hyper tx list
+agy-hyper tx diff <tx_id>
 agy-hyper tx rollback <tx_id>
 
 # Waterfall latency benchmark, empirical per-model cache TTL radar & standalone cockpit

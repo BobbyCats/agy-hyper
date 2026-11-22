@@ -29,8 +29,8 @@
 
   <text x="164" y="114" fill="#0F172A" font-size="48" font-weight="800" letter-spacing="-1.5" font-family="system-ui,-apple-system,'Segoe UI',sans-serif">AGY HYPER</text>
   <rect x="458" y="83" width="66" height="24" rx="12" fill="#0284C7" fill-opacity="0.1" stroke="#0284C7" stroke-opacity="0.35"/>
-  <text x="491" y="99" text-anchor="middle" fill="#0284C7" font-size="12" font-weight="700" font-family="ui-monospace,SFMono-Regular,Menlo,monospace">v0.3.0</text>
-  <text x="164" y="148" fill="#475569" font-size="17" font-weight="500" font-family="system-ui,-apple-system,sans-serif">Stop paying the 6-second TTFT tax. Turn Antigravity into a native Rust cockpit.</text>
+  <text x="491" y="99" text-anchor="middle" fill="#0284C7" font-size="12" font-weight="700" font-family="ui-monospace,SFMono-Regular,Menlo,monospace">v0.4.0</text>
+  <text x="164" y="148" fill="#475569" font-size="17" font-weight="500" font-family="system-ui,-apple-system,sans-serif">Zero-intrusion telemetry cockpit + opt-in native Rust accelerator for Antigravity.</text>
 
   <g transform="translate(56, 196)" font-family="ui-monospace,SFMono-Regular,Menlo,monospace" font-size="12" font-weight="600">
     <rect x="0" y="0" width="136" height="30" rx="8" fill="#FFFFFF" stroke="#CBD5E1"/>
@@ -50,7 +50,7 @@
     <text x="473" y="19" fill="#0F172A">gix Read-Only</text>
   </g>
 
-  <text x="56" y="274" fill="#64748B" font-size="12.5" font-family="ui-monospace,SFMono-Regular,Menlo,monospace">Zero rg/Python/Node hook deps · Native Sidecar Aux Pane UI · ENOSPC-proof atomic rollback · MIT</text>
+  <text x="56" y="274" fill="#64748B" font-size="12.5" font-family="ui-monospace,SFMono-Regular,Menlo,monospace">Layered Observe/Safe/Balanced/Hyper · Inline WAL Diff · Empirical TTL · Burn Audit SVG · MIT</text>
 
   <g transform="translate(690, 56)">
     <rect x="0" y="0" width="454" height="228" rx="14" fill="#FFFFFF" stroke="#CBD5E1" stroke-width="1.5"/>

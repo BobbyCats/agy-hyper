@@ -1,21 +1,21 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="1100" height="310" viewBox="0 0 1100 310" fill="none">
   <rect width="1100" height="310" rx="16" fill="#FFFFFF" stroke="#CBD5E1" stroke-width="1.5"/>
-  <text x="28" y="34" fill="#64748B" font-size="11" font-weight="700" letter-spacing="1.4" font-family="ui-monospace,Menlo,monospace">AGY HYPER SYSTEM ARCHITECTURE · ZERO-DEPENDENCY SINGLE BINARY + NATIVE SIDECAR</text>
+  <text x="28" y="34" fill="#64748B" font-size="11" font-weight="700" letter-spacing="1.4" font-family="ui-monospace,Menlo,monospace">AGY HYPER v0.4 · LAYERED ZERO-INTRUSION COCKPIT + OPT-IN RUST ACCELERATOR</text>
 
   <rect x="28" y="56" width="230" height="224" rx="12" fill="#F8FAFC" stroke="#CBD5E1"/>
-  <text x="44" y="82" fill="#0F172A" font-size="13.5" font-weight="700" font-family="system-ui,sans-serif">Antigravity 2.0 Host</text>
+  <text x="44" y="82" fill="#0F172A" font-size="13.5" font-weight="700" font-family="system-ui,sans-serif">Antigravity IDE &amp; CLI</text>
   <rect x="44" y="96" width="198" height="38" rx="7" fill="#FFFFFF" stroke="#CBD5E1"/>
-  <text x="56" y="114" fill="#0284C7" font-size="11.5" font-weight="600" font-family="ui-monospace,Menlo,monospace">MCP Stdio (5 Tools)</text>
-  <text x="56" y="128" fill="#64748B" font-size="10" font-family="ui-monospace,Menlo,monospace">&lt;=8.5KB inline · Cancel-safe</text>
+  <text x="56" y="114" fill="#0284C7" font-size="11.5" font-weight="600" font-family="ui-monospace,Menlo,monospace">Opt-In MCP (Toggleable)</text>
+  <text x="56" y="128" fill="#64748B" font-size="10" font-family="ui-monospace,Menlo,monospace">Observe · Safe · Balanced · Hyper</text>
 
   <rect x="44" y="144" width="198" height="38" rx="7" fill="#FFFFFF" stroke="#CBD5E1"/>
-  <text x="56" y="162" fill="#7C3AED" font-size="11.5" font-weight="600" font-family="ui-monospace,Menlo,monospace">Lifecycle Hooks (&lt;2ms)</text>
-  <text x="56" y="176" fill="#64748B" font-size="10" font-family="ui-monospace,Menlo,monospace">Session · Watermark · Cache</text>
+  <text x="56" y="162" fill="#7C3AED" font-size="11.5" font-weight="600" font-family="ui-monospace,Menlo,monospace">Hooks + CLI Statusline</text>
+  <text x="56" y="176" fill="#64748B" font-size="10" font-family="ui-monospace,Menlo,monospace">Guard · Loop Guard · &lt;5ms Bar</text>
 
   <rect x="44" y="192" width="198" height="72" rx="7" fill="#FFFFFF" stroke="#0284C7" stroke-opacity="0.5"/>
-  <text x="56" y="212" fill="#0F172A" font-size="11.5" font-weight="700" font-family="ui-monospace,Menlo,monospace">Sidecar Aux Pane UI</text>
-  <text x="56" y="228" fill="#475569" font-size="10" font-family="system-ui,sans-serif">Simple Mode + Pro Flamegraph</text>
-  <text x="56" y="244" fill="#16A34A" font-size="10" font-family="ui-monospace,Menlo,monospace">240s Cache · Usage · 1-Click Undo</text>
+  <text x="56" y="212" fill="#0F172A" font-size="11.5" font-weight="700" font-family="ui-monospace,Menlo,monospace">Hyper Deck Sidecar UI</text>
+  <text x="56" y="228" fill="#475569" font-size="10" font-family="system-ui,sans-serif">Empirical TTL · X-Ray · Burn Audit</text>
+  <text x="56" y="244" fill="#16A34A" font-size="10" font-family="ui-monospace,Menlo,monospace">Inline WAL Diff · 1-Click Undo</text>
 
   <path d="M258 115H306M258 163H306M258 228H306" stroke="#0284C7" stroke-width="1.75" stroke-dasharray="4 3"/>
   <polygon points="312,115 304,111 304,119" fill="#0284C7"/>
@@ -47,12 +47,12 @@
     <text x="222" y="36" fill="#475569" font-size="10">AST outline + &lt;1ms syntax check</text>
 
     <rect x="0" y="58" width="198" height="48" rx="8" fill="#FFFFFF" stroke="#CBD5E1"/>
-    <text x="12" y="78" fill="#15803D" font-weight="700">BLAKE3 WAL Atomic Edit</text>
-    <text x="12" y="94" fill="#475569" font-size="10">ETag CAS · ENOSPC-proof fsync</text>
+    <text x="12" y="78" fill="#15803D" font-weight="700">BLAKE3 WAL + Inline Diff</text>
+    <text x="12" y="94" fill="#475569" font-size="10">Pre/Post blobs · Unified Diff</text>
 
     <rect x="210" y="58" width="198" height="48" rx="8" fill="#FFFFFF" stroke="#CBD5E1"/>
-    <text x="222" y="78" fill="#B45309" font-weight="700">gix Read-Only Git</text>
-    <text x="222" y="94" fill="#475569" font-size="10">No CLI forks · Zero mutations</text>
+    <text x="222" y="78" fill="#B45309" font-weight="700">Burn Audit + gix Git</text>
+    <text x="222" y="94" fill="#475569" font-size="10">TTL cliffs · Shareable SVG card</text>
 
     <rect x="0" y="116" width="408" height="48" rx="8" fill="#FFFFFF" stroke="#CBD5E1"/>
     <text x="12" y="136" fill="#DC2626" font-weight="700">Hardened Sandbox · realpath Jail · Head64K+Tail512K</text>

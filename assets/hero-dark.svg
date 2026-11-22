@@ -32,8 +32,8 @@
   <!-- Wordmark + Tagline -->
   <text x="164" y="114" fill="#F8FAFC" font-size="48" font-weight="800" letter-spacing="-1.5" font-family="system-ui,-apple-system,'Segoe UI',sans-serif">AGY HYPER</text>
   <rect x="458" y="83" width="66" height="24" rx="12" fill="#0EA5E9" fill-opacity="0.16" stroke="#38BDF8" stroke-opacity="0.5"/>
-  <text x="491" y="99" text-anchor="middle" fill="#38BDF8" font-size="12" font-weight="700" font-family="ui-monospace,SFMono-Regular,Menlo,monospace">v0.3.0</text>
-  <text x="164" y="148" fill="#94A3B8" font-size="17" font-weight="500" font-family="system-ui,-apple-system,sans-serif">Stop paying the 6-second TTFT tax. Turn Antigravity into a native Rust cockpit.</text>
+  <text x="491" y="99" text-anchor="middle" fill="#38BDF8" font-size="12" font-weight="700" font-family="ui-monospace,SFMono-Regular,Menlo,monospace">v0.4.0</text>
+  <text x="164" y="148" fill="#94A3B8" font-size="17" font-weight="500" font-family="system-ui,-apple-system,sans-serif">Zero-intrusion telemetry cockpit + opt-in native Rust accelerator for Antigravity.</text>
 
   <!-- Spec Pills -->
   <g transform="translate(56, 196)" font-family="ui-monospace,SFMono-Regular,Menlo,monospace" font-size="12" font-weight="600">
@@ -54,7 +54,7 @@
     <text x="473" y="19" fill="#E2E8F0">gix Read-Only</text>
   </g>
 
-  <text x="56" y="274" fill="#64748B" font-size="12.5" font-family="ui-monospace,SFMono-Regular,Menlo,monospace">Zero rg/Python/Node hook deps · Native Sidecar Aux Pane UI · ENOSPC-proof atomic rollback · MIT</text>
+  <text x="56" y="274" fill="#64748B" font-size="12.5" font-family="ui-monospace,SFMono-Regular,Menlo,monospace">Layered Observe/Safe/Balanced/Hyper · Inline WAL Diff · Empirical TTL · Burn Audit SVG · MIT</text>
 
   <!-- Right Panel: Live Latency Anatomy Telemetry Card -->
   <g transform="translate(690, 56)">

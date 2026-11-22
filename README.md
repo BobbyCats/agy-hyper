@@ -52,12 +52,12 @@ Even if you never touch systems programming, three everyday comparisons tell the
 No Rust toolchain, no `ripgrep`, no Python, no `git` CLI required. Release archives are **SHA-256 verified** before atomic swap and never touch `~/.gemini/config/config.json`.
 
 ```bash
-# macOS & Linux
+# macOS & Linux (default Balanced mode; add `-s -- --observe` for zero-intrusion cockpit only)
 curl -fsSL https://raw.githubusercontent.com/BobbyCats/agy-hyper/main/install.sh | bash
 ```
 
 ```powershell
-# Windows (PowerShell)
+# Windows (PowerShell; set `$env:AGY_HYPER_OBSERVE="1"` before install for Observe-only mode)
 irm https://raw.githubusercontent.com/BobbyCats/agy-hyper/main/install.ps1 | iex
 ```
 
@@ -76,6 +76,7 @@ Switch back to Antigravity and everything activates automatically. You can also 
 
 ```bash
 agy-hyper doctor                  # verify Tree-sitter grammars, gix, daemon RTT & security posture
+agy-hyper audit --svg audit.svg   # run 14d local burn audit & export a shareable SVG diagnostic card
 agy-hyper usage --window 7d       # view 24h / 7d / 30d / 90d tokens & API-equivalent value
 agy-hyper bench --cache-ttl       # inspect empirical per-model prompt-cache TTL decay curves
 agy-hyper cli-setup               # print (or --apply) Antigravity CLI statusLine & title config
@@ -84,47 +85,62 @@ agy-hyper ui                      # launch AGY Hyper Deck standalone at http://1
 
 ---
 
+## Local Burn Audit Card (`agy-hyper audit`)
+
+Run `agy-hyper audit --days 14 --svg audit-card.svg` to audit your own Antigravity transcripts 100% locally (zero cloud uploads). It surfaces empirical per-model cache TTL cliffs, uncached input spend, pre-edit context bloat, blanket-read turns, and an unadjusted local cohort view in a crisp shareable SVG card:
+
+<div align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="./assets/audit-card-dark.svg">
+    <source media="(prefers-color-scheme: light)" srcset="./assets/audit-card-light.svg">
+    <img src="./assets/audit-card-dark.svg" alt="AGY Hyper Local Telemetry Burn Audit Card" width="100%"/>
+  </picture>
+</div>
+
+---
+
 ## AGY Hyper Deck (Native Sidecar Cockpit)
 
 Docked directly in Antigravity's auxiliary pane via `SIDECAR_UI_ENTRYPOINT_AUX_PANE`, powered 100% offline by **Apache ECharts 6** and **i18next** (`English / 简体中文 / 日本語`, zero CDN). Luminance-synced with your host Light/Dark theme.
 
-- **Simple Mode** keeps daily essentials front and center: context level, Turn P50, step vs. session cache hit rate, linked subagent tree strip (highlighting active redlines and `STALLED` subagents silent `>=90s`), session/tree usage ribbon with quick currency switch, **auto-calibrated per-model cache warmth bar** (empirical vs. default TTL badge, loop-guard alerts, post-`/compact` & cross-model hints), safety profile, and 1-click WAL Undo.
-- **Pro Mode** opens five deep telemetry tabs: **Waterfall** (disjoint LLM vs. Hyper vs. Standard spans), **Context** (dual-axis cached/uncached curve + **Context X-Ray** composition bar with first-edit token load and blanket-read count), **Usage** (`24H / 7D / 30D / 90D` incremental ledger across 8 currencies with manual **Sync FX**), **Engine** (AST/pack cache hits & live switches), and **WAL & Audit**.
+- **Layered Zero-Intrusion Design**: start in **Observe** mode (read-only cockpit + burn audit + passive WAL capture; native tools & diff cards untouched), switch to **Safe** (bundled reads & preset checks while keeping native `edit_file` inline diffs), or unlock **Balanced / Hyper** full Rust MCP acceleration — plus granular per-tool toggles (`MCP Read`, `MCP Edit`, `MCP Check`) under **Engine**.
+- **Simple Mode** keeps daily essentials front and center: context level, Turn P50, step vs. session cache hit rate, linked subagent tree strip (highlighting active redlines and `STALLED` subagents silent `>=90s`), session/tree usage ribbon with quick currency switch, **auto-calibrated per-model cache warmth bar** (empirical vs. default TTL badge & loop-guard alerts), 4-mode layered profile switch, and **inline WAL Unified Diff preview + 1-click Undo**.
+- **Pro Mode** opens five deep telemetry tabs: **Waterfall** (disjoint LLM vs. Hyper vs. Standard spans), **Context** (dual-axis cached/uncached curve + **Context X-Ray** composition bar with first-edit token load and blanket-read count), **Usage** (`24H / 7D / 30D / 90D` incremental ledger across 8 currencies, manual **Sync FX**, plus **Local Burn Audit & TTL Cliffs** with 1-click `.svg` card export), **Engine** (AST/pack cache hits & granular MCP layer switches), and **WAL & Audit**.
 
 <div align="center">
 <table>
   <tr>
     <td align="center" width="50%">
-      <strong>Simple · Subagent Tree, Context &amp; Instant Undo (Dark)</strong><br/>
-      <sub>Linked subagents · Auto-calibrated cache bar · Tree value ribbon · 1-click WAL Undo</sub><br/><br/>
+      <strong>Simple · Empirical TTL, 4-Mode Switch &amp; Inline WAL Diff (Dark)</strong><br/>
+      <sub>~180s empirical TTL · Observe/Safe/Balanced/Hyper · Expandable Unified Diff &amp; 1-click Undo</sub><br/><br/>
       <img src="./assets/cockpit-simple-dark.png" alt="AGY Hyper Deck Simple Dark" width="100%"/>
     </td>
     <td align="center" width="50%">
-      <strong>Simple · Compacted State &amp; Engine Takeover (Light · 中文)</strong><br/>
-      <sub>Post-/compact confirmation · Hyper adoption · Native i18next</sub><br/><br/>
+      <strong>Simple · Clean Light Cockpit &amp; Delta Chips (Light)</strong><br/>
+      <sub>Luminance-synced light theme · Empirical warmth bar · Native i18next</sub><br/><br/>
       <img src="./assets/cockpit-simple-light.png" alt="AGY Hyper Deck Simple Light" width="100%"/>
     </td>
   </tr>
   <tr>
     <td align="center" width="50%">
-      <strong>Pro · 24H–90D Multi-Currency Usage Ledger (中文)</strong><br/>
-      <sub>Incremental local ledger · 8 currencies · Cache savings · Manual Sync FX</sub><br/><br/>
-      <img src="./assets/cockpit-usage-dark.png" alt="AGY Hyper Deck Usage Ledger" width="100%"/>
+      <strong>Pro · Usage Ledger, Burn Audit &amp; Model TTL Cliffs</strong><br/>
+      <sub>Multi-currency ledger · Empirical TTL pills · Top findings · 1-click Export Card (.svg)</sub><br/><br/>
+      <img src="./assets/cockpit-usage-dark.png" alt="AGY Hyper Deck Usage Ledger and Burn Audit" width="100%"/>
     </td>
     <td align="center" width="50%">
-      <strong>Pro · Turn Execution Waterfall (Dark)</strong><br/>
-      <sub>Disjoint LLM vs Hyper vs Standard tool spans · P50 / P90 · Paired TPS</sub><br/><br/>
-      <img src="./assets/cockpit-pro-dark.png" alt="AGY Hyper Deck Pro Waterfall" width="100%"/>
+      <strong>Pro · Context Efficiency &amp; Context X-Ray Composition</strong><br/>
+      <sub>Dual-axis cached/uncached curve · Post-compact X-Ray · 1st-edit load &amp; blanket-read count</sub><br/><br/>
+      <img src="./assets/cockpit-context-dark.png" alt="AGY Hyper Deck Context X-Ray" width="100%"/>
     </td>
   </tr>
 </table>
 </div>
 
 <details>
-<summary><strong>More Views: Pro Dual-Axis Context &amp; Cache Efficiency Curve</strong></summary>
+<summary><strong>More Views: Pro Turn-by-Turn Execution Waterfall</strong></summary>
 <br/>
 <div align="center">
-  <img src="./assets/cockpit-context-dark.png" alt="AGY Hyper Deck Pro Context Curve" width="520"/>
+  <img src="./assets/cockpit-pro-dark.png" alt="AGY Hyper Deck Pro Waterfall" width="520"/>
 </div>
 </details>
 
@@ -199,14 +215,17 @@ Reproduce on your own repository:
 agy-hyper doctor                                # Tree-sitter, gix, daemon RTT & security self-check
 agy-hyper daemon start|stop|status              # Manage the shared local Rust daemon
 agy-hyper ui [--port 47821]                     # Launch AGY Hyper Deck standalone in browser
+agy-hyper audit [--days 14] [--sessions 80] [--svg card.svg] [--theme dark|light] [--json]
 agy-hyper usage [--window 24h|7d|30d|90d] [--currency CNY] [--json]
 agy-hyper bench [--sessions 10] [--svg waterfall.svg] [--cache-ttl] [--json]
 agy-hyper statusline [--format compact|rich|json] [--title] [--no-color]
 agy-hyper cli-setup [--apply] [--format compact|rich]  # Print or opt-in apply Antigravity CLI statusLine & title config
 agy-hyper tx list                               # Inspect BLAKE3 WAL transaction ledger
+agy-hyper tx diff <tx_id> [--json]              # Print line-level Unified Diff for any WAL transaction
 agy-hyper tx rollback <tx_id> [--force]         # Atomically restore files to pre-edit bytes
 agy-hyper config show                           # Print active configuration
-agy-hyper config profile safe|balanced|hyper    # Switch safety & pre-warm mode
+agy-hyper config profile observe|safe|balanced|hyper    # Switch layered cockpit / MCP acceleration mode
+agy-hyper config toggle enable_mcp_read|enable_mcp_edit|enable_mcp_check true|false
 agy-hyper config currency USD|CNY|JPY|EUR|GBP|HKD|SGD|KRW
 agy-hyper config fx <CODE> <RATE_PER_USD>       # Set custom offline FX override
 ```
