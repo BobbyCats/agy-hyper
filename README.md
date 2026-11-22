@@ -59,6 +59,8 @@ irm https://raw.githubusercontent.com/BobbyCats/agy-hyper/main/install.ps1 | iex
 git clone https://github.com/BobbyCats/agy-hyper.git && cd agy-hyper && ./install.sh --observe
 ```
 
+> **Works standalone or alongside `agy-fast`**: Already using `agy-fast` or another MCP accelerator? Keep it — install AGY Hyper in `--observe` mode to run side by side with zero tool-call overlap, while adding live cache-TTL countdowns, 10-second local burn audits, Context X-Ray, and passive WAL file undo.
+
 ### Antigravity CLI (`agy`) Support
 
 Verified end-to-end on **`agy v1.5.14`** (`agy plugin validate --strict` passes with 0 warnings; scans `~/.gemini/{antigravity,antigravity-ide,antigravity-cli}/brain/`):
@@ -279,11 +281,22 @@ $env:AGY_HYPER_UNINSTALL = "1"; $env:AGY_HYPER_PURGE = "1"; irm https://raw.gith
 
 ---
 
-## Contributing & Acknowledgments
+## Author, Contributing & License
 
-- **MIT Licensed & PRs Welcome**: AGY Hyper is 100% open source under the **MIT License** — free for personal and commercial use on any work machine. Contributions for additional Tree-sitter grammars, preset runners, translations, and Windows/Linux testing are very welcome; see [CONTRIBUTING.md](./CONTRIBUTING.md) to get started.
+Built in public by **BobbyCat** ([`@BobbyCat2025` on X](https://x.com/BobbyCat2025) · [GitHub](https://github.com/BobbyCats)). If AGY Hyper helped you spot a hidden quota drain (or saved a late-night refactor with 1-click WAL Undo), come say hi on X — I share Rust AI tooling, Antigravity workflow breakdowns, and the empirical logs behind them.
+
+<details>
+<summary>☕ <strong>Enjoying AGY Hyper? Buy Me a Coffee (WeChat Tip QR)</strong></summary>
+<br/>
+<div align="center">
+  <img src="./assets/wechat-coffee.png" alt="Buy BobbyCat a coffee via WeChat" width="300"/>
+</div>
+</details>
+
+<br/>
+
+- **MIT Licensed & PRs Welcome**: AGY Hyper is 100% open source under the [MIT License](./LICENSE) — free for personal and commercial use on any work machine. Contributions for additional Tree-sitter grammars, preset runners, translations, and Windows/Linux testing are very welcome; see [CONTRIBUTING.md](./CONTRIBUTING.md).
 - **Acknowledgments**: Initial exploration into Antigravity latency optimization was sparked by [INK-Q/agy-fast](https://github.com/INK-Q/agy-fast). Big thanks to the open-source community for pushing AI tooling forward.
-- **Stay Connected**: Built in public by [@BobbyCat2025](https://x.com/BobbyCat2025). Follow on X for Rust AI tooling, Antigravity workflow breakdowns, and release updates: [x.com/BobbyCat2025](https://x.com/BobbyCat2025).
 
 ---
 

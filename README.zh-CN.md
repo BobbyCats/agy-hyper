@@ -59,6 +59,8 @@ irm https://raw.githubusercontent.com/BobbyCats/agy-hyper/main/install.ps1 | iex
 git clone https://github.com/BobbyCats/agy-hyper.git && cd agy-hyper && ./install.sh --observe
 ```
 
+> **可独立全包，也可与 `agy-fast` 无缝共存**：如果你已经装了 `agy-fast` 或其他 MCP 加速插件，完全不用二选一——直接用 `--observe` 模式叠装 AGY Hyper，零工具拦截冲突，原地补齐实时缓存保鲜侧边栏、10 秒本机烧额度体检卡、上下文 X-Ray 与被动 WAL 改文件一键撤回。
+
 ### Antigravity CLI（`agy`）完整支持
 
 已在真机 **`agy v1.5.14`** 端到端实测跑通（`agy plugin validate --strict` 0 警告通过，自动扫描 `~/.gemini/{antigravity,antigravity-ide,antigravity-cli}/brain/`）：
@@ -279,11 +281,22 @@ $env:AGY_HYPER_UNINSTALL = "1"; $env:AGY_HYPER_PURGE = "1"; irm https://raw.gith
 
 ---
 
-## 参与共建与开源致谢
+## 关于作者、参与共建与开源致谢
 
-- **欢迎提 PR**：本项目采用完全开放的 **MIT 协议**（个人与企业工作电脑均可免费使用）。无论是新增 Tree-sitter 语言语法（C/C++/Java/Swift），补充构建 Preset 和多语言翻译，还是在 Windows / Linux 上提交实测反馈，都欢迎直接提 Issue 或 Pull Request。起步指引见 [CONTRIBUTING.md](./CONTRIBUTING.md)。
+作者 **BobbyCat**（X：[`@BobbyCat2025`](https://x.com/BobbyCat2025) · [GitHub](https://github.com/BobbyCats)）。如果 AGY Hyper 帮你揪出了莫名掉额度的真凶，或者在半夜改歪代码时靠一键 WAL Undo 救了场，欢迎来 X 找我交流——我平时会持续分享 Rust AI 工具、Antigravity 实战拆解以及背后的真实日志数据。
+
+<details>
+<summary>☕ <strong>如果 AGY Hyper 帮到你了，欢迎请我喝杯咖啡（Buy Me a Coffee · 微信赞赏）</strong></summary>
+<br/>
+<div align="center">
+  <img src="./assets/wechat-coffee.png" alt="请 BobbyCat 喝杯咖啡（微信赞赏码）" width="300"/>
+</div>
+</details>
+
+<br/>
+
+- **欢迎提 PR**：本项目采用完全开放的 [MIT 协议](./LICENSE)（个人与企业工作电脑均可免费使用）。无论是新增 Tree-sitter 语言语法（C/C++/Java/Swift），补充构建 Preset 和多语言翻译，还是在 Windows / Linux 上提交实测反馈，都欢迎直接提 Issue 或 Pull Request，起步指引见 [CONTRIBUTING.md](./CONTRIBUTING.md)。
 - **开源致谢**：本项目的探索缘起于 [INK-Q/agy-fast](https://github.com/INK-Q/agy-fast) 对 Antigravity 延迟与工具链路加速的先行尝试，感谢开源社区提供的启发。
-- **关注作者**：AGY Hyper 由 [@BobbyCat2025](https://x.com/BobbyCat2025) 持续开源迭代。如果你对 Rust 工程提效、Antigravity 实战玩法以及 AI 工具拆解感兴趣，欢迎在 X 上关注交流：[x.com/BobbyCat2025](https://x.com/BobbyCat2025)。
 
 ---
 
