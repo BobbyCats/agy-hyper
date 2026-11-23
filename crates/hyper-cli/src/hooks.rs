@@ -2,7 +2,7 @@ use anyhow::Result;
 use hyper_core::config::HyperConfig;
 use hyper_core::git::quick_head;
 use hyper_core::runner::discover_presets;
-use hyper_core::sessions::is_subagent_conversation;
+use hyper_core::sessions::{discover_active_child_sessions, lookup_session_role};
 use hyper_core::transcript::{
     inspect_transcript_tail, resolve_transcript_path, HealthLevel, TranscriptPulse,
 };
@@ -13,6 +13,7 @@ use serde_json::{json, Value};
 use std::fs;
 use std::io::{self, Read};
 use std::path::{Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 fn read_stdin_json() -> Value {
     let mut raw = String::new();
@@ -148,6 +149,9 @@ pub fn run_session_start() -> Result<()> {
     Ok(())
 }
 
+const CHILD_STALLED_IDLE_SECS: u64 = 90;
+const CHILD_ERROR_LOOP_ALERT_STREAK: u32 = 3;
+
 #[derive(Debug, Default, Serialize, Deserialize)]
 struct GuardState {
     last_warned_step: i64,
@@ -156,34 +160,168 @@ struct GuardState {
     total_tokens: u64,
     #[serde(default)]
     last_health: Option<HealthLevel>,
+    #[serde(default)]
+    last_child_alert_step: i64,
+    #[serde(default)]
+    last_child_alert_sig: String,
 }
 
-fn build_loop_guard_payload(pulse: &TranscriptPulse) -> Value {
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ChildSubagentAlert {
+    conversation_id: String,
+    agent_name: String,
+    title: String,
+    consecutive_error_streak: u32,
+    last_error_summary: Option<String>,
+    idle_secs: u64,
+    stalled: bool,
+}
+
+fn is_non_code_subagent(agent_name: &str) -> bool {
+    let lower = agent_name.trim().to_ascii_lowercase();
+    lower == "browser" || lower == "image-generator"
+}
+
+fn collect_active_child_alerts(parent_conv_id: &str, cfg: &HyperConfig) -> Vec<ChildSubagentAlert> {
+    let children = discover_active_child_sessions(parent_conv_id);
+    if children.is_empty() {
+        return Vec::new();
+    }
+    let now_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+
+    let mut alerts = Vec::new();
+    for child in children {
+        let idle_secs = now_ms.saturating_sub(child.mtime_ms) / 1000;
+        let pulse = inspect_transcript_tail(&child.transcript_path, cfg);
+        let streak = pulse
+            .as_ref()
+            .map(|p| p.consecutive_error_streak)
+            .unwrap_or(0);
+        let last_err = pulse.and_then(|p| p.repeat_error_signature);
+        let is_loop = streak >= CHILD_ERROR_LOOP_ALERT_STREAK;
+        let is_stalled = !is_loop && idle_secs >= CHILD_STALLED_IDLE_SECS;
+        if is_loop || is_stalled {
+            alerts.push(ChildSubagentAlert {
+                conversation_id: child.conversation_id,
+                agent_name: child.agent_name,
+                title: child.title,
+                consecutive_error_streak: streak,
+                last_error_summary: last_err,
+                idle_secs,
+                stalled: is_stalled,
+            });
+        }
+    }
+    alerts
+}
+
+fn child_alerts_signature(alerts: &[ChildSubagentAlert]) -> String {
+    alerts
+        .iter()
+        .take(3)
+        .map(|a| {
+            let short_id = &a.conversation_id[..a.conversation_id.len().min(8)];
+            if a.consecutive_error_streak >= CHILD_ERROR_LOOP_ALERT_STREAK {
+                format!("{}:loop{}", short_id, a.consecutive_error_streak)
+            } else {
+                format!("{}:stalled", short_id)
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
+fn format_child_watchdog_message(alerts: &[ChildSubagentAlert]) -> Option<String> {
+    if alerts.is_empty() {
+        return None;
+    }
+    let parts: Vec<String> = alerts
+        .iter()
+        .take(3)
+        .map(|a| {
+            let role = if a.agent_name.trim().is_empty() {
+                "subagent"
+            } else {
+                a.agent_name.trim()
+            };
+            let short_id = &a.conversation_id[..a.conversation_id.len().min(8)];
+            let label = if a.title.trim().is_empty() || a.title.contains(short_id) {
+                format!("{} #{}", role, short_id)
+            } else {
+                format!("{} #{} (\"{}\")", role, short_id, a.title.trim())
+            };
+            if a.consecutive_error_streak >= CHILD_ERROR_LOOP_ALERT_STREAK {
+                let err_detail = a
+                    .last_error_summary
+                    .as_deref()
+                    .filter(|s| !s.trim().is_empty())
+                    .map(|s| format!(": {}", s))
+                    .unwrap_or_default();
+                format!(
+                    "{} [{} consecutive errors{}]",
+                    label, a.consecutive_error_streak, err_detail
+                )
+            } else {
+                format!("{} [silent {}s]", label, a.idle_secs)
+            }
+        })
+        .collect();
+    Some(format!(
+        "[AGY Hyper Subagent Watchdog] Active child subagent(s) appear unhealthy: {}. Inspect state via manage_subagents or the child transcript; if stuck in a retry loop, consider killing and replacing with a narrower fresh subagent. Surface [Open Hyper Deck](sidecar://agy-hyper/hyper_deck/) if the user wants live subagent status or one-click rescue prompts.",
+        parts.join("; ")
+    ))
+}
+
+fn build_loop_guard_message(pulse: &TranscriptPulse, is_subagent: bool, agent_name: &str) -> String {
     let sig_note = pulse
         .repeat_error_signature
         .as_deref()
         .filter(|s| !s.trim().is_empty())
         .map(|s| format!(" (`{}`)", s))
         .unwrap_or_default();
-    let sys_msg = format!(
-        "[AGY Hyper Loop Guard] Detected {} consecutive error steps{}. Stop repeating the same failing command or edit blindly: inspect the concrete error output, verify assumptions or file state once, and pivot strategy.",
-        pulse.consecutive_error_streak, sig_note
-    );
+    if is_subagent && is_non_code_subagent(agent_name) {
+        format!(
+            "[AGY Hyper Loop Guard · Subagent] Detected {} consecutive error steps{}. Stop repeating the failing action blindly: capture the blocker concisely and report back via send_message so the parent agent can split or retry cleanly.",
+            pulse.consecutive_error_streak, sig_note
+        )
+    } else if is_subagent {
+        format!(
+            "[AGY Hyper Loop Guard · Subagent] Detected {} consecutive error steps{}. Stop repeating the same failing step blindly: inspect the concrete error once, pivot strategy, or report the blocker back via send_message.",
+            pulse.consecutive_error_streak, sig_note
+        )
+    } else {
+        format!(
+            "[AGY Hyper Loop Guard] Detected {} consecutive error steps{}. Stop repeating the same failing command or edit blindly: inspect the concrete error output, verify assumptions or file state once, and pivot strategy.",
+            pulse.consecutive_error_streak, sig_note
+        )
+    }
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
+fn build_loop_guard_payload(pulse: &TranscriptPulse) -> Value {
     json!({
         "injectSteps": [{
             "systemMessage": {
-                "systemMessage": sys_msg
+                "systemMessage": build_loop_guard_message(pulse, false, "")
             }
         }]
     })
 }
 
-fn build_guard_payload(
+fn build_guard_message(
     pulse: &TranscriptPulse,
     cfg: &HyperConfig,
     is_subagent: bool,
+    agent_name: &str,
     is_code_ws: bool,
-) -> Value {
+) -> String {
+    if pulse.health_reason == "error_loop" && pulse.total_tokens < pulse.effective_yellow_tokens {
+        return build_loop_guard_message(pulse, is_subagent, agent_name);
+    }
+
     let total_k = (pulse.total_tokens as f64 / 1000.0 * 10.0).round() / 10.0;
     let effective_red = if pulse.effective_red_tokens > 0 {
         pulse.effective_red_tokens
@@ -200,11 +338,22 @@ fn build_guard_payload(
 
     if pulse.health == HealthLevel::Red {
         let mut tags = Vec::new();
+        if pulse.consecutive_error_streak >= 2 {
+            let sig = pulse
+                .repeat_error_signature
+                .as_deref()
+                .map(|s| format!(" ({})", s))
+                .unwrap_or_default();
+            tags.push(format!(
+                "{} consecutive errors{}",
+                pulse.consecutive_error_streak, sig
+            ));
+        }
         if pulse.recent_timeouts > 0 {
             tags.push(format!("{} stream timeout(s)", pulse.recent_timeouts));
         }
         if pulse.recent_resets > 0 {
-            tags.push(format!("{} proxy reset(s)", pulse.recent_resets));
+            tags.push(format!("{} transport reset(s)", pulse.recent_resets));
         }
         if pulse.multimodal_cliff_risk {
             tags.push("multimodal >180k cliff".into());
@@ -215,10 +364,20 @@ fn build_guard_payload(
             format!(" · {}", tags.join(", "))
         };
 
-        let sys_msg = if is_subagent {
+        return if is_subagent && is_non_code_subagent(agent_name) {
             format!(
-                "[AGY Hyper Redline Guard · Subagent] Reason={} · context={}k/{}k tokens (step {}, cache {}%{}{}). Strictly: (1) stop broad file scans; (2) finish active edits and run concise sync verification via hyper_check if needed; (3) return a compact result via send_message to the parent agent immediately.",
+                "[AGY Hyper Redline Guard · Subagent] Reason={} · context={}k/{}k tokens (step {}, cache {}%{}{}). Strictly: (1) avoid redundant full-page captures or retry loops; (2) finish the current atomic step cleanly; (3) return a compact result via send_message to the parent agent immediately so remaining work can be split.",
                 pulse.health_reason, total_k, red_k, pulse.max_step, cache_pct, model_tag, extra
+            )
+        } else if is_subagent {
+            let verify_tip = if cfg.enable_mcp_check {
+                "finish active edits and run concise sync verification via hyper_check if needed"
+            } else {
+                "finish active edits and run concise verification if needed"
+            };
+            format!(
+                "[AGY Hyper Redline Guard · Subagent] Reason={} · context={}k/{}k tokens (step {}, cache {}%{}{}). Strictly: (1) stop broad file scans; (2) {}; (3) return a compact result via send_message to the parent agent immediately.",
+                pulse.health_reason, total_k, red_k, pulse.max_step, cache_pct, model_tag, extra, verify_tip
             )
         } else if is_code_ws && cfg.any_mcp_accel_enabled() {
             let read_tip = if cfg.enable_mcp_read {
@@ -241,20 +400,12 @@ fn build_guard_payload(
                 pulse.health_reason, total_k, red_k, pulse.max_step, cache_pct, model_tag, extra
             )
         };
-
-        return json!({
-            "injectSteps": [{
-                "systemMessage": {
-                    "systemMessage": sys_msg
-                }
-            }]
-        });
     }
 
     let mut hints = Vec::new();
     if pulse.health_reason == "proxy_reset" {
         hints.push(format!(
-            "{} recent TCP proxy reset(s) detected — keep tool outputs compact",
+            "{} recent transport reset(s) detected — keep tool outputs compact",
             pulse.recent_resets
         ));
     }
@@ -266,6 +417,12 @@ fn build_guard_payload(
     }
     if pulse.multimodal_cliff_risk {
         hints.push("multimodal image context >180k detected (avoid attaching redundant images)".into());
+    }
+    if is_subagent && pulse.checkpoint_count >= 2 {
+        hints.push(format!(
+            "{} auto-checkpoints in this subagent — prefer wrapping up via send_message rather than stretching one subagent across long loops",
+            pulse.checkpoint_count
+        ));
     }
     if pulse.cache_is_cold {
         let ttl_secs = if pulse.effective_cache_ttl_secs >= 30 {
@@ -290,10 +447,15 @@ fn build_guard_payload(
         format!(" Notes: {}.", hints.join("; "))
     };
 
-    let sys_msg = if pulse.health_reason == "proxy_reset" || pulse.health_reason == "stream_timeout" {
+    if pulse.health_reason == "proxy_reset" || pulse.health_reason == "stream_timeout" {
         format!(
             "[AGY Hyper Guard] Transient transport warning ({}) at {}k/{}k tokens (step {}, cache {}%{}).{}",
             pulse.health_reason, total_k, red_k, pulse.max_step, cache_pct, model_tag, hint_suffix
+        )
+    } else if is_subagent && is_non_code_subagent(agent_name) {
+        format!(
+            "[AGY Hyper Guard · Subagent] Context at {}k/{}k tokens (step {}, cache {}%{}). Keep actions batched, avoid redundant screenshots, and prepare to report back via send_message before {}k.{}",
+            total_k, red_k, pulse.max_step, cache_pct, model_tag, red_k, hint_suffix
         )
     } else if is_subagent {
         format!(
@@ -322,18 +484,26 @@ fn build_guard_payload(
             "[AGY Hyper Guard] Context at {}k/{}k tokens (step {}, cache {}%{}). Keep tool outputs concise and batch reads to stay under {}k.{}",
             total_k, red_k, pulse.max_step, cache_pct, model_tag, red_k, hint_suffix
         )
-    };
+    }
+}
 
+#[cfg_attr(not(test), allow(dead_code))]
+fn build_guard_payload(
+    pulse: &TranscriptPulse,
+    cfg: &HyperConfig,
+    is_subagent: bool,
+    is_code_ws: bool,
+) -> Value {
     json!({
         "injectSteps": [{
             "systemMessage": {
-                "systemMessage": sys_msg
+                "systemMessage": build_guard_message(pulse, cfg, is_subagent, "", is_code_ws)
             }
         }]
     })
 }
 
-/// Sub-2ms native Rust `PreInvocation` context, cache-cliff & timeout guard.
+/// Sub-2ms native Rust `PreInvocation` context, cache-cliff, timeout & subagent watchdog guard.
 pub fn run_pre_invocation() -> Result<()> {
     let payload = read_stdin_json();
     let cfg = HyperConfig::load();
@@ -354,8 +524,16 @@ pub fn run_pre_invocation() -> Result<()> {
         return Ok(());
     };
 
+    let (is_subagent, agent_name) = lookup_session_role(conv_id);
+    let child_alerts = if !is_subagent && !conv_id.is_empty() {
+        collect_active_child_alerts(conv_id, &cfg)
+    } else {
+        Vec::new()
+    };
+
     let has_loop_streak = pulse.consecutive_error_streak >= 2;
-    if pulse.health == HealthLevel::Green && !has_loop_streak {
+    let self_alert_eligible = pulse.health != HealthLevel::Green || has_loop_streak;
+    if !self_alert_eligible && child_alerts.is_empty() {
         println!("{{}}");
         return Ok(());
     }
@@ -369,62 +547,84 @@ pub fn run_pre_invocation() -> Result<()> {
         .unwrap_or_default();
 
     let step_i64 = pulse.max_step as i64;
+    let mut next_state = GuardState {
+        last_warned_step: prev.last_warned_step,
+        last_loop_warned_step: prev.last_loop_warned_step,
+        total_tokens: pulse.total_tokens,
+        last_health: prev.last_health,
+        last_child_alert_step: prev.last_child_alert_step,
+        last_child_alert_sig: prev.last_child_alert_sig.clone(),
+    };
 
-    if pulse.health == HealthLevel::Green && has_loop_streak {
-        if (step_i64 - prev.last_loop_warned_step) < 3 {
-            println!("{{}}");
-            return Ok(());
+    let mut messages: Vec<String> = Vec::new();
+
+    if self_alert_eligible {
+        let is_pure_loop =
+            pulse.health_reason == "error_loop" && pulse.total_tokens < pulse.effective_yellow_tokens;
+        if is_pure_loop || (pulse.health == HealthLevel::Green && has_loop_streak) {
+            if (step_i64 - prev.last_loop_warned_step) >= 3
+                || (pulse.health == HealthLevel::Red && prev.last_health != Some(HealthLevel::Red))
+            {
+                next_state.last_loop_warned_step = step_i64;
+                next_state.last_health = Some(pulse.health);
+                messages.push(build_loop_guard_message(&pulse, is_subagent, &agent_name));
+            }
+        } else {
+            let escalated_to_red =
+                pulse.health == HealthLevel::Red && prev.last_health != Some(HealthLevel::Red);
+            let min_step_gap = if pulse.recent_timeouts > 0 || has_loop_streak {
+                4
+            } else {
+                10
+            };
+            if (step_i64 - prev.last_warned_step) >= min_step_gap || escalated_to_red {
+                next_state.last_warned_step = step_i64;
+                if has_loop_streak {
+                    next_state.last_loop_warned_step = step_i64;
+                }
+                next_state.last_health = Some(pulse.health);
+                let ws_str = extract_workspace_str(&payload);
+                let code_ws = if ws_str.is_empty() {
+                    false
+                } else {
+                    is_code_workspace(Path::new(ws_str))
+                };
+                messages.push(build_guard_message(
+                    &pulse,
+                    &cfg,
+                    is_subagent,
+                    &agent_name,
+                    code_ws,
+                ));
+            }
         }
-        let _ = fs::create_dir_all(&state_dir);
-        let _ = fs::write(
-            &state_file,
-            serde_json::to_vec(&GuardState {
-                last_warned_step: prev.last_warned_step,
-                last_loop_warned_step: step_i64,
-                total_tokens: pulse.total_tokens,
-                last_health: prev.last_health,
-            })
-            .unwrap_or_default(),
-        );
-        prune_guard_state(&state_dir, 50);
-        let out = build_loop_guard_payload(&pulse);
-        println!("{}", serde_json::to_string(&out)?);
-        return Ok(());
     }
 
-    let escalated_to_red =
-        pulse.health == HealthLevel::Red && prev.last_health != Some(HealthLevel::Red);
-    let min_step_gap = if pulse.recent_timeouts > 0 { 4 } else { 10 };
-    if (step_i64 - prev.last_warned_step) < min_step_gap && !escalated_to_red {
+    if !child_alerts.is_empty() {
+        let sig = child_alerts_signature(&child_alerts);
+        if sig != prev.last_child_alert_sig || (step_i64 - prev.last_child_alert_step) >= 4 {
+            if let Some(msg) = format_child_watchdog_message(&child_alerts) {
+                next_state.last_child_alert_step = step_i64;
+                next_state.last_child_alert_sig = sig;
+                messages.push(msg);
+            }
+        }
+    }
+
+    if messages.is_empty() {
         println!("{{}}");
         return Ok(());
     }
 
     let _ = fs::create_dir_all(&state_dir);
-    let _ = fs::write(
-        &state_file,
-        serde_json::to_vec(&GuardState {
-            last_warned_step: step_i64,
-            last_loop_warned_step: if has_loop_streak {
-                step_i64
-            } else {
-                prev.last_loop_warned_step
-            },
-            total_tokens: pulse.total_tokens,
-            last_health: Some(pulse.health),
-        })
-        .unwrap_or_default(),
-    );
+    let _ = fs::write(&state_file, serde_json::to_vec(&next_state).unwrap_or_default());
     prune_guard_state(&state_dir, 50);
 
-    let ws_str = extract_workspace_str(&payload);
-    let code_ws = if ws_str.is_empty() {
-        false
-    } else {
-        is_code_workspace(Path::new(ws_str))
-    };
-    let is_subagent = is_subagent_conversation(conv_id);
-    let out = build_guard_payload(&pulse, &cfg, is_subagent, code_ws);
+    let inject_steps: Vec<Value> = messages
+        .into_iter()
+        .map(|m| json!({ "systemMessage": { "systemMessage": m } }))
+        .collect();
+    let out = json!({ "injectSteps": inject_steps });
     println!("{}", serde_json::to_string(&out)?);
     Ok(())
 }
@@ -582,6 +782,7 @@ mod tests {
             recent_timeouts: 0,
             recent_resets: 0,
             media_items_recent: 0,
+            checkpoint_count: 0,
             last_planner_epoch_ms: None,
             seconds_since_last_planner: Some(15),
             cache_warm_remaining_secs: 225,
@@ -703,5 +904,55 @@ mod tests {
         assert!(!guard_obs_msg.contains("hyper_pack"));
 
         let _ = fs::remove_dir_all(&ws);
+    }
+
+    #[test]
+    fn subagent_watchdog_and_browser_role_guard_behave_cleanly() {
+        let cfg = HyperConfig::default();
+
+        // Non-code browser subagent must never be told to run `hyper_check` or stop file scans.
+        let mut red_browser = sample_pulse(HealthLevel::Red, "token_red", 290_000);
+        red_browser.checkpoint_count = 3;
+        let msg_browser = build_guard_message(&red_browser, &cfg, true, "browser", true);
+        assert!(msg_browser.contains("send_message"));
+        assert!(!msg_browser.contains("hyper_check"));
+        assert!(!msg_browser.contains("broad file scans"));
+
+        // Yellow browser subagent with >=2 auto-checkpoints gets gentle split hint.
+        let mut y_browser = sample_pulse(HealthLevel::Yellow, "multimodal_cliff", 185_000);
+        y_browser.checkpoint_count = 2;
+        y_browser.multimodal_cliff_risk = true;
+        let msg_y = build_guard_message(&y_browser, &cfg, true, "browser", true);
+        assert!(msg_y.contains("2 auto-checkpoints"));
+        assert!(msg_y.contains("redundant screenshots"));
+
+        // Parent watchdog formats both active crash loops and silent stalls cleanly.
+        let alerts = vec![
+            ChildSubagentAlert {
+                conversation_id: "aaaaaaaa-1111-2222-3333-444444444444".into(),
+                agent_name: "browser".into(),
+                title: "UI Runner".into(),
+                consecutive_error_streak: 6,
+                last_error_summary: Some("API error (attempt 6): EOF".into()),
+                idle_secs: 15,
+                stalled: false,
+            },
+            ChildSubagentAlert {
+                conversation_id: "bbbbbbbb-1111-2222-3333-444444444444".into(),
+                agent_name: "research".into(),
+                title: "Docs Scan".into(),
+                consecutive_error_streak: 0,
+                last_error_summary: None,
+                idle_secs: 145,
+                stalled: true,
+            },
+        ];
+        let watchdog = format_child_watchdog_message(&alerts).unwrap();
+        assert!(watchdog.contains("[AGY Hyper Subagent Watchdog]"));
+        assert!(watchdog.contains("browser #aaaaaaaa"));
+        assert!(watchdog.contains("6 consecutive errors: API error (attempt 6): EOF"));
+        assert!(watchdog.contains("research #bbbbbbbb"));
+        assert!(watchdog.contains("silent 145s"));
+        assert_eq!(child_alerts_signature(&alerts), "aaaaaaaa:loop6,bbbbbbbb:stalled");
     }
 }

@@ -98,6 +98,7 @@ struct StatuslineJsonOutput {
     quota_remaining_pct: Option<f64>,
     cost_usd: Option<f64>,
     consecutive_error_streak: u32,
+    unhealthy_subagents: usize,
     health: String,
 }
 
@@ -140,6 +141,8 @@ fn fetch_daemon_or_tail_pulse(input: &CliStatusInput) -> Option<StatuslinePulseR
     let cfg = HyperConfig::load();
     let tpath = resolve_transcript_path(input.transcript_path.as_deref(), conv_id.as_deref())?;
     let tp = inspect_transcript_tail(&tpath, &cfg)?;
+    let unhealthy_subagents =
+        hyper_daemon::state::count_unhealthy_active_children(&tp.conversation_id, &cfg);
     Some(StatuslinePulseResponse {
         model: tp.model.or(model_hint),
         effective_cache_ttl_secs: tp.effective_cache_ttl_secs,
@@ -151,6 +154,7 @@ fn fetch_daemon_or_tail_pulse(input: &CliStatusInput) -> Option<StatuslinePulseR
         cache_hit_ratio: tp.cache_hit_ratio,
         health: tp.health,
         consecutive_error_streak: tp.consecutive_error_streak,
+        unhealthy_subagents,
         median_turn_ms: 0,
         median_llm_ms: 0,
         effective_tps: 0.0,
@@ -364,6 +368,7 @@ pub fn render_statusline(
     let warm_rem = pulse.map(|p| p.cache_warm_remaining_secs).unwrap_or(eff_ttl);
     let is_cold = pulse.map(|p| p.cache_is_cold).unwrap_or(false);
     let err_streak = pulse.map(|p| p.consecutive_error_streak).unwrap_or(0);
+    let unhealthy_subs = pulse.map(|p| p.unhealthy_subagents).unwrap_or(0);
     let health = pulse.map(|p| p.health).unwrap_or(HealthLevel::Green);
 
     // Antigravity CLI `title` requires plain single-line text without ANSI escape codes.
@@ -393,6 +398,9 @@ pub fn render_statusline(
         if err_streak >= 2 {
             parts.push(format!("loopx{}", err_streak));
         }
+        if unhealthy_subs > 0 {
+            parts.push(format!("⚠{} sub", unhealthy_subs));
+        }
         return sanitize_plain_title(&parts.join(" · "));
     }
 
@@ -416,6 +424,7 @@ pub fn render_statusline(
             quota_remaining_pct: quota_pct.map(|v| (v * 10.0).round() / 10.0),
             cost_usd,
             consecutive_error_streak: err_streak,
+            unhealthy_subagents: unhealthy_subs,
             health: format!("{:?}", health).to_ascii_lowercase(),
         };
         return serde_json::to_string(&payload).unwrap_or_else(|_| "{}".to_string());
@@ -489,6 +498,9 @@ pub fn render_statusline(
         if err_streak >= 2 {
             line1.push(colorize(&format!("⚠ loop×{}", err_streak), "1;31", use_color));
         }
+        if unhealthy_subs > 0 {
+            line1.push(colorize(&format!("⚠ {} sub", unhealthy_subs), "1;31", use_color));
+        }
 
         let mut line2 = Vec::new();
         if let Some(p) = pulse.filter(|p| p.median_turn_ms > 0) {
@@ -538,6 +550,9 @@ pub fn render_statusline(
     }
     if err_streak >= 2 {
         segs.push(colorize(&format!("⚠ loop×{}", err_streak), "1;31", use_color));
+    }
+    if unhealthy_subs > 0 {
+        segs.push(colorize(&format!("⚠ {} sub", unhealthy_subs), "1;31", use_color));
     }
     segs.join(&sep)
 }
@@ -686,6 +701,7 @@ mod tests {
             cache_hit_ratio: 0.94,
             health: HealthLevel::Green,
             consecutive_error_streak: 0,
+            unhealthy_subagents: 0,
             median_turn_ms: 3100,
             median_llm_ms: 2400,
             effective_tps: 58.2,

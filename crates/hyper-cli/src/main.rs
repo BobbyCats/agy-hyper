@@ -199,7 +199,7 @@ enum ConfigAction {
         name: String,
     },
     Toggle {
-        /// prewarm_tier2 | block_secret_files | allow_custom_argv_checks | enable_ui_pill
+        /// prewarm_tier2 | block_secret_files | allow_custom_argv_checks | enable_ui_pill | enable_watchdog_notify
         key: String,
         value: bool,
     },

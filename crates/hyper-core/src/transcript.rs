@@ -40,6 +40,8 @@ pub struct TranscriptPulse {
     pub recent_timeouts: u32,
     pub recent_resets: u32,
     pub media_items_recent: u32,
+    #[serde(default)]
+    pub checkpoint_count: u32,
     pub last_planner_epoch_ms: Option<i64>,
     pub seconds_since_last_planner: Option<u64>,
     pub cache_warm_remaining_secs: u64,
@@ -159,6 +161,103 @@ fn is_user_cancel_error(msg: &str) -> bool {
         || lower.contains("user cancelled")
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TransportErrorKind {
+    None,
+    UserCanceled,
+    Timeout,
+    Reset,
+}
+
+/// Pure classifier for Antigravity transport/upstream API errors.
+/// Derived from real local transcripts so bare `: EOF`, interrupted streams,
+/// TLS/TCP timeouts, and 503 capacity failures are never silently dropped.
+pub fn classify_transport_error(msg: &str) -> TransportErrorKind {
+    if is_user_cancel_error(msg) {
+        return TransportErrorKind::UserCanceled;
+    }
+    let lower = msg.trim().to_ascii_lowercase();
+    if lower.is_empty() {
+        return TransportErrorKind::None;
+    }
+    if lower.contains("stream idle timeout")
+        || lower.contains("context deadline exceeded")
+        || lower.contains("tls handshake timeout")
+        || lower.contains("i/o timeout")
+        || lower.contains("operation timed out")
+        || lower.contains("code 503")
+        || lower.contains("status 503")
+        || lower.contains("(503)")
+        || lower.contains(" 503:")
+        || lower.contains(" 503 ")
+    {
+        return TransportErrorKind::Timeout;
+    }
+    let is_bare_eof = lower.ends_with(": eof")
+        || lower.contains(": eof\n")
+        || lower.contains(": eof ")
+        || lower.ends_with(" eof")
+        || lower == "eof";
+    if lower.contains("connection reset by peer")
+        || lower.contains("unexpected eof")
+        || is_bare_eof
+        || lower.contains("stream was interrupted")
+        || lower.contains("broken pipe")
+        || lower.contains("use of closed network connection")
+        || lower.contains("no such host")
+        || ((lower.contains("api error") || lower.contains("request failed"))
+            && (lower.contains("read tcp ") || lower.contains("write tcp ") || lower.contains("dial tcp")))
+    {
+        return TransportErrorKind::Reset;
+    }
+    TransportErrorKind::None
+}
+
+/// Produce a compact, readable single-line error signature that preserves the trailing cause
+/// (e.g. `EOF`, `TLS handshake timeout`, `connection reset by peer`) instead of truncating
+/// inside long upstream endpoint URLs or leaking local proxy socket addresses.
+pub fn summarize_error_line(raw: &str) -> String {
+    let first_line = raw
+        .lines()
+        .find(|l| !l.trim().is_empty())
+        .unwrap_or("")
+        .trim();
+    if first_line.is_empty() {
+        return String::new();
+    }
+
+    let mut normalized = first_line.to_string();
+    if let Some(post_pos) = normalized.find("Post \"http") {
+        let after_post = &normalized[post_pos + 6..];
+        if let Some(end_q) = after_post.find("\": ") {
+            let prefix = normalized[..post_pos]
+                .trim_end()
+                .trim_end_matches("request failed:")
+                .trim_end();
+            let tail = after_post[end_q + 3..].trim();
+            normalized = if prefix.is_empty() {
+                tail.to_string()
+            } else {
+                format!("{} {}", prefix, tail)
+            };
+        }
+    }
+
+    // Strip ephemeral local socket tuples like `read tcp 127.0.0.1:54321->127.0.0.1:8080: `
+    for verb in ["read tcp ", "write tcp ", "dial tcp "] {
+        if let Some(pos) = normalized.find(verb) {
+            let after = &normalized[pos + verb.len()..];
+            if let Some(colon) = after.find(": ") {
+                let before = &normalized[..pos];
+                let rest = &after[colon + 2..];
+                normalized = format!("{}{}", before, rest);
+            }
+        }
+    }
+
+    normalized.chars().take(96).collect()
+}
+
 /// Ultra-fast `<1.5ms` tail reader of Antigravity's `transcript.jsonl`.
 /// Native zero-dependency Rust guard providing:
 /// - Compaction-aware windowing (zero post-`/compact` false-alarm storms!)
@@ -209,15 +308,21 @@ pub fn inspect_transcript_tail_with_ttl(
         return None;
     }
 
-    // Detect the most recent `/compact` boundary so pre-compaction step counts,
-    // images, and timeouts never ghost-trigger false alarms after context was compacted.
+    // Detect the most recent `/compact` or `CHECKPOINT` boundary so pre-compaction
+    // step counts, images, and timeouts never ghost-trigger false alarms after compaction.
     let mut compact_start_idx = 0usize;
     let mut compact_base_step = 0u64;
     let mut prev_planner_tokens = 0u64;
+    let mut checkpoint_count = 0u32;
     for (idx, obj) in parsed.iter().enumerate() {
         let typ = obj.get("type").and_then(Value::as_str).unwrap_or("");
         let step_idx = obj.get("step_index").and_then(Value::as_u64).unwrap_or(0);
-        if typ == "USER_INPUT" {
+        if typ == "CHECKPOINT" {
+            checkpoint_count = checkpoint_count.saturating_add(1);
+            compact_start_idx = idx;
+            compact_base_step = step_idx;
+            prev_planner_tokens = 0;
+        } else if typ == "USER_INPUT" {
             let content = obj.get("content").and_then(Value::as_str).unwrap_or("");
             if is_compact_user_input(content) {
                 compact_start_idx = idx;
@@ -339,16 +444,10 @@ pub fn inspect_transcript_tail_with_ttl(
                 .and_then(Value::as_str)
                 .or_else(|| obj.get("content").and_then(Value::as_str))
                 .unwrap_or("");
-            if is_user_cancel_error(err) {
-                continue;
-            }
-            if err.contains("stream idle timeout")
-                || err.contains("context deadline exceeded")
-                || err.contains("503")
-            {
-                recent_timeouts += 1;
-            } else if err.contains("connection reset by peer") || err.contains("unexpected EOF") {
-                recent_resets += 1;
+            match classify_transport_error(err) {
+                TransportErrorKind::Timeout => recent_timeouts += 1,
+                TransportErrorKind::Reset => recent_resets += 1,
+                TransportErrorKind::UserCanceled | TransportErrorKind::None => {}
             }
         }
     }
@@ -374,12 +473,11 @@ pub fn inspect_transcript_tail_with_ttl(
             }
             consecutive_error_streak = consecutive_error_streak.saturating_add(1);
             if repeat_error_signature.is_none() {
-                let first_line = err_text
-                    .lines()
-                    .find(|l| !l.trim().is_empty())
-                    .unwrap_or(typ)
-                    .trim();
-                let short: String = first_line.chars().take(96).collect();
+                let short = summarize_error_line(if err_text.trim().is_empty() {
+                    typ
+                } else {
+                    err_text
+                });
                 if !short.is_empty() {
                     repeat_error_signature = Some(short);
                 }
@@ -435,10 +533,14 @@ pub fn inspect_transcript_tail_with_ttl(
 
     let (health, health_reason) = if total_tokens >= effective_red_tokens {
         (HealthLevel::Red, "token_red")
+    } else if consecutive_error_streak >= 3 {
+        (HealthLevel::Red, "error_loop")
     } else if recent_timeouts >= 2 {
         (HealthLevel::Red, "stream_timeout")
     } else if step_red {
         (HealthLevel::Red, "step_red")
+    } else if consecutive_error_streak == 2 {
+        (HealthLevel::Yellow, "error_loop")
     } else if multimodal_cliff_risk {
         (HealthLevel::Yellow, "multimodal_cliff")
     } else if total_tokens >= effective_yellow_tokens {
@@ -480,6 +582,7 @@ pub fn inspect_transcript_tail_with_ttl(
         recent_timeouts,
         recent_resets,
         media_items_recent,
+        checkpoint_count,
         last_planner_epoch_ms,
         seconds_since_last_planner,
         cache_warm_remaining_secs,
@@ -659,6 +762,88 @@ mod tests {
         assert_eq!(pulse.effective_cache_ttl_secs, 180);
         assert_eq!(pulse.cache_ttl_source, "empirical");
         assert_eq!(pulse.consecutive_error_streak, 2);
+        assert_eq!(pulse.health, HealthLevel::Yellow);
+        assert_eq!(pulse.health_reason, "error_loop");
         assert!(pulse.repeat_error_signature.as_deref().unwrap().contains("exit code 1"));
+    }
+
+    #[test]
+    fn classifies_bare_eof_interrupted_tls_and_escalates_error_loop() {
+        assert_eq!(
+            classify_transport_error(
+                "API error (attempt 6): request failed: Post \"https://example.invalid/v1:streamGenerateContent?alt=sse\": EOF"
+            ),
+            TransportErrorKind::Reset
+        );
+        assert_eq!(
+            classify_transport_error(
+                "The stream was interrupted. Please continue the task you were working on."
+            ),
+            TransportErrorKind::Reset
+        );
+        assert_eq!(
+            classify_transport_error(
+                "API error (attempt 2): request failed: Post \"https://example.invalid/v1:streamGenerateContent\": net/http: TLS handshake timeout"
+            ),
+            TransportErrorKind::Timeout
+        );
+        assert_eq!(
+            classify_transport_error("context canceled: Post \"https://example.invalid\": EOF"),
+            TransportErrorKind::UserCanceled
+        );
+        assert_eq!(
+            summarize_error_line(
+                "API error (attempt 6): request failed: Post \"https://example.invalid/v1internal:streamGenerateContent?alt=sse\": EOF"
+            ),
+            "API error (attempt 6): EOF"
+        );
+        assert_eq!(
+            summarize_error_line(
+                "API error (attempt 1): request failed: Post \"https://example.invalid/v1\": read tcp 127.0.0.1:51234->127.0.0.1:8080: read: connection reset by peer"
+            ),
+            "API error (attempt 1): read: connection reset by peer"
+        );
+
+        let dir = tempdir().unwrap();
+
+        // Single transient EOF attempt stays Green (no wolf-crying on attempt 1).
+        let p_one = dir.path().join("single_eof.jsonl");
+        let single_content = concat!(
+            "{\"step_index\":10,\"type\":\"PLANNER_RESPONSE\",\"model\":\"gemini-4-hydrogen-tiered-high\",\"input_tokens\":5000,\"cache_read_tokens\":65000,\"output_tokens\":200,\"created_at\":\"2026-11-23T03:54:00Z\"}\n",
+            "{\"step_index\":11,\"type\":\"ERROR_MESSAGE\",\"status\":\"DONE\",\"error\":\"API error (attempt 1): request failed: Post \\\"https://example.invalid/v1\\\": EOF\"}\n"
+        );
+        fs::write(&p_one, single_content).unwrap();
+        let cfg = HyperConfig::default();
+        let pulse_one = inspect_transcript_tail(&p_one, &cfg).unwrap();
+        assert_eq!(pulse_one.recent_resets, 1);
+        assert_eq!(pulse_one.consecutive_error_streak, 1);
+        assert_eq!(pulse_one.health, HealthLevel::Green);
+        assert_eq!(pulse_one.health_reason, "healthy");
+
+        // Multi-checkpoint subagent with 6 consecutive EOF/TLS errors escalates to Red error_loop.
+        let p_loop = dir.path().join("crash_loop.jsonl");
+        let loop_content = concat!(
+            "{\"step_index\":86,\"type\":\"CHECKPOINT\",\"content\":\"# Browser Session Checkpoint\"}\n",
+            "{\"step_index\":131,\"type\":\"CHECKPOINT\",\"content\":\"# Browser Session Checkpoint\"}\n",
+            "{\"step_index\":153,\"type\":\"PLANNER_RESPONSE\",\"model\":\"gemini-4-hydrogen-tiered-high\",\"input_tokens\":5060,\"cache_read_tokens\":71231,\"output_tokens\":300,\"created_at\":\"2026-11-23T03:55:00Z\"}\n",
+            "{\"step_index\":154,\"type\":\"ERROR_MESSAGE\",\"status\":\"DONE\",\"error\":\"API error (attempt 1): request failed: Post \\\"https://example.invalid/v1\\\": EOF\"}\n",
+            "{\"step_index\":155,\"type\":\"ERROR_MESSAGE\",\"status\":\"DONE\",\"error\":\"API error (attempt 2): request failed: Post \\\"https://example.invalid/v1\\\": net/http: TLS handshake timeout\"}\n",
+            "{\"step_index\":156,\"type\":\"ERROR_MESSAGE\",\"status\":\"DONE\",\"error\":\"API error (attempt 3): request failed: Post \\\"https://example.invalid/v1\\\": EOF\"}\n",
+            "{\"step_index\":157,\"type\":\"ERROR_MESSAGE\",\"status\":\"DONE\",\"error\":\"API error (attempt 4): request failed: Post \\\"https://example.invalid/v1\\\": EOF\"}\n",
+            "{\"step_index\":158,\"type\":\"ERROR_MESSAGE\",\"status\":\"DONE\",\"error\":\"API error (attempt 5): request failed: Post \\\"https://example.invalid/v1\\\": EOF\"}\n",
+            "{\"step_index\":159,\"type\":\"ERROR_MESSAGE\",\"status\":\"DONE\",\"error\":\"API error (attempt 6): request failed: Post \\\"https://example.invalid/v1\\\": EOF\"}\n"
+        );
+        fs::write(&p_loop, loop_content).unwrap();
+        let pulse_loop = inspect_transcript_tail(&p_loop, &cfg).unwrap();
+        assert_eq!(pulse_loop.checkpoint_count, 2);
+        assert_eq!(pulse_loop.recent_resets, 5);
+        assert_eq!(pulse_loop.recent_timeouts, 1);
+        assert_eq!(pulse_loop.consecutive_error_streak, 6);
+        assert_eq!(pulse_loop.health, HealthLevel::Red);
+        assert_eq!(pulse_loop.health_reason, "error_loop");
+        assert_eq!(
+            pulse_loop.repeat_error_signature.as_deref(),
+            Some("API error (attempt 6): EOF")
+        );
     }
 }

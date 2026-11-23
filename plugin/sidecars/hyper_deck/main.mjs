@@ -478,8 +478,8 @@ async function syncLiveFxRates() {
 
 function writeNativeClipboard(text) {
   const s = String(text ?? '');
-  if (!s || s.length > 256) {
-    return { ok: false, error: 'clipboard text must be 1..256 chars' };
+  if (!s || s.length > 512) {
+    return { ok: false, error: 'clipboard text must be 1..512 chars' };
   }
   const candidates =
     process.platform === 'darwin'

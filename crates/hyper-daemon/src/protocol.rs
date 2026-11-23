@@ -205,6 +205,16 @@ pub struct SubagentSnapshot {
     #[serde(default)]
     pub stalled: bool,
     #[serde(default)]
+    pub error_loop: bool,
+    #[serde(default)]
+    pub consecutive_error_streak: u32,
+    #[serde(default)]
+    pub last_error_summary: Option<String>,
+    #[serde(default)]
+    pub checkpoint_count: u32,
+    #[serde(default)]
+    pub media_items_recent: u32,
+    #[serde(default)]
     pub model: Option<String>,
     pub health: HealthLevel,
     #[serde(default)]
@@ -229,6 +239,8 @@ pub struct SessionTreeSummary {
     pub redline_subagents: usize,
     #[serde(default)]
     pub stalled_subagents: usize,
+    #[serde(default)]
+    pub error_loop_subagents: usize,
     pub combined_turns: usize,
     pub combined_tokens: u64,
     pub combined_hyper_calls: usize,
@@ -269,6 +281,8 @@ pub struct StatuslinePulseResponse {
     pub health: HealthLevel,
     #[serde(default)]
     pub consecutive_error_streak: u32,
+    #[serde(default)]
+    pub unhealthy_subagents: usize,
     pub median_turn_ms: u64,
     pub median_llm_ms: u64,
     pub effective_tps: f64,

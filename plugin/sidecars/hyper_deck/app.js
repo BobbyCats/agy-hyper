@@ -519,12 +519,20 @@
 
   $('btn-copy-compact').addEventListener('click', async () => {
     const btn = $('btn-copy-compact');
-    const ok = await copyTextReliable('/compact');
+    const isPivot = btn.dataset.action === 'pivot';
+    const errPart = btn.dataset.err ? ` (${btn.dataset.err})` : '';
+    const textToCopy = isPivot
+      ? t('pulse.pivot_prompt', { count: Number(btn.dataset.streak || 2), err: errPart })
+      : '/compact';
+    const ok = await copyTextReliable(textToCopy);
     if (ok) {
-      showToast(t('pulse.copied_compact'));
-      const prev = btn.textContent;
+      showToast(isPivot ? t('pulse.copied_pivot') : t('pulse.copied_compact'));
+      btn.dataset.copiedLock = '1';
       btn.textContent = t('pulse.copied_short');
-      setTimeout(() => { btn.textContent = prev; }, 1600);
+      setTimeout(() => {
+        delete btn.dataset.copiedLock;
+        btn.textContent = btn.dataset.action === 'pivot' ? t('pulse.copy_pivot') : t('pulse.copy_compact');
+      }, 1600);
     } else {
       showToast(t('pulse.copy_fallback'));
     }

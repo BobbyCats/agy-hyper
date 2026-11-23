@@ -1,6 +1,6 @@
 (() => {
   const root = (window.HyperDeck = window.HyperDeck || {});
-  const { $, escapeHtml, fmtCurrency, fmtRelTime, fmtSec, fmtTokens, t } = root.api;
+  const { $, copyTextReliable, escapeHtml, fmtCurrency, fmtRelTime, fmtSec, fmtTokens, showToast, t } = root.api;
   const { renderFullContextChart, renderHeroChart, renderUsageChart, renderWaterfallChart } = root.charts;
 
   function fmtIdleShort(secs) {
@@ -320,6 +320,17 @@
       actPill.classList.add('hidden');
     }
 
+    const loopCount = tree.error_loop_subagents || (tree.subagents || []).filter((s) => s.error_loop).length;
+    const loopPill = $('subagent-loop-pill');
+    if (loopPill) {
+      if (loopCount > 0) {
+        loopPill.textContent = t('subagents.error_loop_badge', { count: loopCount });
+        loopPill.classList.remove('hidden');
+      } else {
+        loopPill.classList.add('hidden');
+      }
+    }
+
     const stalledCount = tree.stalled_subagents || (tree.subagents || []).filter((s) => s.stalled).length;
     const stalledPill = $('subagent-stalled-pill');
     if (stalledPill) {
@@ -331,7 +342,7 @@
       }
     }
 
-    const liveRedlines = (tree.subagents || []).filter((s) => s.active && s.health === 'red').length;
+    const liveRedlines = (tree.subagents || []).filter((s) => s.active && s.health === 'red' && !s.error_loop).length;
     const redPill = $('subagent-red-pill');
     if (liveRedlines > 0) {
       redPill.textContent = t('subagents.redline_badge', { count: liveRedlines });
@@ -362,27 +373,44 @@
         const hyperTxt = sub.hyper_tool_calls > 0 ? ` · ⚡${sub.hyper_tool_calls}` : '';
         const cumTxt = fmtTokens(sub.cumulative_tokens || 0);
         const turns = sub.total_turns || 0;
-        const tipKey = sub.stalled
-          ? 'subagents.row_tooltip_stalled'
-          : sub.active
-            ? 'subagents.row_tooltip_active'
-            : sub.health === 'red'
-              ? 'subagents.row_tooltip_done_peak'
-              : 'subagents.row_tooltip_done';
+        const errStreak = sub.consecutive_error_streak || 0;
+        const errDetail = sub.last_error_summary ? ` · ${sub.last_error_summary}` : '';
+        const ckptMeta = (sub.checkpoint_count || 0) > 0 ? ` · ${sub.checkpoint_count} ckpt` : '';
+        const isTokenPeak = sub.health === 'red' && sub.health_reason !== 'error_loop';
+        const tipKey = sub.error_loop
+          ? 'subagents.row_tooltip_error_loop'
+          : sub.stalled
+            ? 'subagents.row_tooltip_stalled'
+            : sub.active
+              ? 'subagents.row_tooltip_active'
+              : isTokenPeak
+                ? 'subagents.row_tooltip_done_peak'
+                : 'subagents.row_tooltip_done';
         const rowTip = t(tipKey, {
           ctx: ctxFull,
           cum: cumTxt,
           turns,
           cache: cachePctNum,
           idle: fmtIdleShort(sub.idle_secs),
+          streak: errStreak,
+          err: errDetail,
+          ckpt: ckptMeta,
         });
 
         let statsHtml;
-        if (sub.stalled) {
+        if (sub.error_loop) {
+          const loopCls = errStreak >= 3 ? 'err' : 'warn';
           statsHtml = `
               <span>${escapeHtml(ctxFull)}</span>
               <span>${escapeHtml(cachePct)}${escapeHtml(hyperTxt)}</span>
-              <span class="status-pill warn">${escapeHtml(t('subagents.stalled_pill', { idle: fmtIdleShort(sub.idle_secs) }))}</span>`;
+              <span class="status-pill ${loopCls}">${escapeHtml(t('subagents.error_loop_pill', { count: errStreak }))}</span>
+              <button type="button" class="subagent-rescue-btn ${loopCls}" data-rescue-id="${escapeHtml(sub.conversation_id)}" title="${escapeHtml(t('subagents.rescue_btn_tip'))}">${escapeHtml(t('subagents.rescue_btn'))}</button>`;
+        } else if (sub.stalled) {
+          statsHtml = `
+              <span>${escapeHtml(ctxFull)}</span>
+              <span>${escapeHtml(cachePct)}${escapeHtml(hyperTxt)}</span>
+              <span class="status-pill warn">${escapeHtml(t('subagents.stalled_pill', { idle: fmtIdleShort(sub.idle_secs) }))}</span>
+              <button type="button" class="subagent-rescue-btn warn" data-rescue-id="${escapeHtml(sub.conversation_id)}" title="${escapeHtml(t('subagents.rescue_btn_tip'))}">${escapeHtml(t('subagents.rescue_btn'))}</button>`;
         } else if (sub.active) {
           const hCls = sub.health === 'red' ? 'err' : sub.health === 'yellow' ? 'warn' : 'ok';
           const hLbl = sub.health === 'red' ? 'RED' : sub.health === 'yellow' ? 'WARN' : 'OK';
@@ -391,7 +419,7 @@
               <span>${escapeHtml(cachePct)}${escapeHtml(hyperTxt)}</span>
               <span class="status-pill ${hCls}">${hLbl}</span>`;
         } else {
-          const pillCls = sub.health === 'red' ? 'muted-peak' : 'muted';
+          const pillCls = isTokenPeak ? 'muted-peak' : 'muted';
           const doneLbl = ctxShort !== '—'
             ? t('subagents.done_ctx', { ctx: ctxShort })
             : t('subagents.done_pill');
@@ -400,9 +428,10 @@
               <span class="status-pill ${pillCls}">${escapeHtml(doneLbl)}</span>`;
         }
 
-        const dotCls = sub.stalled ? ' stalled' : sub.active ? ' live' : '';
+        const dotCls = sub.error_loop ? ' err-loop' : sub.stalled ? ' stalled' : sub.active ? ' live' : '';
+        const rowStateCls = sub.error_loop ? ' err-loop' : sub.stalled ? ' stalled' : '';
         return `
-          <button type="button" class="subagent-row${sub.active ? '' : ' done'}${sub.stalled ? ' stalled' : ''}${isSel ? ' selected' : ''}" data-subconv="${escapeHtml(sub.conversation_id)}" title="${escapeHtml(rowTip)}">
+          <div role="button" tabindex="0" class="subagent-row${sub.active ? '' : ' done'}${rowStateCls}${isSel ? ' selected' : ''}" data-subconv="${escapeHtml(sub.conversation_id)}" title="${escapeHtml(rowTip)}">
             <span class="subagent-row-main">
               <i class="subagent-dot${dotCls}"></i>
               <span class="subagent-role">${escapeHtml(role)}</span>
@@ -410,13 +439,51 @@
             </span>
             <span class="subagent-stats">${statsHtml}
             </span>
-          </button>`;
+          </div>`;
       })
       .join('');
 
-    list.querySelectorAll('.subagent-row[data-subconv]').forEach((btn) => {
-      btn.addEventListener('click', () => {
-        if (typeof onSelectSession === 'function') onSelectSession(btn.dataset.subconv);
+    const subById = new Map(tree.subagents.map((s) => [s.conversation_id, s]));
+    list.querySelectorAll('.subagent-row[data-subconv]').forEach((row) => {
+      row.addEventListener('click', () => {
+        if (typeof onSelectSession === 'function') onSelectSession(row.dataset.subconv);
+      });
+      row.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter' || e.key === ' ') {
+          e.preventDefault();
+          if (typeof onSelectSession === 'function') onSelectSession(row.dataset.subconv);
+        }
+      });
+    });
+    list.querySelectorAll('.subagent-rescue-btn[data-rescue-id]').forEach((btn) => {
+      btn.addEventListener('click', async (e) => {
+        e.stopPropagation();
+        const sub = subById.get(btn.dataset.rescueId);
+        if (!sub) return;
+        const role = sub.agent_name || 'subagent';
+        const shortId = (sub.conversation_id || '').slice(0, 8);
+        const errPart = sub.last_error_summary ? ` (${sub.last_error_summary})` : '';
+        const prompt = sub.error_loop
+          ? t('subagents.rescue_prompt_loop', {
+              role,
+              id: shortId,
+              count: sub.consecutive_error_streak || 2,
+              err: errPart,
+            })
+          : t('subagents.rescue_prompt_stalled', {
+              role,
+              id: shortId,
+              idle: fmtIdleShort(sub.idle_secs),
+            });
+        const ok = await copyTextReliable(prompt);
+        if (ok) {
+          showToast(t('subagents.copied_rescue', { role, id: shortId }));
+          const prev = btn.textContent;
+          btn.textContent = t('pulse.copied_short');
+          setTimeout(() => { btn.textContent = prev; }, 1600);
+        } else {
+          showToast(t('pulse.copy_fallback'));
+        }
       });
     });
   }
@@ -614,9 +681,14 @@
     hChip.className = 'status-pill';
     hChip.title = '';
     if (selectedSub && !selectedSub.active) {
-      hChip.classList.add(pulse?.health === 'red' ? 'muted-peak' : 'muted');
+      const endedOnTokenPeak = pulse?.health === 'red' && pulse?.health_reason !== 'error_loop';
+      hChip.classList.add(endedOnTokenPeak ? 'muted-peak' : 'muted');
       hChip.textContent = t('subagents.done_pill');
-      if (pulse?.health === 'red') hChip.title = t('subagents.done_peak_hint');
+      if (endedOnTokenPeak) hChip.title = t('subagents.done_peak_hint');
+    } else if (pulse?.health_reason === 'error_loop') {
+      hChip.classList.add(pulse.health === 'red' ? 'err' : 'warn');
+      hChip.textContent = t('pulse.error_loop', { count: pulse.consecutive_error_streak || 2 });
+      if (pulse.repeat_error_signature) hChip.title = pulse.repeat_error_signature;
     } else if (pulse?.health === 'red') {
       hChip.classList.add('err');
       hChip.textContent = selectedSub ? t('subagents.live_redline') : t('pulse.redline');
@@ -630,6 +702,18 @@
     } else {
       hChip.classList.add('ok');
       hChip.textContent = t('pulse.healthy');
+    }
+
+    const copyBtn = $('btn-copy-compact');
+    if (copyBtn) {
+      const isMainLoop =
+        pulse?.health_reason === 'error_loop' && !(selectedSub && !selectedSub.active);
+      copyBtn.dataset.action = isMainLoop ? 'pivot' : 'compact';
+      copyBtn.dataset.streak = String(pulse?.consecutive_error_streak || 2);
+      copyBtn.dataset.err = pulse?.repeat_error_signature || '';
+      if (!copyBtn.dataset.copiedLock) {
+        copyBtn.textContent = isMainLoop ? t('pulse.copy_pivot') : t('pulse.copy_compact');
+      }
     }
 
     const totalTok = pulse?.total_tokens || 0;
@@ -658,8 +742,9 @@
 
     const alertEl = $('cliff-alert');
     if (pulse?.consecutive_error_streak >= 2) {
-      alertEl.textContent = t('pulse.cliff_error_loop', { count: pulse.consecutive_error_streak });
-      alertEl.className = 'inline-alert err';
+      const sig = pulse.repeat_error_signature ? ` (${pulse.repeat_error_signature})` : '';
+      alertEl.textContent = `${t('pulse.cliff_error_loop', { count: pulse.consecutive_error_streak })}${sig}`;
+      alertEl.className = pulse.consecutive_error_streak >= 3 ? 'inline-alert err' : 'inline-alert';
     } else if (pulse?.multimodal_cliff_risk) {
       alertEl.textContent = t('pulse.cliff_multimodal', { count: pulse.media_items_recent });
       alertEl.className = 'inline-alert';
@@ -718,6 +803,7 @@
     $('tog-secret').checked = Boolean(cfg.block_secret_files);
     $('tog-argv').checked = Boolean(cfg.allow_custom_argv_checks);
     $('tog-pill').checked = Boolean(cfg.enable_ui_pill);
+    if ($('tog-watchdog-notify')) $('tog-watchdog-notify').checked = cfg.enable_watchdog_notify !== false;
 
     renderToolsBars(eng);
 

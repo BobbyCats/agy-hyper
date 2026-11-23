@@ -246,14 +246,135 @@ fn load_antigravity_title_index() -> HashMap<String, DbSessionMeta> {
     entries
 }
 
-pub fn is_subagent_conversation(conv_id: &str) -> bool {
+#[derive(Debug, Clone)]
+pub struct ActiveChildSession {
+    pub conversation_id: String,
+    pub agent_name: String,
+    pub title: String,
+    pub transcript_path: PathBuf,
+    pub mtime_ms: u64,
+}
+
+/// Single-lookup role metadata from Antigravity's native summary DB: `(is_subagent, agent_name)`.
+pub fn lookup_session_role(conv_id: &str) -> (bool, String) {
     let trimmed = conv_id.trim();
     if trimmed.is_empty() {
-        return false;
+        return (false, String::new());
     }
     load_antigravity_title_index()
         .get(trimmed)
-        .is_some_and(|m| m.is_subagent)
+        .map(|m| (m.is_subagent, m.agent_name.clone()))
+        .unwrap_or((false, String::new()))
+}
+
+pub fn is_subagent_conversation(conv_id: &str) -> bool {
+    lookup_session_role(conv_id).0
+}
+
+/// Fast O(active_children) lookup of live (non-killed, not-fully-idle) child subagents
+/// under `parent_conv_id` without scanning the full `brain/` directory on `PreInvocation`.
+pub fn discover_active_child_sessions(parent_conv_id: &str) -> Vec<ActiveChildSession> {
+    let root = parent_conv_id.trim();
+    if root.is_empty() {
+        return Vec::new();
+    }
+    let db_index = load_antigravity_title_index();
+    let mut out = Vec::new();
+    for (cid, meta) in &db_index {
+        if cid == root || !meta.is_subagent || meta.killed || !meta.not_fully_idle {
+            continue;
+        }
+        // Walk parent links (bounded) so nested grandchildren under this root are caught too.
+        let mut cur = meta.parent_conversation_id.as_deref();
+        let mut belongs = false;
+        let mut hops = 0usize;
+        while let Some(pid) = cur {
+            if hops >= 16 || pid.is_empty() {
+                break;
+            }
+            if pid == root {
+                belongs = true;
+                break;
+            }
+            cur = db_index
+                .get(pid)
+                .and_then(|pm| pm.parent_conversation_id.as_deref());
+            hops += 1;
+        }
+        if !belongs {
+            continue;
+        }
+        let Some(tpath) = crate::transcript::resolve_transcript_path(None, Some(cid)) else {
+            continue;
+        };
+        let mtime_ms = fs::metadata(&tpath)
+            .ok()
+            .and_then(|m| m.modified().ok())
+            .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
+        let title = if !meta.title.is_empty() {
+            sanitize_session_title(&meta.title, &meta.workspace, cid)
+        } else if !meta.agent_name.is_empty() {
+            format!("{} #{}", meta.agent_name, &cid[..cid.len().min(8)])
+        } else {
+            format!("subagent #{}", &cid[..cid.len().min(8)])
+        };
+        out.push(ActiveChildSession {
+            conversation_id: cid.clone(),
+            agent_name: meta.agent_name.clone(),
+            title,
+            transcript_path: tpath,
+            mtime_ms,
+        });
+    }
+    out.sort_by(|a, b| b.mtime_ms.cmp(&a.mtime_ms));
+    out
+}
+
+/// Fast global lookup of currently active (non-killed, not-fully-idle) subagents updated within
+/// `max_age_secs` seconds. Used by the background daemon watchdog with zero full `brain/` scans.
+pub fn discover_all_active_subagents(max_age_secs: u64) -> Vec<ActiveChildSession> {
+    let db_index = load_antigravity_title_index();
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+    let max_age_ms = max_age_secs.saturating_mul(1000);
+    let mut out = Vec::new();
+    for (cid, meta) in &db_index {
+        if !meta.is_subagent || meta.killed || !meta.not_fully_idle {
+            continue;
+        }
+        let Some(tpath) = crate::transcript::resolve_transcript_path(None, Some(cid)) else {
+            continue;
+        };
+        let mtime_ms = fs::metadata(&tpath)
+            .ok()
+            .and_then(|m| m.modified().ok())
+            .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
+        if mtime_ms == 0 || (max_age_ms > 0 && now_ms.saturating_sub(mtime_ms) > max_age_ms) {
+            continue;
+        }
+        let title = if !meta.title.is_empty() {
+            sanitize_session_title(&meta.title, &meta.workspace, cid)
+        } else if !meta.agent_name.is_empty() {
+            format!("{} #{}", meta.agent_name, &cid[..cid.len().min(8)])
+        } else {
+            format!("subagent #{}", &cid[..cid.len().min(8)])
+        };
+        out.push(ActiveChildSession {
+            conversation_id: cid.clone(),
+            agent_name: meta.agent_name.clone(),
+            title,
+            transcript_path: tpath,
+            mtime_ms,
+        });
+    }
+    out.sort_by(|a, b| b.mtime_ms.cmp(&a.mtime_ms));
+    out
 }
 
 pub fn discover_session_summaries(limit: usize) -> Vec<SessionSummary> {

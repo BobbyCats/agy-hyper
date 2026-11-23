@@ -69,6 +69,7 @@
         <div class="subagent-head-left">
           <span id="subagent-heading" class="sub-title">Subagents</span>
           <span id="subagent-active-pill" class="status-pill ok hidden"></span>
+          <span id="subagent-loop-pill" class="status-pill err hidden"></span>
           <span id="subagent-stalled-pill" class="status-pill warn hidden"></span>
           <span id="subagent-red-pill" class="status-pill err hidden"></span>
         </div>
@@ -413,6 +414,13 @@
               <small data-i18n="engine.tog_pill_desc">Show one-line Hyper Deck quick link on new chats</small>
             </div>
             <input id="tog-pill" type="checkbox" data-toggle="enable_ui_pill">
+          </label>
+          <label class="toggle-row">
+            <div>
+              <strong data-i18n="engine.tog_watchdog_title">Desktop Subagent Alerts</strong>
+              <small data-i18n="engine.tog_watchdog_desc">Send a 1-shot OS notification when a background subagent stalls or crash-loops</small>
+            </div>
+            <input id="tog-watchdog-notify" type="checkbox" data-toggle="enable_watchdog_notify">
           </label>
         </div>
 

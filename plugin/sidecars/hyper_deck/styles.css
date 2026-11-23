@@ -1149,8 +1149,14 @@ button:focus-visible, select:focus-visible, input:focus-visible {
 .subagent-dot.stalled {
   background: var(--warn);
 }
+.subagent-dot.err-loop {
+  background: var(--err);
+}
 .subagent-row.stalled {
   border-color: var(--warn);
+}
+.subagent-row.err-loop {
+  border-color: var(--err);
 }
 
 .subagent-role {
@@ -1183,6 +1189,36 @@ button:focus-visible, select:focus-visible, input:focus-visible {
   color: var(--fg-muted);
   font-variant-numeric: tabular-nums;
   flex-shrink: 0;
+}
+
+.subagent-rescue-btn {
+  appearance: none;
+  border: 1px solid var(--err);
+  background: color-mix(in srgb, var(--err) 14%, transparent);
+  color: var(--err);
+  font-family: var(--font-sans);
+  font-size: 10px;
+  font-weight: 600;
+  line-height: 1.2;
+  padding: 2px 7px;
+  border-radius: 999px;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background 140ms ease, transform 120ms ease;
+}
+.subagent-rescue-btn.warn {
+  border-color: var(--warn);
+  background: color-mix(in srgb, var(--warn) 14%, transparent);
+  color: var(--warn);
+}
+.subagent-rescue-btn:hover {
+  background: color-mix(in srgb, var(--err) 24%, transparent);
+}
+.subagent-rescue-btn.warn:hover {
+  background: color-mix(in srgb, var(--warn) 24%, transparent);
+}
+.subagent-rescue-btn:active {
+  transform: scale(0.96);
 }
 
 .btn-xs {

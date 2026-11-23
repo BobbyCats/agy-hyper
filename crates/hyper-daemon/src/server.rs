@@ -6,11 +6,15 @@ use anyhow::{Context, Result};
 use fs2::FileExt;
 use hyper_core::audit::build_audit_report;
 use hyper_core::config::HyperConfig;
+use hyper_core::sessions::discover_all_active_subagents;
+use hyper_core::transcript::inspect_transcript_tail;
 use hyper_core::usage::UsageWindow;
 use hyper_core::wal::inspect_transaction_diff;
+use std::collections::{HashMap, HashSet};
 use std::fs::{self, OpenOptions};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
 #[cfg(unix)]
@@ -69,6 +73,7 @@ pub async fn run_daemon_server() -> Result<()> {
         let _ = tokio::signal::ctrl_c().await;
         let _ = sig_tx.send(true);
     });
+    spawn_watchdog_loop(state.clone(), shutdown_rx.clone());
 
     loop {
         tokio::select! {
@@ -140,6 +145,7 @@ pub async fn run_daemon_server() -> Result<()> {
         let _ = tokio::signal::ctrl_c().await;
         let _ = sig_tx.send(true);
     });
+    spawn_watchdog_loop(state.clone(), shutdown_rx.clone());
 
     loop {
         tokio::select! {
@@ -400,5 +406,265 @@ fn handle_line(
         | DaemonRequest::RollbackTx { .. }
         | DaemonRequest::InspectTxDiff { .. }
         | DaemonRequest::AuditReport { .. } => unreachable!(),
+    }
+}
+
+const WATCHDOG_POLL_SECS: u64 = 15;
+const WATCHDOG_STALLED_SECS: u64 = 120;
+const WATCHDOG_MAX_ACTIVE_AGE_SECS: u64 = 1800;
+const WATCHDOG_ERROR_STREAK_MIN: u32 = 3;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WatchdogIncidentKind {
+    Stalled,
+    ErrorLoop,
+}
+
+#[derive(Debug, Default)]
+struct SubagentWatchdogTracker {
+    notified: HashMap<String, WatchdogIncidentKind>,
+}
+
+impl SubagentWatchdogTracker {
+    /// Strict 1-shot deduplication per `(conversation_id, incident_kind)` while active.
+    /// Allows at most one escalation from `Stalled` -> `ErrorLoop`, and prunes finished IDs.
+    fn should_notify(&mut self, conv_id: &str, kind: WatchdogIncidentKind) -> bool {
+        match self.notified.get(conv_id).copied() {
+            Some(prev) if prev == kind => false,
+            Some(WatchdogIncidentKind::ErrorLoop) => false,
+            _ => {
+                self.notified.insert(conv_id.to_string(), kind);
+                true
+            }
+        }
+    }
+
+    fn retain_active(&mut self, active_ids: &HashSet<String>) {
+        self.notified.retain(|id, _| active_ids.contains(id));
+    }
+}
+
+fn sanitize_notification_text(raw: &str, max_chars: usize) -> String {
+    raw.chars()
+        .map(|c| match c {
+            '\n' | '\r' | '\t' => ' ',
+            '"' => '\'',
+            '\\' => '/',
+            c if c.is_control() => ' ',
+            _ => c,
+        })
+        .collect::<String>()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .chars()
+        .take(max_chars)
+        .collect()
+}
+
+fn format_watchdog_notification(
+    role: &str,
+    conv_id: &str,
+    kind: WatchdogIncidentKind,
+    streak: u32,
+    err_summary: Option<&str>,
+    idle_secs: u64,
+) -> (String, String) {
+    let clean_role = if role.trim().is_empty() {
+        "subagent"
+    } else {
+        role.trim()
+    };
+    let short_id = &conv_id[..conv_id.len().min(8)];
+    let title = "AGY Hyper Watchdog".to_string();
+    let body = match kind {
+        WatchdogIncidentKind::ErrorLoop => {
+            let err_note = err_summary
+                .filter(|s| !s.trim().is_empty())
+                .map(|s| format!(" ({})", sanitize_notification_text(s, 64)))
+                .unwrap_or_default();
+            format!(
+                "{} #{} hit {} consecutive errors{}. Switch to Antigravity to inspect or rescue.",
+                clean_role, short_id, streak, err_note
+            )
+        }
+        WatchdogIncidentKind::Stalled => {
+            format!(
+                "{} #{} has been silent for {}s. Switch to Antigravity to check if it hung.",
+                clean_role, short_id, idle_secs
+            )
+        }
+    };
+    (title, sanitize_notification_text(&body, 180))
+}
+
+fn dispatch_desktop_notification(title: &str, body: &str) {
+    if std::env::var_os("AGY_HYPER_NO_NOTIFY").is_some() {
+        return;
+    }
+    let clean_title = sanitize_notification_text(title, 64);
+    let clean_body = sanitize_notification_text(body, 180);
+    if clean_title.is_empty() || clean_body.is_empty() {
+        return;
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        // Pass title & body via positional argv so AppleScript string injection is impossible.
+        let script = "on run argv\n  display notification (item 2 of argv) with title (item 1 of argv)\nend run";
+        let _ = std::process::Command::new("osascript")
+            .args(["-e", script, "--", &clean_title, &clean_body])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status();
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        let _ = std::process::Command::new("notify-send")
+            .args(["-u", "normal", "-a", "AGY Hyper", &clean_title, &clean_body])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status();
+    }
+
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    {
+        let _ = (&clean_title, &clean_body);
+    }
+}
+
+fn run_watchdog_tick(state: &Arc<Mutex<DaemonState>>, tracker: &mut SubagentWatchdogTracker) {
+    let cfg = match state.lock() {
+        Ok(guard) => guard.config_clone(),
+        Err(_) => return,
+    };
+    if !cfg.enable_watchdog_notify {
+        return;
+    }
+
+    let active = discover_all_active_subagents(WATCHDOG_MAX_ACTIVE_AGE_SECS);
+    let active_ids: HashSet<String> = active.iter().map(|s| s.conversation_id.clone()).collect();
+    tracker.retain_active(&active_ids);
+    if active.is_empty() {
+        return;
+    }
+
+    let now_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+
+    for child in active {
+        let idle_secs = now_ms.saturating_sub(child.mtime_ms) / 1000;
+        let pulse = inspect_transcript_tail(&child.transcript_path, &cfg);
+        let streak = pulse
+            .as_ref()
+            .map(|p| p.consecutive_error_streak)
+            .unwrap_or(0);
+        let err_summary = pulse.and_then(|p| p.repeat_error_signature);
+
+        let incident = if streak >= WATCHDOG_ERROR_STREAK_MIN {
+            Some(WatchdogIncidentKind::ErrorLoop)
+        } else if idle_secs >= WATCHDOG_STALLED_SECS {
+            Some(WatchdogIncidentKind::Stalled)
+        } else {
+            None
+        };
+
+        let Some(kind) = incident else {
+            continue;
+        };
+        if !tracker.should_notify(&child.conversation_id, kind) {
+            continue;
+        }
+
+        let (title, body) = format_watchdog_notification(
+            &child.agent_name,
+            &child.conversation_id,
+            kind,
+            streak,
+            err_summary.as_deref(),
+            idle_secs,
+        );
+        dispatch_desktop_notification(&title, &body);
+        if let Ok(mut guard) = state.lock() {
+            guard.record_event(
+                "watchdog_notify".into(),
+                Some(child.conversation_id),
+                0,
+                0,
+                0,
+                body,
+                false,
+            );
+        }
+    }
+}
+
+fn spawn_watchdog_loop(
+    state: Arc<Mutex<DaemonState>>,
+    mut shutdown_rx: tokio::sync::watch::Receiver<bool>,
+) {
+    tokio::spawn(async move {
+        let mut ticker = tokio::time::interval(Duration::from_secs(WATCHDOG_POLL_SECS));
+        ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        ticker.tick().await; // skip immediate tick at daemon boot
+        let tracker = Arc::new(Mutex::new(SubagentWatchdogTracker::default()));
+
+        loop {
+            tokio::select! {
+                _ = shutdown_rx.changed() => {
+                    if *shutdown_rx.borrow() { break; }
+                }
+                _ = ticker.tick() => {
+                    let st = state.clone();
+                    let tr = tracker.clone();
+                    let _ = tokio::task::spawn_blocking(move || {
+                        if let Ok(mut guard) = tr.lock() {
+                            run_watchdog_tick(&st, &mut guard);
+                        }
+                    }).await;
+                }
+            }
+        }
+    });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn watchdog_tracker_deduplicates_oneshot_and_allows_escalation() {
+        let mut tr = SubagentWatchdogTracker::default();
+        assert!(tr.should_notify("sub-1", WatchdogIncidentKind::Stalled));
+        assert!(!tr.should_notify("sub-1", WatchdogIncidentKind::Stalled));
+        assert!(tr.should_notify("sub-1", WatchdogIncidentKind::ErrorLoop));
+        assert!(!tr.should_notify("sub-1", WatchdogIncidentKind::ErrorLoop));
+        assert!(!tr.should_notify("sub-1", WatchdogIncidentKind::Stalled));
+
+        let active: HashSet<String> = HashSet::new();
+        tr.retain_active(&active);
+        assert!(tr.should_notify("sub-1", WatchdogIncidentKind::Stalled));
+    }
+
+    #[test]
+    fn watchdog_notification_sanitizes_control_chars_and_quotes() {
+        let (title, body) = format_watchdog_notification(
+            "browser",
+            "aaaaaaaa-1111-2222-3333-444444444444",
+            WatchdogIncidentKind::ErrorLoop,
+            6,
+            Some("API error \"bad\"\n\\EOF"),
+            12,
+        );
+        assert_eq!(title, "AGY Hyper Watchdog");
+        assert!(body.contains("browser #aaaaaaaa hit 6 consecutive errors"));
+        assert!(!body.contains('"'));
+        assert!(!body.contains('\n'));
+        assert!(!body.contains('\\'));
     }
 }

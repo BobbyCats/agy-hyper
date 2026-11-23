@@ -747,6 +747,10 @@ impl DaemonState {
         )
     }
 
+    pub fn config_clone(&self) -> HyperConfig {
+        self.config.clone()
+    }
+
     /// Capture lightweight in-memory state in `<10us` so heavy disk/transcript I/O runs lock-free.
     pub fn snapshot_parts(&self) -> SnapshotParts {
         (
@@ -773,6 +777,7 @@ impl DaemonState {
 }
 
 const STALLED_SUBAGENT_IDLE_SECS: u64 = 90;
+const SUBAGENT_ERROR_LOOP_THRESHOLD: u32 = 2;
 
 /// Ultra-lightweight lock-free pulse for Antigravity CLI `statusLine` & `title` (`<2ms`).
 /// Never scans 60 sessions, never invokes sqlite3, and never scans brain directories on hot ticks.
@@ -805,6 +810,8 @@ pub fn build_statusline_pulse(
         analyze_transcript(&tpath).ok()
     };
 
+    let unhealthy_subagents = count_unhealthy_active_children(&pulse.conversation_id, config);
+
     Some(StatuslinePulseResponse {
         model: pulse
             .model
@@ -822,6 +829,7 @@ pub fn build_statusline_pulse(
             .unwrap_or(pulse.cache_hit_ratio),
         health: pulse.health,
         consecutive_error_streak: pulse.consecutive_error_streak,
+        unhealthy_subagents,
         median_turn_ms: bench.as_ref().map(|b| b.median_turn_ms).unwrap_or(0),
         median_llm_ms: bench.as_ref().map(|b| b.median_llm_ms).unwrap_or(0),
         effective_tps: bench.as_ref().map(|b| b.effective_tps).unwrap_or(0.0),
@@ -932,6 +940,7 @@ pub fn build_cockpit_snapshot(
         let mut active_subagents = 0usize;
         let mut redline_subagents = 0usize;
         let mut stalled_subagents = 0usize;
+        let mut error_loop_subagents = 0usize;
         let snap_now_ms = now_ms();
 
         for child in descendants {
@@ -955,12 +964,35 @@ pub fn build_cockpit_snapshot(
                 .as_ref()
                 .map(|p| p.health)
                 .unwrap_or(HealthLevel::Green);
+            let health_reason = child_pulse
+                .as_ref()
+                .map(|p| p.health_reason.clone())
+                .unwrap_or_else(|| "healthy".into());
+            let consecutive_error_streak = child_pulse
+                .as_ref()
+                .map(|p| p.consecutive_error_streak)
+                .unwrap_or(0);
+            let last_error_summary = child_pulse
+                .as_ref()
+                .and_then(|p| p.repeat_error_signature.clone());
+            let checkpoint_count = child_pulse
+                .as_ref()
+                .map(|p| p.checkpoint_count)
+                .unwrap_or(0);
+            let media_items_recent = child_pulse
+                .as_ref()
+                .map(|p| p.media_items_recent)
+                .unwrap_or(0);
             let idle_secs = snap_now_ms.saturating_sub(child.mtime_ms) / 1000;
-            let stalled = is_stalled_subagent(child.active, idle_secs);
+            let error_loop = is_error_loop_subagent(child.active, consecutive_error_streak);
+            let stalled = !error_loop && is_stalled_subagent(child.active, idle_secs);
             if child.active {
                 active_subagents += 1;
             }
-            if is_active_redline(child.active, health) {
+            if error_loop {
+                error_loop_subagents += 1;
+            }
+            if is_active_redline(child.active, health) && !error_loop {
                 redline_subagents += 1;
             }
             if stalled {
@@ -992,12 +1024,14 @@ pub fn build_cockpit_snapshot(
                 mtime_ms: child.mtime_ms,
                 idle_secs,
                 stalled,
+                error_loop,
+                consecutive_error_streak,
+                last_error_summary,
+                checkpoint_count,
+                media_items_recent,
                 model: child_pulse.as_ref().and_then(|p| p.model.clone()),
                 health,
-                health_reason: child_pulse
-                    .as_ref()
-                    .map(|p| p.health_reason.clone())
-                    .unwrap_or_else(|| "healthy".into()),
+                health_reason,
                 total_tokens: child_pulse.as_ref().map(|p| p.total_tokens).unwrap_or(0),
                 cache_hit_ratio: child_bench
                     .as_ref()
@@ -1027,6 +1061,7 @@ pub fn build_cockpit_snapshot(
             active_subagents,
             redline_subagents,
             stalled_subagents,
+            error_loop_subagents,
             combined_turns,
             combined_tokens,
             combined_hyper_calls: combined_hyper,
@@ -1076,6 +1111,33 @@ pub(crate) fn is_active_redline(active: bool, health: HealthLevel) -> bool {
 
 pub(crate) fn is_stalled_subagent(active: bool, idle_secs: u64) -> bool {
     active && idle_secs >= STALLED_SUBAGENT_IDLE_SECS
+}
+
+pub(crate) fn is_error_loop_subagent(active: bool, consecutive_error_streak: u32) -> bool {
+    active && consecutive_error_streak >= SUBAGENT_ERROR_LOOP_THRESHOLD
+}
+
+/// Fast O(active_children) count of unhealthy (crash-looping >=3 or silent >=90s) child subagents.
+pub fn count_unhealthy_active_children(parent_conv_id: &str, config: &HyperConfig) -> usize {
+    if parent_conv_id.trim().is_empty() {
+        return 0;
+    }
+    let children = hyper_core::sessions::discover_active_child_sessions(parent_conv_id);
+    if children.is_empty() {
+        return 0;
+    }
+    let now = now_ms();
+    let mut bad = 0usize;
+    for child in children {
+        let idle_secs = now.saturating_sub(child.mtime_ms) / 1000;
+        let streak = inspect_transcript_tail(&child.transcript_path, config)
+            .map(|p| p.consecutive_error_streak)
+            .unwrap_or(0);
+        if streak >= 3 || idle_secs >= STALLED_SUBAGENT_IDLE_SECS {
+            bad += 1;
+        }
+    }
+    bad
 }
 
 pub(crate) fn is_content_mutation_event(kind: &EventKind) -> bool {
@@ -1232,5 +1294,14 @@ mod tests {
         assert!(is_stalled_subagent(true, 90));
         assert!(is_stalled_subagent(true, 300));
         assert!(!is_stalled_subagent(false, 600));
+    }
+
+    #[test]
+    fn error_loop_subagent_catches_active_retry_loops_even_with_fresh_mtime() {
+        assert!(!is_error_loop_subagent(true, 0));
+        assert!(!is_error_loop_subagent(true, 1));
+        assert!(is_error_loop_subagent(true, 2));
+        assert!(is_error_loop_subagent(true, 6));
+        assert!(!is_error_loop_subagent(false, 6));
     }
 }

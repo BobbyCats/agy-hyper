@@ -105,6 +105,8 @@ pub struct HyperConfig {
     pub enable_mcp_check: bool,
     pub max_wal_entries: usize,
     pub enable_ui_pill: bool,
+    #[serde(default = "default_true")]
+    pub enable_watchdog_notify: bool,
     #[serde(default = "default_currency")]
     pub display_currency: String,
     #[serde(default = "default_fx_rates")]
@@ -137,6 +139,7 @@ impl Default for HyperConfig {
             enable_mcp_check: true,
             max_wal_entries: 100,
             enable_ui_pill: true,
+            enable_watchdog_notify: true,
             display_currency: default_currency(),
             fx_rates: default_fx_rates(),
             fx_updated_at_ms: None,
@@ -203,6 +206,7 @@ impl HyperConfig {
             "block_secret_files" => self.block_secret_files = value,
             "allow_custom_argv_checks" => self.allow_custom_argv_checks = value,
             "enable_ui_pill" => self.enable_ui_pill = value,
+            "enable_watchdog_notify" => self.enable_watchdog_notify = value,
             "enable_mcp_read" => self.enable_mcp_read = value,
             "enable_mcp_edit" => self.enable_mcp_edit = value,
             "enable_mcp_check" => self.enable_mcp_check = value,
