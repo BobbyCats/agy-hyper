@@ -218,7 +218,20 @@ Measured on Apple Silicon (release LTO build, cold MCP process spawn included) v
 | `hyper_search` + `gix` read-only Git (1 call) | **20 ms** | vs **43 ms** baseline `git status && git log && grep -rn` (**2.2x faster**) |
 | `hyper_pack` (cold single-pass ripgrep + AST + slices + `gix` + 1-hop) | **58 ms** | Zero external `rg` or `git` binaries |
 | `agy-hyper statusline` (warm Daemon pulse + CLI stdin) | **4.2 ms** | Full process exec + lock-free UDS RPC + ANSI/plain-title render (always exits `0`) |
-| Full Rust unit & security chaos suite (`53/53`) | **2.1 s** | Covers ENOSPC staging, dangling symlinks, 4-lang 1-hop, WAL rollback, idle/fail-fast watchdog, empirical TTL migration, Context X-Ray, Loop Guard, CLI statusline, pure-Rust 2x PNG audit export, and MCP `PLUGIN_ROOT` fail-fast guard |
+| Full Rust unit & security chaos suite (`56/56`) | **2.1 s** | Covers ENOSPC staging, dangling symlinks, 4-lang 1-hop, WAL rollback, idle/fail-fast watchdog, multi-runner semantic digest classification, empirical TTL migration, Context X-Ray, Loop Guard, CLI statusline, pure-Rust 2x PNG audit export, and MCP `PLUGIN_ROOT` fail-fast guard |
+
+### Controlled End-to-End Paired A/B (`agy` CLI)
+
+Three real engineering tasks executed back-to-back on identical detached `git worktree`s (`gemini-4-neon-medium`, `agy v1.5.14`, shared pre-warmed `CARGO_TARGET_DIR`, **3/3 pass and 0 tool errors on both arms**):
+
+| Task | Native Antigravity | AGY Hyper (`Balanced`) | Delta |
+| :--- | :--- | :--- | :--- |
+| **T1 · Cross-module security trace** (read-only) | 9 turns · 24 tools · 460.8K total ctx · 136.4s clean* | **5 turns · 13 tools · 187.8K total ctx · 87.0s** | **-44.4% turns · -45.8% tools · -59.2% ctx · -36.2% clean time** |
+| **T2 · Multi-file `--scale` CLI feature + test** | 7 turns · 16 tools · 218.4K total ctx · 142.0s | **6 turns · 10 tools · 180.0K total ctx · 101.3s** | **-14.3% turns · -37.5% tools · -17.6% ctx · -28.7% time** |
+| **T3 · Two-bug production fix + test** | 6 turns · 7 tools · 191.9K total ctx · 68.6s clean* | **6 turns · 8 tools · 168.6K total ctx · 90.5s** | **= turns · -12.1% ctx · -8.2% uncached** (short 2-file fix) |
+| **Total (3/3 pass vs 3/3 pass)** | **22 turns · 47 tools · 871.0K ctx (`147.9K` uncached) · 347.0s clean*** | **17 turns · 31 tools · 536.4K ctx (`132.6K` uncached) · 278.8s** | **-22.7% turns · -34.0% tools · -38.4% total ctx · -10.3% uncached · -19.7% clean time** |
+
+> \* *Clean time strips 3 transient upstream API retry stalls observed in the Native arm (`~53s` in T1, `~107s` in T3; `0` retries in the AGY Hyper arm; raw wall time was `507.0s` vs `278.8s`, `-45.0%`). Biggest wins appear on multi-file exploration and cross-file read-edit-test loops; narrow 2-file fixes with explicit test line numbers already take short tool paths.*
 
 Reproduce on your own repository:
 

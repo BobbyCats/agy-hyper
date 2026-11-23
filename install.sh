@@ -116,7 +116,7 @@ if [[ -n "$SCRIPT_SRC" && -f "$SCRIPT_SRC" ]]; then
 fi
 if [[ -n "$SCRIPT_DIR" && -f "${SCRIPT_DIR}/Cargo.toml" && -d "${SCRIPT_DIR}/plugin" ]]; then
   echo "→ Local source checkout detected."
-  if [[ ! -x "${SCRIPT_DIR}/target/release/agy-hyper" ]]; then
+  if [[ "${AGY_HYPER_SKIP_BUILD:-0}" != "1" || ! -x "${SCRIPT_DIR}/target/release/agy-hyper" ]]; then
     echo "→ Building release binary via cargo..."
     (cd "$SCRIPT_DIR" && cargo build --release)
   fi
