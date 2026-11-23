@@ -59,7 +59,7 @@ irm https://raw.githubusercontent.com/BobbyCats/agy-hyper/main/install.ps1 | iex
 git clone https://github.com/BobbyCats/agy-hyper.git && cd agy-hyper && ./install.sh --observe
 ```
 
-> **可独立全包，也可与 `agy-fast` 无缝共存**：如果你已经装了 `agy-fast` 或其他 MCP 加速插件，完全不用二选一——直接用 `--observe` 模式叠装 AGY Hyper，零工具拦截冲突，原地补齐实时缓存保鲜侧边栏、10 秒本机烧额度体检卡、上下文 X-Ray 与被动 WAL 改文件一键撤回。
+> **可独立全包，也可与其他 MCP 插件无缝共存**：不管你现在只用 Antigravity 原生工具，还是已经配了其他 MCP 插件，都可以用 `--observe` 模式零冲突并排运行，原生行内 Diff 卡片 100% 保留，同时原地补齐实时缓存保鲜侧边栏、10 秒本机烧额度体检卡、上下文 X-Ray 与被动 WAL 改文件一键撤回。
 
 ### Antigravity CLI（`agy`）完整支持
 

@@ -59,7 +59,7 @@ irm https://raw.githubusercontent.com/BobbyCats/agy-hyper/main/install.ps1 | iex
 git clone https://github.com/BobbyCats/agy-hyper.git && cd agy-hyper && ./install.sh --observe
 ```
 
-> **Works standalone or alongside `agy-fast`**: Already using `agy-fast` or another MCP accelerator? Keep it — install AGY Hyper in `--observe` mode to run side by side with zero tool-call overlap, while adding live cache-TTL countdowns, 10-second local burn audits, Context X-Ray, and passive WAL file undo.
+> **Works standalone or alongside other MCP plugins**: Already using other MCP tools or accelerators? Keep them — install AGY Hyper in `--observe` mode to run side by side with zero tool-call overlap, while keeping native inline diffs untouched and adding live cache-TTL countdowns, 10-second local burn audits, Context X-Ray, and passive WAL file undo.
 
 ### Antigravity CLI (`agy`) Support
 
