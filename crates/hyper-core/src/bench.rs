@@ -1,5 +1,5 @@
 use crate::json_util::unquote_json_string;
-use crate::transcript::parse_iso8601_epoch_ms;
+use crate::transcript::{classify_transport_error, parse_iso8601_epoch_ms, TransportErrorKind};
 use crate::usage::{model_ttl_family, normalize_model_key, TokenBucket, UNATTRIBUTED_MODEL};
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
@@ -14,16 +14,22 @@ pub use crate::sessions::{
     sanitize_session_title, SessionSummary,
 };
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct TurnWaterfall {
     pub turn_index: usize,
     pub step_index: u64,
     pub started_ms: i64,
     pub total_turn_ms: u64,
-    /// Estimated TTFT + model inference before tool dispatch (from prev step end -> planner response).
+    /// Estimated TTFT + model inference before tool dispatch (excluding stream retry backoff).
     pub llm_inference_ms: u64,
     /// Tool execution span (from planner response -> last tool completion before next planner).
     pub tool_exec_ms: u64,
+    /// Upstream transport/stream errors (`Timeout` / `Reset`) preceding this planner response.
+    #[serde(default)]
+    pub transport_errors: u32,
+    /// Wall time lost to upstream stream resets/timeouts before the winning planner response.
+    #[serde(default)]
+    pub retry_backoff_ms: u64,
     /// Tool call count in this turn.
     pub tool_calls: usize,
     pub used_hyper_tools: bool,
@@ -125,7 +131,7 @@ pub struct SessionSplitStats {
     pub model_switches: Vec<ModelSwitchEvent>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct SessionBenchmark {
     pub conversation_id: String,
     pub transcript_path: String,
@@ -156,6 +162,14 @@ pub struct SessionBenchmark {
     pub context_breakdown: ContextBreakdown,
     #[serde(default)]
     pub first_edit_context_tokens: Option<u64>,
+    #[serde(default)]
+    pub pre_edit_delta_tokens: Option<u64>,
+    #[serde(default)]
+    pub transport_error_count: usize,
+    #[serde(default)]
+    pub eof_reset_count: usize,
+    #[serde(default)]
+    pub total_retry_backoff_ms: u64,
     #[serde(default)]
     pub max_parallel_reads: usize,
     #[serde(default)]
@@ -221,6 +235,7 @@ pub fn analyze_transcript(path: &Path) -> Result<SessionBenchmark> {
         has_edit_tool: bool,
         read_file_count: usize,
         delegation_tool_count: usize,
+        transport_error: TransportErrorKind,
     }
 
     let mut steps: Vec<RawStep> = Vec::new();
@@ -243,6 +258,11 @@ pub fn analyze_transcript(path: &Path) -> Result<SessionBenchmark> {
             .and_then(Value::as_str)
             .unwrap_or("")
             .to_string();
+        let transport_error = if kind == "ERROR_MESSAGE" {
+            classify_error_step_value(&v)
+        } else {
+            TransportErrorKind::None
+        };
         let step_index = v.get("step_index").and_then(Value::as_u64).unwrap_or(0);
         let model = normalize_model_key(
             v.get("model")
@@ -369,6 +389,7 @@ pub fn analyze_transcript(path: &Path) -> Result<SessionBenchmark> {
             has_edit_tool,
             read_file_count,
             delegation_tool_count,
+            transport_error,
         });
     }
 
@@ -387,6 +408,16 @@ pub fn analyze_transcript(path: &Path) -> Result<SessionBenchmark> {
     let mut model_usage: BTreeMap<String, TokenBucket> = BTreeMap::new();
     let mut context_breakdown = ContextBreakdown::default();
     let mut first_edit_context_tokens: Option<u64> = None;
+    let mut pre_edit_delta_tokens: Option<u64> = None;
+    let mut session_first_turn_tokens: Option<u64> = None;
+    let mut request_baseline_tokens: Option<u64> = None;
+    let mut transport_error_count = 0usize;
+    let mut eof_reset_count = 0usize;
+    let mut orphan_retry_backoff_ms = 0u64;
+    let mut turn_trigger_ms: Option<i64> = None;
+    let mut pending_turn_errors = 0u32;
+    let mut pending_first_err_ms: Option<i64> = None;
+    let mut pending_last_err_ms: Option<i64> = None;
     let mut max_parallel_reads = 0usize;
     let mut blanket_read_turns = 0usize;
     let mut split_stats = SessionSplitStats::default();
@@ -395,6 +426,7 @@ pub fn analyze_transcript(path: &Path) -> Result<SessionBenchmark> {
     let mut first_turn_recorded = false;
 
     const MAX_VALID_SPAN_MS: i64 = 180_000;
+    const MAX_RETRY_STORM_SPAN_MS: i64 = 600_000;
 
     let mut i = 0usize;
     while i < steps.len() {
@@ -402,10 +434,48 @@ pub fn analyze_transcript(path: &Path) -> Result<SessionBenchmark> {
             if steps[i].is_compact_marker {
                 context_breakdown.reset();
             }
-            if matches!(steps[i].kind.as_str(), "USER_INPUT" | "SYSTEM_MESSAGE") {
+            if steps[i].kind == "USER_INPUT" {
+                request_baseline_tokens = None;
+                if pending_turn_errors > 0 {
+                    if let Some(last_err) = pending_last_err_ms.take() {
+                        let start = turn_trigger_ms.or(pending_first_err_ms).unwrap_or(last_err);
+                        let span = last_err.saturating_sub(start);
+                        if (0..=MAX_RETRY_STORM_SPAN_MS).contains(&span) {
+                            orphan_retry_backoff_ms =
+                                orphan_retry_backoff_ms.saturating_add(span as u64);
+                        }
+                    }
+                    pending_turn_errors = 0;
+                    pending_first_err_ms = None;
+                }
+                turn_trigger_ms = Some(steps[i].ts_ms);
                 context_breakdown.user_system_bytes = context_breakdown
                     .user_system_bytes
                     .saturating_add(steps[i].content_bytes);
+            } else if steps[i].kind == "SYSTEM_MESSAGE" {
+                if pending_turn_errors == 0 {
+                    turn_trigger_ms = Some(steps[i].ts_ms);
+                }
+                context_breakdown.user_system_bytes = context_breakdown
+                    .user_system_bytes
+                    .saturating_add(steps[i].content_bytes);
+            } else if steps[i].kind == "ERROR_MESSAGE" {
+                match steps[i].transport_error {
+                    TransportErrorKind::Reset => {
+                        transport_error_count += 1;
+                        eof_reset_count += 1;
+                        pending_turn_errors = pending_turn_errors.saturating_add(1);
+                        pending_first_err_ms.get_or_insert(steps[i].ts_ms);
+                        pending_last_err_ms = Some(steps[i].ts_ms);
+                    }
+                    TransportErrorKind::Timeout => {
+                        transport_error_count += 1;
+                        pending_turn_errors = pending_turn_errors.saturating_add(1);
+                        pending_first_err_ms.get_or_insert(steps[i].ts_ms);
+                        pending_last_err_ms = Some(steps[i].ts_ms);
+                    }
+                    TransportErrorKind::UserCanceled | TransportErrorKind::None => {}
+                }
             }
             context_breakdown.media_items = context_breakdown
                 .media_items
@@ -414,10 +484,20 @@ pub fn analyze_transcript(path: &Path) -> Result<SessionBenchmark> {
             continue;
         }
         let planner = &steps[i];
+        let turn_transport_errors = pending_turn_errors;
+        let turn_first_err_ms = pending_first_err_ms.take();
+        let turn_last_err_ms = pending_last_err_ms.take();
+        pending_turn_errors = 0;
+        let trigger_before_planner_ms = turn_trigger_ms;
 
         let cur_total = planner.input_tokens + planner.cache_read_tokens;
         if prev_planner_total >= 80_000 && cur_total > 0 && cur_total * 100 <= prev_planner_total * 55 {
             context_breakdown.reset();
+            request_baseline_tokens = Some(cur_total);
+        }
+        if cur_total > 0 {
+            session_first_turn_tokens.get_or_insert(cur_total);
+            request_baseline_tokens.get_or_insert(cur_total);
         }
         context_breakdown.planner_text_bytes = context_breakdown
             .planner_text_bytes
@@ -440,6 +520,10 @@ pub fn analyze_transcript(path: &Path) -> Result<SessionBenchmark> {
         }
         if first_edit_context_tokens.is_none() && planner.has_edit_tool && cur_total > 0 {
             first_edit_context_tokens = Some(cur_total);
+            let baseline = request_baseline_tokens
+                .or(session_first_turn_tokens)
+                .unwrap_or(cur_total);
+            pre_edit_delta_tokens = Some(cur_total.saturating_sub(baseline));
         }
 
         if let Some(prev_ms) = prev_planner_ms {
@@ -538,6 +622,7 @@ pub fn analyze_transcript(path: &Path) -> Result<SessionBenchmark> {
         while j < steps.len()
             && steps[j].kind != "PLANNER_RESPONSE"
             && steps[j].kind != "USER_INPUT"
+            && steps[j].kind != "ERROR_MESSAGE"
         {
             let st = &steps[j];
             let is_tool_step = st.kind == "GENERIC"
@@ -599,21 +684,52 @@ pub fn analyze_transcript(path: &Path) -> Result<SessionBenchmark> {
             }
         }
 
-        // Only measure turns where we have an exact LLM-end boundary (tool dispatch).
-        // Pure final assistant replies before USER_INPUT have no LLM-completion timestamp
-        // in Antigravity logs, so excluding them prevents fake 0s bars or user-idle distortion.
-        let Some(llm_end_ms) = first_tool_start_ms else {
+        let turn_start_ms = if turn_transport_errors > 0 {
+            trigger_before_planner_ms
+                .or(turn_first_err_ms)
+                .unwrap_or(planner.ts_ms)
+                .min(planner.ts_ms)
+        } else {
+            planner.ts_ms
+        };
+
+        // Only measure turns where we have an exact LLM-end boundary (tool dispatch, or a retry-storm
+        // recovery boundary when upstream transport errors preceded the planner response).
+        let llm_end_ms = if let Some(first_tool) = first_tool_start_ms {
+            first_tool
+        } else if turn_transport_errors > 0 && planner.ts_ms > turn_start_ms {
+            planner.ts_ms
+        } else {
+            turn_trigger_ms = Some(planner.ts_ms);
             i = j;
             continue;
         };
 
-        let llm_delta = (llm_end_ms - planner.ts_ms).max(0);
+        let raw_llm_delta = (llm_end_ms - turn_start_ms).max(0);
         let tools_done_ms = last_tool_end_ms.unwrap_or(llm_end_ms).max(llm_end_ms);
         let tool_delta = (tools_done_ms - llm_end_ms).max(0);
+        turn_trigger_ms = Some(tools_done_ms);
 
-        if llm_delta <= MAX_VALID_SPAN_MS && tool_delta <= MAX_VALID_SPAN_MS {
-            let llm_ms = llm_delta as u64;
+        let max_valid_span = if turn_transport_errors > 0 {
+            MAX_RETRY_STORM_SPAN_MS
+        } else {
+            MAX_VALID_SPAN_MS
+        };
+
+        if raw_llm_delta <= max_valid_span && tool_delta <= max_valid_span {
+            let raw_llm_ms = raw_llm_delta as u64;
             let tool_ms = tool_delta as u64;
+            let total_turn_ms = raw_llm_ms + tool_ms;
+            let retry_backoff_ms = if turn_transport_errors > 0 {
+                turn_last_err_ms
+                    .map(|last_err| last_err.saturating_sub(turn_start_ms).max(0) as u64)
+                    .unwrap_or(0)
+                    .min(raw_llm_ms)
+                    .min(total_turn_ms)
+            } else {
+                0
+            };
+            let llm_ms = raw_llm_ms.saturating_sub(retry_backoff_ms);
             if llm_ms > 0 {
                 paired_llm_ms += llm_ms;
                 paired_output_tokens += planner.output_tokens;
@@ -621,10 +737,12 @@ pub fn analyze_transcript(path: &Path) -> Result<SessionBenchmark> {
             turns.push(TurnWaterfall {
                 turn_index: turns.len() + 1,
                 step_index: planner.step_index,
-                started_ms: planner.ts_ms,
-                total_turn_ms: llm_ms + tool_ms,
+                started_ms: turn_start_ms,
+                total_turn_ms,
                 llm_inference_ms: llm_ms,
                 tool_exec_ms: tool_ms,
+                transport_errors: turn_transport_errors,
+                retry_backoff_ms,
                 tool_calls: planner.tool_names.len(),
                 used_hyper_tools: planner.hyper_tool_count > 0,
                 input_tokens: planner.input_tokens,
@@ -638,11 +756,26 @@ pub fn analyze_transcript(path: &Path) -> Result<SessionBenchmark> {
         i = j;
     }
 
+    if pending_turn_errors > 0 {
+        if let Some(last_err) = pending_last_err_ms {
+            let start = turn_trigger_ms.or(pending_first_err_ms).unwrap_or(last_err);
+            let span = last_err.saturating_sub(start);
+            if (0..=MAX_RETRY_STORM_SPAN_MS).contains(&span) {
+                orphan_retry_backoff_ms = orphan_retry_backoff_ms.saturating_add(span as u64);
+            }
+        }
+    }
+
     let mut turn_durs: Vec<u64> = turns.iter().map(|t| t.total_turn_ms).collect();
     let mut llm_durs: Vec<u64> = turns.iter().map(|t| t.llm_inference_ms).collect();
     let total_llm_ms: u64 = turns.iter().map(|t| t.llm_inference_ms).sum();
     let total_tool_ms: u64 = turns.iter().map(|t| t.tool_exec_ms).sum();
-    let total_wall_ms = total_llm_ms + total_tool_ms;
+    let total_retry_backoff_ms: u64 = turns
+        .iter()
+        .map(|t| t.retry_backoff_ms)
+        .sum::<u64>()
+        .saturating_add(orphan_retry_backoff_ms);
+    let total_wall_ms: u64 = turns.iter().map(|t| t.total_turn_ms).sum();
 
     let effective_tps = if paired_llm_ms > 0 {
         paired_output_tokens as f64 / (paired_llm_ms as f64 / 1000.0)
@@ -715,6 +848,10 @@ pub fn analyze_transcript(path: &Path) -> Result<SessionBenchmark> {
         model_usage,
         context_breakdown,
         first_edit_context_tokens,
+        pre_edit_delta_tokens,
+        transport_error_count,
+        eof_reset_count,
+        total_retry_backoff_ms,
         max_parallel_reads,
         blanket_read_turns,
         split_stats,
@@ -848,6 +985,31 @@ pub fn render_waterfall_svg(session: &SessionBenchmark) -> String {
         session.effective_tps,
         rows
     )
+}
+
+fn classify_error_step_value(v: &Value) -> TransportErrorKind {
+    let candidates = [
+        v.get("content").and_then(Value::as_str),
+        v.get("message").and_then(Value::as_str),
+        v.get("error").and_then(Value::as_str),
+        v.get("error")
+            .and_then(|e| e.get("message"))
+            .and_then(Value::as_str),
+    ];
+    let mut saw_cancel = false;
+    for cand in candidates.into_iter().flatten() {
+        match classify_transport_error(cand) {
+            TransportErrorKind::Reset => return TransportErrorKind::Reset,
+            TransportErrorKind::Timeout => return TransportErrorKind::Timeout,
+            TransportErrorKind::UserCanceled => saw_cancel = true,
+            TransportErrorKind::None => {}
+        }
+    }
+    if saw_cancel {
+        TransportErrorKind::UserCanceled
+    } else {
+        TransportErrorKind::None
+    }
 }
 
 fn extract_completed_at_ms(content: &str) -> Option<i64> {
@@ -1036,5 +1198,50 @@ mod tests {
         assert_eq!(parsed.split_stats.model_switch_count, 0);
         assert!(parsed.split_stats.model_switches.is_empty());
         assert_eq!(parsed.split_stats.primary_model, None);
+        assert_eq!(parsed.transport_error_count, 0);
+        assert_eq!(parsed.eof_reset_count, 0);
+        assert_eq!(parsed.total_retry_backoff_ms, 0);
+        assert_eq!(parsed.pre_edit_delta_tokens, None);
+    }
+
+    #[test]
+    fn attributes_eof_retry_storm_waterfall_and_separates_pre_edit_delta_tokens() {
+        let dir = tempdir().unwrap();
+        let p = dir.path().join("transcript.jsonl");
+        // Multi-task session:
+        // Task 1 starts at 140k tokens (heavy global skills/MCP baseline), chats up to 150k without editing.
+        // Task 2 starts with USER_INPUT at 10:05:00Z, hits a 220s EOF + TLS timeout retry storm (>180s normal cap,
+        // <=600s retry ceiling), recovers at 10:08:40Z (baseline=155k), then edits on the next turn at 162k (+7k delta).
+        let data = concat!(
+            "{\"step_index\":1,\"type\":\"USER_INPUT\",\"created_at\":\"2026-11-20T10:00:00Z\",\"content\":\"Explain architecture\"}\n",
+            "{\"step_index\":2,\"type\":\"PLANNER_RESPONSE\",\"created_at\":\"2026-11-20T10:00:00Z\",\"input_tokens\":140000,\"cache_read_tokens\":0,\"output_tokens\":120,\"tool_calls\":[{\"name\":\"read_file\"}]}\n",
+            "{\"step_index\":3,\"type\":\"GENERIC\",\"created_at\":\"2026-11-20T10:00:03Z\",\"content\":\"Created At: 2026-11-20T10:00:03Z\\nCompleted At: 2026-11-20T10:00:04Z\\nOK\"}\n",
+            "{\"step_index\":4,\"type\":\"USER_INPUT\",\"created_at\":\"2026-11-20T10:05:00Z\",\"content\":\"Fix handler\"}\n",
+            "{\"step_index\":5,\"type\":\"ERROR_MESSAGE\",\"created_at\":\"2026-11-20T10:06:10Z\",\"error\":\"Post \\\"https://api.example.invalid/v1/stream\\\": EOF\"}\n",
+            "{\"step_index\":6,\"type\":\"ERROR_MESSAGE\",\"created_at\":\"2026-11-20T10:07:30Z\",\"message\":\"TLS handshake timeout\"}\n",
+            "{\"step_index\":7,\"type\":\"ERROR_MESSAGE\",\"created_at\":\"2026-11-20T10:08:40Z\",\"content\":\"stream was interrupted\"}\n",
+            "{\"step_index\":8,\"type\":\"PLANNER_RESPONSE\",\"created_at\":\"2026-11-20T10:08:42Z\",\"input_tokens\":5000,\"cache_read_tokens\":150000,\"output_tokens\":200,\"tool_calls\":[{\"name\":\"call_mcp_tool\",\"arguments\":{\"ServerName\":\"agy-hyper_core\",\"ToolName\":\"hyper_pack\"}}]}\n",
+            "{\"step_index\":9,\"type\":\"GENERIC\",\"created_at\":\"2026-11-20T10:08:46Z\",\"content\":\"Created At: 2026-11-20T10:08:46Z\\nCompleted At: 2026-11-20T10:08:47Z\\nOK\"}\n",
+            "{\"step_index\":10,\"type\":\"PLANNER_RESPONSE\",\"created_at\":\"2026-11-20T10:08:47Z\",\"input_tokens\":7000,\"cache_read_tokens\":155000,\"output_tokens\":150,\"tool_calls\":[{\"name\":\"hyper_edit\"}]}\n",
+            "{\"step_index\":11,\"type\":\"GENERIC\",\"created_at\":\"2026-11-20T10:08:50Z\",\"content\":\"Created At: 2026-11-20T10:08:50Z\\nCompleted At: 2026-11-20T10:08:51Z\\nOK\"}\n"
+        );
+        fs::write(&p, data).unwrap();
+        let b = analyze_transcript(&p).unwrap();
+
+        assert_eq!(b.dropped_idle_gap_turns, 0, "220s retry-storm turn must be kept under 600s ceiling");
+        assert_eq!(b.valid_turns, 3);
+        assert_eq!(b.transport_error_count, 3);
+        assert_eq!(b.eof_reset_count, 2);
+        assert_eq!(b.total_retry_backoff_ms, 220_000);
+
+        let storm_turn = &b.turns[1];
+        assert_eq!(storm_turn.transport_errors, 3);
+        assert_eq!(storm_turn.retry_backoff_ms, 220_000);
+        assert_eq!(storm_turn.llm_inference_ms, 6_000);
+        assert_eq!(storm_turn.tool_exec_ms, 1_000);
+        assert_eq!(storm_turn.total_turn_ms, 227_000);
+
+        assert_eq!(b.first_edit_context_tokens, Some(162_000));
+        assert_eq!(b.pre_edit_delta_tokens, Some(7_000));
     }
 }

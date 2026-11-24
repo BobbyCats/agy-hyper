@@ -134,21 +134,69 @@
     }
 
     if (heroTab === 'latency') {
+      const bench = snap.benchmark || {};
       $('hero-chart-title').textContent = t('hero.tab_latency');
-      $('hero-chart-meta').textContent = snap.benchmark?.median_turn_ms ? fmtSec(snap.benchmark.median_turn_ms) : '—';
-      const llmSec = turns.map((x) => Math.round(((x.llm_inference_ms || 0) / 1000) * 100) / 100);
-      const toolSec = turns.map((x) => Math.round(((x.tool_exec_ms || 0) / 1000) * 100) / 100);
+      $('hero-chart-meta').textContent = bench.median_turn_ms ? fmtSec(bench.median_turn_ms) : '—';
       const avgLlm = turns.length ? turns.reduce((a, b) => a + (b.llm_inference_ms || 0), 0) / turns.length : 0;
       const avgTool = turns.length ? turns.reduce((a, b) => a + (b.tool_exec_ms || 0), 0) / turns.length : 0;
 
-      renderBreakdown($('hero-breakdown'), [
+      const latRows = [
         { color: pal.indigo, label: t('hero.row_llm_avg'), value: fmtSec(avgLlm) },
         { color: pal.warn, label: t('hero.row_tool_avg'), value: fmtSec(avgTool) },
-        { color: pal.accent, label: t('kpi.paired_tps'), value: snap.benchmark?.effective_tps ? `${snap.benchmark.effective_tps.toFixed(1)} tok/s` : '—' },
-      ]);
+        { color: pal.accent, label: t('kpi.paired_tps'), value: bench.effective_tps ? `${bench.effective_tps.toFixed(1)} tok/s` : '—' },
+      ];
+      if ((bench.transport_error_count || 0) > 0) {
+        const stallTxt = (bench.eof_reset_count || 0) > 0
+          ? t('waterfall.retry_stall_eof_val', {
+              time: fmtSec(bench.total_retry_backoff_ms || 0),
+              count: bench.transport_error_count,
+              eof: bench.eof_reset_count,
+            })
+          : t('waterfall.retry_stall_val', {
+              time: fmtSec(bench.total_retry_backoff_ms || 0),
+              count: bench.transport_error_count,
+            });
+        latRows.push({
+          color: pal.err,
+          label: t('waterfall.retry_eof'),
+          value: stallTxt,
+        });
+      }
+      renderBreakdown($('hero-breakdown'), latRows);
 
       if (!chart) return;
       if (!turns.length) { chart.clear(); return; }
+
+      const llmSec = turns.map((x) => {
+        const v = Math.round(((x.llm_inference_ms || 0) / 1000) * 100) / 100;
+        const hasUpper = (x.tool_exec_ms || 0) > 0 || (x.retry_backoff_ms || 0) > 0;
+        return {
+          value: v,
+          itemStyle: { color: pal.indigo, borderRadius: hasUpper ? [0, 0, 2, 2] : [2, 2, 2, 2] },
+        };
+      });
+      const toolSec = turns.map((x) => {
+        const v = Math.round(((x.tool_exec_ms || 0) / 1000) * 100) / 100;
+        const hasRetry = (x.retry_backoff_ms || 0) > 0;
+        const hasLlm = (x.llm_inference_ms || 0) > 0;
+        const col = x.used_hyper_tools ? pal.ok : pal.warn;
+        return {
+          value: v,
+          itemStyle: {
+            color: col,
+            borderRadius: [hasRetry ? 0 : 2, hasRetry ? 0 : 2, hasLlm ? 0 : 2, hasLlm ? 0 : 2],
+          },
+        };
+      });
+      const retrySec = turns.map((x) => {
+        const v = Math.round(((x.retry_backoff_ms || 0) / 1000) * 100) / 100;
+        const hasLower = (x.llm_inference_ms || 0) > 0 || (x.tool_exec_ms || 0) > 0;
+        return {
+          value: v,
+          itemStyle: { color: pal.err, borderRadius: hasLower ? [2, 2, 0, 0] : [2, 2, 2, 2] },
+        };
+      });
+
       chart.setOption({
         animation: false,
         grid: { top: 14, right: 10, bottom: 20, left: 36 },
@@ -157,7 +205,16 @@
           formatter: (items) => {
             const tr = turns[items?.[0]?.dataIndex ?? 0];
             if (!tr) return '';
-            return `<b>T${tr.turn_index}</b><br/>${t('waterfall.tooltip_llm')}: <b>${fmtSec(tr.llm_inference_ms)}</b><br/>${t('waterfall.tooltip_tool')}: <b>${fmtSec(tr.tool_exec_ms)}</b>`;
+            const hasRetry = (tr.retry_backoff_ms || 0) > 0 || (tr.transport_errors || 0) > 0;
+            const retryCnt = (tr.transport_errors || 0) > 0 ? ` (×${tr.transport_errors})` : '';
+            return [
+              `<b>T${tr.turn_index}</b>`,
+              `${escapeHtml(t('waterfall.tooltip_llm'))}: <b>${fmtSec(tr.llm_inference_ms)}</b>`,
+              `${escapeHtml(t('waterfall.tooltip_tool'))}: <b>${fmtSec(tr.tool_exec_ms)}</b>`,
+              hasRetry
+                ? `<span style="color:${pal.err}">${escapeHtml(t('waterfall.retry_eof'))}: <b>${fmtSec(tr.retry_backoff_ms || 0)}</b>${escapeHtml(retryCnt)}</span>`
+                : '',
+            ].filter(Boolean).join('<br/>');
           },
         }),
         xAxis: baseCategoryAxis(pal, labels, true),
@@ -168,8 +225,9 @@
           axisLabel: { color: pal.muted, fontSize: 9.5, formatter: '{value}s' },
         },
         series: [
-          { name: t('waterfall.llm'), type: 'bar', stack: 't', barMaxWidth: 12, data: llmSec, itemStyle: { color: pal.indigo, borderRadius: [0, 0, 2, 2] } },
-          { name: t('waterfall.std'), type: 'bar', stack: 't', barMaxWidth: 12, data: toolSec, itemStyle: { color: pal.warn, borderRadius: [2, 2, 0, 0] } },
+          { name: t('waterfall.llm'), type: 'bar', stack: 't', barMaxWidth: 12, data: llmSec, itemStyle: { color: pal.indigo } },
+          { name: t('waterfall.local_tools'), type: 'bar', stack: 't', barMaxWidth: 12, data: toolSec, itemStyle: { color: pal.warn } },
+          { name: t('waterfall.retry_eof'), type: 'bar', stack: 't', barMaxWidth: 12, data: retrySec, itemStyle: { color: pal.err } },
         ],
       }, true);
       return;
@@ -290,13 +348,30 @@
     const sumLlm = turns.reduce((a, b) => a + (b.llm_inference_ms || 0), 0);
     const sumHyper = turns.reduce((a, b) => a + (b.used_hyper_tools ? b.tool_exec_ms || 0 : 0), 0);
     const sumStd = turns.reduce((a, b) => a + (b.used_hyper_tools ? 0 : b.tool_exec_ms || 0), 0);
-    const totalMs = Math.max(1, sumLlm + sumHyper + sumStd);
+    const sumRetry = turns.reduce((a, b) => a + (b.retry_backoff_ms || 0), 0);
+    const totalMs = Math.max(1, sumLlm + sumHyper + sumStd + sumRetry);
 
-    renderBreakdown($('wf-breakdown'), [
+    const wfRows = [
       { color: pal.indigo, label: t('waterfall.llm'), value: `${fmtSec(sumLlm)} (${Math.round((sumLlm / totalMs) * 100)}%)` },
-      { color: pal.accent, label: t('waterfall.hyper'), value: `${fmtSec(sumHyper)} (${Math.round((sumHyper / totalMs) * 100)}%)` },
+      { color: pal.ok, label: t('waterfall.hyper'), value: `${fmtSec(sumHyper)} (${Math.round((sumHyper / totalMs) * 100)}%)` },
       { color: pal.warn, label: t('waterfall.std'), value: `${fmtSec(sumStd)} (${Math.round((sumStd / totalMs) * 100)}%)` },
-    ]);
+    ];
+    if ((bench?.transport_error_count || 0) > 0 || sumRetry > 0) {
+      const sessStallMs = bench?.total_retry_backoff_ms ?? sumRetry;
+      const errCount = bench?.transport_error_count || turns.reduce((a, b) => a + (b.transport_errors || 0), 0);
+      const eofCount = bench?.eof_reset_count || 0;
+      const retryVal = errCount > 0
+        ? (eofCount > 0
+            ? t('waterfall.retry_stall_eof_val', { time: fmtSec(sessStallMs), count: errCount, eof: eofCount })
+            : t('waterfall.retry_stall_val', { time: fmtSec(sessStallMs), count: errCount }))
+        : `${fmtSec(sessStallMs)} (${Math.round((sumRetry / totalMs) * 100)}%)`;
+      wfRows.push({
+        color: pal.err,
+        label: t('waterfall.retry_eof'),
+        value: retryVal,
+      });
+    }
+    renderBreakdown($('wf-breakdown'), wfRows);
 
     if (!chart) return;
     if (!turns.length) {
@@ -305,9 +380,35 @@
     }
 
     const cats = turns.map((x) => `T${String(x.turn_index).padStart(2, '0')}`);
-    const llmData = turns.map((x) => Math.round(((x.llm_inference_ms || 0) / 1000) * 100) / 100);
-    const hyperData = turns.map((x) => (x.used_hyper_tools ? Math.round(((x.tool_exec_ms || 0) / 1000) * 100) / 100 : 0));
-    const stdData = turns.map((x) => (x.used_hyper_tools ? 0 : Math.round(((x.tool_exec_ms || 0) / 1000) * 100) / 100));
+    const llmData = turns.map((x) => {
+      const v = Math.round(((x.llm_inference_ms || 0) / 1000) * 100) / 100;
+      const hasRight = (x.tool_exec_ms || 0) > 0 || (x.retry_backoff_ms || 0) > 0;
+      return {
+        value: v,
+        itemStyle: { color: pal.indigo, borderRadius: hasRight ? [2, 0, 0, 2] : [2, 2, 2, 2] },
+      };
+    });
+    const toolData = turns.map((x) => {
+      const v = Math.round(((x.tool_exec_ms || 0) / 1000) * 100) / 100;
+      const hasLeft = (x.llm_inference_ms || 0) > 0;
+      const hasRight = (x.retry_backoff_ms || 0) > 0;
+      const col = x.used_hyper_tools ? pal.ok : pal.warn;
+      return {
+        value: v,
+        itemStyle: {
+          color: col,
+          borderRadius: [hasLeft ? 0 : 2, hasRight ? 0 : 2, hasRight ? 0 : 2, hasLeft ? 0 : 2],
+        },
+      };
+    });
+    const retryData = turns.map((x) => {
+      const v = Math.round(((x.retry_backoff_ms || 0) / 1000) * 100) / 100;
+      const hasLeft = (x.llm_inference_ms || 0) > 0 || (x.tool_exec_ms || 0) > 0;
+      return {
+        value: v,
+        itemStyle: { color: pal.err, borderRadius: hasLeft ? [0, 2, 2, 0] : [2, 2, 2, 2] },
+      };
+    });
 
     chart.setOption({
       animation: false,
@@ -318,10 +419,15 @@
           const tr = turns[items?.[0]?.dataIndex ?? 0];
           if (!tr) return '';
           const tools = (tr.tool_names || []).slice(0, 4).join(', ');
+          const hasRetry = (tr.retry_backoff_ms || 0) > 0 || (tr.transport_errors || 0) > 0;
+          const retryCnt = (tr.transport_errors || 0) > 0 ? ` (×${tr.transport_errors})` : '';
           return [
             `<b>${escapeHtml(t('waterfall.tooltip_turn', { turn: tr.turn_index }))}</b>`,
             `${escapeHtml(t('waterfall.tooltip_llm'))}: <b>${fmtSec(tr.llm_inference_ms)}</b>`,
             `${escapeHtml(t('waterfall.tooltip_tool'))}: <b>${fmtSec(tr.tool_exec_ms)}</b> (${tr.tool_calls})`,
+            hasRetry
+              ? `<span style="color:${pal.err}">${escapeHtml(t('waterfall.retry_eof'))}: <b>${fmtSec(tr.retry_backoff_ms || 0)}</b>${escapeHtml(retryCnt)}</span>`
+              : '',
             `${escapeHtml(t('waterfall.tooltip_out'))}: <b>${tr.output_tokens} tok</b>`,
             tools ? `<span style="opacity:.7">${escapeHtml(tools)}</span>` : '',
           ].filter(Boolean).join('<br/>');
@@ -341,9 +447,9 @@
         axisLabel: { color: pal.muted, fontSize: 10.5, fontFamily: 'ui-monospace, SF Mono, monospace' },
       },
       series: [
-        { name: t('waterfall.llm'), type: 'bar', stack: 'turn', barMaxWidth: 14, itemStyle: { color: pal.indigo, borderRadius: [2, 0, 0, 2] }, data: llmData },
-        { name: t('waterfall.hyper'), type: 'bar', stack: 'turn', barMaxWidth: 14, itemStyle: { color: pal.accent, borderRadius: [0, 2, 2, 0] }, data: hyperData },
-        { name: t('waterfall.std'), type: 'bar', stack: 'turn', barMaxWidth: 14, itemStyle: { color: pal.warn, borderRadius: [0, 2, 2, 0] }, data: stdData },
+        { name: t('waterfall.llm'), type: 'bar', stack: 'turn', barMaxWidth: 14, itemStyle: { color: pal.indigo }, data: llmData },
+        { name: t('waterfall.local_tools'), type: 'bar', stack: 'turn', barMaxWidth: 14, itemStyle: { color: pal.warn }, data: toolData },
+        { name: t('waterfall.retry_eof'), type: 'bar', stack: 'turn', barMaxWidth: 14, itemStyle: { color: pal.err }, data: retryData },
       ],
     }, true);
   }

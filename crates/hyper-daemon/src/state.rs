@@ -5,7 +5,8 @@ use crate::protocol::{
 use hyper_core::bench::{analyze_transcript, SessionBenchmark};
 use hyper_core::config::{truncate_utf8_bytes, HyperConfig, Profile};
 use hyper_core::context_pack::{
-    build_context_pack_with_cache, AstOutlineCache, ContextPackRequest, ContextPackResult,
+    build_context_pack_with_cache, is_pack_fresh, normalize_pack_query_key, AstOutlineCache,
+    ContextPackRequest, ContextPackResult,
 };
 use hyper_core::jail::WorkspaceJail;
 use hyper_core::runner::{discover_presets, run_check, CheckRequest};
@@ -14,6 +15,7 @@ use hyper_core::sessions::{
     resolve_root_conversation_id,
 };
 use hyper_core::transcript::{inspect_transcript_tail, resolve_transcript_path, HealthLevel};
+use hyper_core::update::load_update_state;
 use hyper_core::usage::{
     build_session_usage, default_brain_dirs, model_ttl_family, now_epoch_ms, ModelTtlEstimate,
     TokenBucket, UsageLedger, UsageWindow, UsageWindowReport,
@@ -22,10 +24,10 @@ use hyper_core::wal::{list_transactions, rollback_transaction, RollbackResult};
 use notify::event::ModifyKind;
 use notify::{Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 const MAX_HANDLES: usize = 64;
@@ -162,6 +164,28 @@ impl UsageLedgerCache {
     }
 }
 
+pub type PrewarmFlightKey = (String, String, u64);
+pub type InFlightPrewarm = Arc<(Mutex<HashSet<PrewarmFlightKey>>, Condvar)>;
+pub type PrewarmLookupParts = (
+    Arc<Mutex<HashMap<String, u64>>>,
+    Arc<Mutex<HashMap<(String, String), PrewarmedCheck>>>,
+    InFlightPrewarm,
+);
+
+struct InFlightPrewarmGuard {
+    coord: InFlightPrewarm,
+    key: PrewarmFlightKey,
+}
+
+impl Drop for InFlightPrewarmGuard {
+    fn drop(&mut self) {
+        if let Ok(mut set) = self.coord.0.lock() {
+            set.remove(&self.key);
+        }
+        self.coord.1.notify_all();
+    }
+}
+
 pub struct DaemonState {
     started_at: Instant,
     config: HyperConfig,
@@ -171,6 +195,7 @@ pub struct DaemonState {
     watchers: HashMap<String, RecommendedWatcher>,
     prewarm_cache: Arc<Mutex<HashMap<(String, String), PrewarmedCheck>>>,
     prewarm_scheduled_rev: Arc<Mutex<HashMap<String, u64>>>,
+    in_flight_prewarm: InFlightPrewarm,
     last_check_preset: Arc<Mutex<HashMap<String, String>>>,
     pub bench_cache: Arc<Mutex<BenchCache>>,
     pub usage_cache: Arc<Mutex<UsageLedgerCache>>,
@@ -286,6 +311,12 @@ pub type StatuslineParts = (
     Arc<Mutex<UsageLedgerCache>>,
 );
 
+impl Default for DaemonState {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl DaemonState {
     pub fn new() -> Self {
         let config = HyperConfig::load();
@@ -299,6 +330,7 @@ impl DaemonState {
             watchers: HashMap::new(),
             prewarm_cache: Arc::new(Mutex::new(HashMap::new())),
             prewarm_scheduled_rev: Arc::new(Mutex::new(HashMap::new())),
+            in_flight_prewarm: Arc::new((Mutex::new(HashSet::new()), Condvar::new())),
             last_check_preset: Arc::new(Mutex::new(HashMap::new())),
             bench_cache: Arc::new(Mutex::new(BenchCache::default())),
             usage_cache: Arc::new(Mutex::new(UsageLedgerCache::default())),
@@ -375,6 +407,7 @@ impl DaemonState {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn record_event(
         &mut self,
         kind: String,
@@ -433,14 +466,43 @@ impl DaemonState {
             .map(str::to_string);
         norm_req.focus_paths.sort();
         norm_req.focus_paths.dedup();
+        norm_req.symbols = norm_req
+            .symbols
+            .into_iter()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect();
+        norm_req.symbols.sort();
+        norm_req.symbols.dedup();
 
-        let key_json = serde_json::to_string(&(&canonical, &norm_req)).unwrap_or_default();
+        let norm_query_key = normalize_pack_query_key(norm_req.query.as_deref());
+        let mut norm_symbols_key: Vec<String> = norm_req
+            .symbols
+            .iter()
+            .map(|s| s.to_lowercase())
+            .collect();
+        norm_symbols_key.sort();
+        norm_symbols_key.dedup();
+
+        let key_tuple = (
+            &canonical,
+            &norm_query_key,
+            &norm_req.focus_paths,
+            &norm_symbols_key,
+            norm_req.include_outlines,
+            norm_req.include_git,
+            norm_req.max_bytes.clamp(1_500, 8_500),
+        );
+        let key_json = serde_json::to_string(&key_tuple).unwrap_or_default();
         let cache_key = blake3::hash(key_json.as_bytes()).to_hex().to_string();
 
         self.pack_seq += 1;
         let seq = self.pack_seq;
         if let Some((cached_rev, last_used, cached_pack)) = self.pack_cache.get_mut(&cache_key) {
-            if *cached_rev == rev {
+            if *cached_rev == rev
+                || (!cached_pack.files.is_empty() && is_pack_fresh(&jail, cached_pack))
+            {
+                *cached_rev = rev;
                 *last_used = seq;
                 let res = cached_pack.clone();
                 self.pack_cache_hits += 1;
@@ -597,9 +659,24 @@ impl DaemonState {
         let cfg = self.config.clone();
         let ws_key = canonical_ws.to_string();
         let preset_id = preset.id.clone();
+        let flight_key = (ws_key.clone(), preset_id.clone(), target_rev);
+        {
+            let (lock, _) = &*self.in_flight_prewarm;
+            let Ok(mut in_flight) = lock.lock() else {
+                return;
+            };
+            if !in_flight.insert(flight_key.clone()) {
+                return;
+            }
+        }
+        let flight_guard = InFlightPrewarmGuard {
+            coord: self.in_flight_prewarm.clone(),
+            key: flight_key,
+        };
 
         std::thread::spawn(move || {
-            std::thread::sleep(Duration::from_millis(700));
+            let _flight_guard = flight_guard;
+            std::thread::sleep(Duration::from_millis(250));
             let cur_rev = revs
                 .lock()
                 .ok()
@@ -665,23 +742,23 @@ impl DaemonState {
         });
     }
 
+    pub fn prewarm_lookup_parts(&self) -> PrewarmLookupParts {
+        (
+            self.workspace_revs.clone(),
+            self.prewarm_cache.clone(),
+            self.in_flight_prewarm.clone(),
+        )
+    }
+
     pub fn lookup_prewarm(&self, workspace: &str, preset: &str) -> Option<PrewarmedCheck> {
-        let canonical = fs::canonicalize(workspace)
-            .map(|p| p.display().to_string())
-            .unwrap_or_else(|_| workspace.to_string());
-        let cur_rev = self
-            .workspace_revs
-            .lock()
-            .ok()
-            .and_then(|m| m.get(&canonical).copied())?;
-        let cache = self.prewarm_cache.lock().ok()?;
-        let item = cache.get(&(canonical, preset.to_string()))?;
-        if item.workspace_rev == cur_rev && now_ms().saturating_sub(item.completed_ts_ms) <= 300_000
-        {
-            Some(item.clone())
-        } else {
-            None
-        }
+        lookup_prewarm_coalesced(
+            &self.workspace_revs,
+            &self.prewarm_cache,
+            &self.in_flight_prewarm,
+            workspace,
+            preset,
+            Duration::from_secs(25),
+        )
     }
 
     pub fn store_handle(&mut self, label: String, content: String) -> HandleStored {
@@ -1201,6 +1278,7 @@ pub fn build_cockpit_snapshot(
         .take(8)
         .collect();
     let transactions = list_transactions(&HyperConfig::wal_dir(), 25);
+    let update_state = Some(load_update_state(&engine.version));
 
     CockpitSnapshot {
         engine,
@@ -1213,7 +1291,66 @@ pub fn build_cockpit_snapshot(
         model_ttl_estimates,
         transactions,
         recent_events,
+        update_state,
     }
+}
+
+/// Lock-free singleflight prewarm lookup: returns an immediate cache hit if ready, or waits
+/// on `in_flight` Condvar (up to `max_wait`) when `(canonical_ws, preset, cur_rev)` is actively
+/// compiling in the background so concurrent `hyper_check` calls coalesce instead of contending
+/// on `target/` locks.
+pub fn lookup_prewarm_coalesced(
+    revs: &Mutex<HashMap<String, u64>>,
+    cache: &Mutex<HashMap<(String, String), PrewarmedCheck>>,
+    in_flight: &InFlightPrewarm,
+    workspace: &str,
+    preset: &str,
+    max_wait: Duration,
+) -> Option<PrewarmedCheck> {
+    let canonical = fs::canonicalize(workspace)
+        .map(|p| p.display().to_string())
+        .unwrap_or_else(|_| workspace.to_string());
+    let cur_rev = revs.lock().ok().and_then(|m| m.get(&canonical).copied())?;
+
+    let check_cache = |expected_rev: u64| -> Option<PrewarmedCheck> {
+        let guard = cache.lock().ok()?;
+        let item = guard.get(&(canonical.clone(), preset.to_string()))?;
+        if item.workspace_rev == expected_rev
+            && now_ms().saturating_sub(item.completed_ts_ms) <= 300_000
+        {
+            Some(item.clone())
+        } else {
+            None
+        }
+    };
+
+    if let Some(hit) = check_cache(cur_rev) {
+        return Some(hit);
+    }
+
+    let flight_key = (canonical.clone(), preset.to_string(), cur_rev);
+    let deadline = Instant::now() + max_wait;
+    let (lock, cvar) = &**in_flight;
+    let mut set = lock.lock().ok()?;
+    while set.contains(&flight_key) {
+        let now = Instant::now();
+        if now >= deadline {
+            break;
+        }
+        let rem = deadline.duration_since(now);
+        let (next_set, timeout_res) = cvar.wait_timeout(set, rem).ok()?;
+        set = next_set;
+        if timeout_res.timed_out() {
+            break;
+        }
+    }
+    drop(set);
+
+    let latest_rev = revs.lock().ok().and_then(|m| m.get(&canonical).copied())?;
+    if latest_rev != cur_rev {
+        return None;
+    }
+    check_cache(cur_rev)
 }
 
 pub(crate) fn is_active_redline(active: bool, health: HealthLevel) -> bool {
@@ -1414,5 +1551,178 @@ mod tests {
         assert!(is_error_loop_subagent(true, 2));
         assert!(is_error_loop_subagent(true, 6));
         assert!(!is_error_loop_subagent(false, 6));
+    }
+
+    #[test]
+    fn singleflight_prewarm_coalesces_concurrent_waiters_and_clears_on_drop() {
+        let ws = "/tmp/fake-singleflight-ws".to_string();
+        let preset = "cargo_check".to_string();
+        let revs = Arc::new(Mutex::new(HashMap::from([(ws.clone(), 7u64)])));
+        let cache: Arc<Mutex<HashMap<(String, String), PrewarmedCheck>>> =
+            Arc::new(Mutex::new(HashMap::new()));
+        let in_flight: InFlightPrewarm = Arc::new((Mutex::new(HashSet::new()), Condvar::new()));
+
+        // Mark (ws, preset, 7) in-flight and finish asynchronously after 60ms
+        let flight_key = (ws.clone(), preset.clone(), 7u64);
+        in_flight.0.lock().unwrap().insert(flight_key.clone());
+        let guard = InFlightPrewarmGuard {
+            coord: in_flight.clone(),
+            key: flight_key,
+        };
+        let cache_writer = cache.clone();
+        let ws_writer = ws.clone();
+        let preset_writer = preset.clone();
+        std::thread::spawn(move || {
+            let _guard = guard;
+            std::thread::sleep(Duration::from_millis(60));
+            cache_writer.lock().unwrap().insert(
+                (ws_writer.clone(), preset_writer.clone()),
+                PrewarmedCheck {
+                    workspace: ws_writer,
+                    preset: preset_writer,
+                    workspace_rev: 7,
+                    command_display: "cargo check".into(),
+                    exit_code: 0,
+                    duration_ms: 1450,
+                    total_output_bytes: 42,
+                    summary_lines: vec!["Finished `dev` profile".into()],
+                    toc_hint: None,
+                    truncated: false,
+                    spill_handle: None,
+                    completed_ts_ms: now_ms(),
+                },
+            );
+        });
+
+        // Two concurrent callers wait on the same in-flight prewarm and both receive the finished result
+        let mut waiters = Vec::new();
+        for _ in 0..2 {
+            let r = revs.clone();
+            let c = cache.clone();
+            let f = in_flight.clone();
+            let w = ws.clone();
+            let p = preset.clone();
+            waiters.push(std::thread::spawn(move || {
+                lookup_prewarm_coalesced(&r, &c, &f, &w, &p, Duration::from_secs(3))
+            }));
+        }
+        for handle in waiters {
+            let hit = handle.join().unwrap().expect("expected coalesced prewarm hit");
+            assert_eq!(hit.workspace_rev, 7);
+            assert_eq!(hit.duration_ms, 1450);
+        }
+        assert!(in_flight.0.lock().unwrap().is_empty());
+
+        // RAII guard also clears in-flight set and wakes waiters on early return / error
+        let err_key = (ws.clone(), preset.clone(), 8u64);
+        revs.lock().unwrap().insert(ws.clone(), 8);
+        in_flight.0.lock().unwrap().insert(err_key.clone());
+        let err_guard = InFlightPrewarmGuard {
+            coord: in_flight.clone(),
+            key: err_key,
+        };
+        std::thread::spawn(move || {
+            let _g = err_guard;
+            std::thread::sleep(Duration::from_millis(20));
+            // Early return without inserting into cache
+        });
+        let t0 = Instant::now();
+        let miss = lookup_prewarm_coalesced(&revs, &cache, &in_flight, &ws, &preset, Duration::from_secs(3));
+        assert!(miss.is_none());
+        assert!(t0.elapsed() < Duration::from_secs(1));
+        assert!(in_flight.0.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn pack_cache_normalizes_query_survives_unrelated_rev_bump_and_invalidates_on_mutation() {
+        let tmp = std::env::temp_dir().join(format!(
+            "agy-hyper-pack-freshness-test-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&tmp);
+        fs::create_dir_all(tmp.join("src")).unwrap();
+        fs::write(
+            tmp.join("src/alpha.rs"),
+            "pub fn validate_alpha(x: u32) -> u32 {\n    x + 1\n}\n",
+        )
+        .unwrap();
+        fs::write(
+            tmp.join("src/unrelated.rs"),
+            "pub fn touch_other() -> bool {\n    true\n}\n",
+        )
+        .unwrap();
+
+        let mut state = DaemonState::new();
+        state.config.prewarm_tier2 = false;
+        state.config.allow_outside_workspace = false;
+        state.config.block_secret_files = true;
+        let ws = tmp.to_str().unwrap();
+
+        // 1. Initial call populates pack_cache at rev 1
+        let req1 = ContextPackRequest {
+            query: Some("validate alpha".into()),
+            focus_paths: vec!["src/alpha.rs".into()],
+            symbols: vec!["VALIDATE_ALPHA".into()],
+            include_outlines: true,
+            include_git: false,
+            max_bytes: 8200,
+        };
+        let (pack1, hit1) = state.pack_context(ws, &req1).unwrap();
+        assert!(!hit1);
+        assert_eq!(state.pack_cache_misses, 1);
+        assert_eq!(state.pack_cache_hits, 0);
+        assert!(pack1.compact_markdown.contains("x + 1"));
+
+        // 2. Reordered / punctuated query & different symbol casing hits the same normalized cache key
+        let req_reordered = ContextPackRequest {
+            query: Some("ALPHA, validate!".into()),
+            focus_paths: vec!["src/alpha.rs".into()],
+            symbols: vec!["validate_alpha".into()],
+            include_outlines: true,
+            include_git: false,
+            max_bytes: 8200,
+        };
+        let (_, hit_reordered) = state.pack_context(ws, &req_reordered).unwrap();
+        assert!(hit_reordered);
+        assert_eq!(state.pack_cache_hits, 1);
+
+        // 3. Mutate an unrelated file and bump workspace_rev -> packed file is untouched, so is_pack_fresh hits and promotes cached_rev!
+        fs::write(
+            tmp.join("src/unrelated.rs"),
+            "pub fn touch_other() -> bool {\n    false // mutated unrelated file\n}\n",
+        )
+        .unwrap();
+        let rev2 = state.bump_workspace_rev(ws);
+        assert_eq!(rev2, 2);
+
+        let (_, hit_after_unrelated) = state.pack_context(ws, &req1).unwrap();
+        assert!(
+            hit_after_unrelated,
+            "pack_cache must survive unrelated workspace_rev bump when packed files are fresh"
+        );
+        assert_eq!(state.pack_cache_hits, 2);
+        assert!(
+            state.pack_cache.values().all(|(crev, _, _)| *crev == rev2),
+            "cached_rev must be promoted to current rev on freshness-validated hit"
+        );
+
+        // 4. Mutate the packed file and bump workspace_rev -> freshness check invalidates and rebuilds
+        fs::write(
+            tmp.join("src/alpha.rs"),
+            "pub fn validate_alpha(x: u32) -> u32 {\n    x.saturating_add(42)\n}\n",
+        )
+        .unwrap();
+        let rev3 = state.bump_workspace_rev(ws);
+        assert_eq!(rev3, 3);
+
+        let (pack_mutated, hit_after_mutation) = state.pack_context(ws, &req1).unwrap();
+        assert!(
+            !hit_after_mutation,
+            "pack_cache must invalidate when a packed file mutates"
+        );
+        assert_eq!(state.pack_cache_misses, 2);
+        assert!(pack_mutated.compact_markdown.contains("saturating_add(42)"));
+
+        let _ = fs::remove_dir_all(&tmp);
     }
 }

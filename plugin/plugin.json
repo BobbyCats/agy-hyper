@@ -1,7 +1,7 @@
 {
   "name": "agy-hyper",
   "displayName": "AGY Hyper",
-  "version": "0.4.4",
+  "version": "0.5.0",
   "description": "Zero-dependency Rust acceleration engine, crash-safe WAL atomic edits, Tree-sitter semantic packing, and live native telemetry cockpit for Antigravity.",
   "logo": "assets/logo.svg",
   "author": {

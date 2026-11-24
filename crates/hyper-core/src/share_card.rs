@@ -727,6 +727,7 @@ mod tests {
                 }],
             },
             turns: vec![],
+            ..Default::default()
         };
 
         let sub = SessionBenchmark {
@@ -766,6 +767,7 @@ mod tests {
                 ..Default::default()
             },
             turns: vec![],
+            ..Default::default()
         };
 
         let mut roles = HashMap::new();

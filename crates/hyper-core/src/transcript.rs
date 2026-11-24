@@ -696,9 +696,7 @@ mod tests {
     fn model_aware_watermark_clamps_200k_models_and_tags_proxy_reset_reason() {
         let dir = tempdir().unwrap();
         let p = dir.path().join("transcript.jsonl");
-        let content = concat!(
-            "{\"step_index\":1,\"type\":\"PLANNER_RESPONSE\",\"model\":\"claude-sonnet-4\",\"input_tokens\":25000,\"cache_read_tokens\":155000,\"output_tokens\":200,\"created_at\":\"2026-11-20T12:00:00Z\"}\n"
-        );
+        let content = "{\"step_index\":1,\"type\":\"PLANNER_RESPONSE\",\"model\":\"claude-sonnet-4\",\"input_tokens\":25000,\"cache_read_tokens\":155000,\"output_tokens\":200,\"created_at\":\"2026-11-20T12:00:00Z\"}\n";
         fs::write(&p, content).unwrap();
         let cfg = HyperConfig::default();
         let pulse = inspect_transcript_tail(&p, &cfg).unwrap();

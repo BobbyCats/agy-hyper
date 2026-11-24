@@ -7,10 +7,10 @@ description: Install, verify, configure, inspect usage/telemetry, rollback WAL f
 
 Use this guide when a user asks you to install, upgrade, verify, configure, troubleshoot, or uninstall **AGY Hyper** (`BobbyCats/agy-hyper`).
 
-> **Architecture & Safety Guarantees**:
+> **Architecture & Safety Guarantees (`v0.5.0`)**:
 > - Uses **100% official Antigravity plugin protocols** (MCP, Hooks, Rules, `SIDECAR_UI_ENTRYPOINT_AUX_PANE`). Does **not** inject into Electron DOM, open CDP debugging ports, or modify `~/.gemini/config/config.json`.
 > - Single ~10MB static Rust binary (`agy-hyper`); zero Rust/Python/`ripgrep`/`git` runtime dependencies required for release installs.
-> - Rust core is strictly **offline** (zero background network calls). Optional FX sync only triggers when a user manually clicks **Sync FX** in Hyper Deck.
+> - Zero telemetry uploads and zero synchronous hook network calls. `Release Update Radar` uses rate-limit-free GitHub `Location` redirects (`enable_update_check`, or disable with `AGY_HYPER_NO_UPDATE_CHECK=1`) and **never** auto-installs binaries without explicit `agy-hyper update` / **Update Now** (`SHA256SUMS` verified).
 
 ## 1. Key Paths
 
@@ -20,11 +20,18 @@ Use this guide when a user asks you to install, upgrade, verify, configure, trou
 | CLI symlink (macOS/Linux) | `~/.local/bin/agy-hyper` |
 | Runtime state, config, ledger & WAL | `~/.gemini/antigravity/agy-hyper` |
 | User configuration | `~/.gemini/antigravity/agy-hyper/config.json` |
+| Release update radar state | `~/.gemini/antigravity/agy-hyper/update_state.json` |
 | Incremental usage ledger | `~/.gemini/antigravity/agy-hyper/usage_ledger.json` |
 | BLAKE3 WAL undo snapshots | `~/.gemini/antigravity/agy-hyper/wal/` |
 | Local UDS socket & PIDs | `~/.gemini/antigravity/agy-hyper/run/` |
 
 ## 2. Install or Upgrade
+
+### Fast In-Place Verified Upgrade (`v0.5.0+` already installed)
+```bash
+agy-hyper update --check   # inspect latest release without installing
+agy-hyper update           # download release + SHA256SUMS, verify & atomically swap
+```
 
 ### macOS & Linux (SHA-256 verified release)
 ```bash
@@ -45,24 +52,31 @@ cd agy-hyper
 
 ## 3. Verify Installation & Health
 
-Run the built-in diagnostic check:
+Run the built-in environment & conflict diagnostic check:
 ```bash
 agy-hyper doctor
+agy-hyper doctor --net   # optional: probe dual-stack (IPv4 vs auto) TLS/TTFB for IPv6 blackholes or stream lag
 ```
 
 Confirm:
-- All `[OK]` checks pass (Tree-sitter grammars, read-only `gix`, workspace jail & Secret Shield, daemon UDS RTT `<1ms`).
+- Core `[OK]` checks pass (Tree-sitter grammars, read-only `gix`, workspace jail & Secret Shield, daemon UDS RTT `<1ms`).
+- Review any `[WARN]` findings on competing plugin `PreInvocation`/`PostToolUse` hooks or anti-MCP rules in `~/.gemini/config/plugins/*`, high global `SKILL.md` counts (`>120`) or duplicate skills, `$HOME`/`/` root workspaces, or pending release updates.
 - Switch back to Antigravity and open **AGY Hyper Deck** in the side pane (or launch standalone with `agy-hyper ui`).
 
 ## 4. Common Operations
 
 ```bash
+# Release update radar & SHA-256 verified 1-click upgrade
+agy-hyper update --check
+agy-hyper update
+agy-hyper update --dismiss 0.5.0
+
 # Daemon lifecycle
 agy-hyper daemon status
 agy-hyper daemon start
 agy-hyper daemon stop
 
-# Local burn audit, split-cache diagnostics & anonymized Health Badge card (zero paths/repos/UUIDs)
+# Local burn audit (pre-edit bloat delta, stream EOF retry stalls, split-cache drops & redacted Share Card)
 agy-hyper audit --days 14 --share
 agy-hyper audit --days 14 --share-png share-card.png --theme dark
 agy-hyper audit --days 14 --share-svg share-card.svg --theme light
@@ -73,10 +87,11 @@ agy-hyper audit --days 14 --svg audit-card.svg
 agy-hyper usage --window 7d
 agy-hyper usage --window 30d --currency CNY
 
-# Layered profile & granular MCP switches (observe = cockpit-only zero-intrusion)
+# Layered profile & granular MCP / radar switches (observe = cockpit-only zero-intrusion)
 agy-hyper config show
 agy-hyper config profile observe|safe|balanced|hyper
 agy-hyper config toggle enable_mcp_edit false
+agy-hyper config toggle enable_update_check true
 agy-hyper config currency USD|CNY|JPY|EUR|GBP|HKD|SGD|KRW
 agy-hyper config fx CNY 7.25
 

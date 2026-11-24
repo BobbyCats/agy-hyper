@@ -43,7 +43,7 @@ fn find_containing_workspace_root(abs_file: &Path, workspace_roots: &[PathBuf]) 
     Some(ws)
 }
 
-fn match_raw_or_unquoted<'a>(raw: &'a str, pred: impl Fn(&str) -> Option<Vec<u8>>) -> Option<Vec<u8>> {
+fn match_raw_or_unquoted(raw: &str, pred: impl Fn(&str) -> Option<Vec<u8>>) -> Option<Vec<u8>> {
     if let Some(res) = pred(raw) {
         return Some(res);
     }

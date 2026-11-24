@@ -1,6 +1,7 @@
 use crate::protocol::{DaemonRequest, DaemonResponse};
 use crate::state::{
-    build_cockpit_snapshot, build_statusline_pulse, execute_rollback_unlocked, DaemonState,
+    build_cockpit_snapshot, build_statusline_pulse, execute_rollback_unlocked,
+    lookup_prewarm_coalesced, DaemonState,
 };
 use anyhow::{Context, Result};
 use fs2::FileExt;
@@ -40,6 +41,7 @@ fn acquire_singleton_lock() -> Result<Option<fs::File>> {
     fs::create_dir_all(&run_dir).context("create daemon run directory")?;
     let lock_file = OpenOptions::new()
         .create(true)
+        .truncate(false)
         .read(true)
         .write(true)
         .open(lock_path())
@@ -232,6 +234,23 @@ fn handle_line(
             );
             return DaemonResponse::ok(snap);
         }
+        DaemonRequest::LookupPrewarm { workspace, preset } => {
+            let (revs, cache, in_flight) = match state.lock() {
+                Ok(g) => g.prewarm_lookup_parts(),
+                Err(_) => return DaemonResponse::err("daemon state lock poisoned"),
+            };
+            return match lookup_prewarm_coalesced(
+                &revs,
+                &cache,
+                &in_flight,
+                &workspace,
+                &preset,
+                Duration::from_secs(25),
+            ) {
+                Some(hit) => DaemonResponse::ok(hit),
+                None => DaemonResponse::ok(serde_json::Value::Null),
+            };
+        }
         DaemonRequest::StatuslinePulse {
             conversation_id,
             transcript_path,
@@ -398,12 +417,6 @@ fn handle_line(
             let rev = guard.bump_workspace_rev(&workspace);
             DaemonResponse::ok(serde_json::json!({ "workspace_rev": rev }))
         }
-        DaemonRequest::LookupPrewarm { workspace, preset } => {
-            match guard.lookup_prewarm(&workspace, &preset) {
-                Some(hit) => DaemonResponse::ok(hit),
-                None => DaemonResponse::ok(serde_json::Value::Null),
-            }
-        }
         DaemonRequest::RecordCheckTarget { workspace, preset } => {
             guard.record_check_target(&workspace, &preset);
             DaemonResponse::ok(serde_json::json!({ "recorded": true }))
@@ -441,6 +454,7 @@ fn handle_line(
             DaemonResponse::ok(serde_json::json!({ "shutting_down": true }))
         }
         DaemonRequest::Snapshot { .. }
+        | DaemonRequest::LookupPrewarm { .. }
         | DaemonRequest::StatuslinePulse { .. }
         | DaemonRequest::CacheTtlReport { .. }
         | DaemonRequest::UsageSummary { .. }

@@ -145,6 +145,14 @@ pub struct BurnAuditReport {
     pub first_edit_p50_tokens: Option<u64>,
     pub first_edit_p90_tokens: Option<u64>,
     pub first_edit_max_tokens: Option<u64>,
+    #[serde(default)]
+    pub pre_edit_delta_p50_tokens: Option<u64>,
+    #[serde(default)]
+    pub transport_error_count: usize,
+    #[serde(default)]
+    pub eof_reset_count: usize,
+    #[serde(default)]
+    pub total_retry_backoff_ms: u64,
     pub blanket_read_turns: usize,
     pub sessions_with_blanket_reads: usize,
     pub context_categories: Vec<ContextCategoryShare>,
@@ -159,6 +167,21 @@ pub struct BurnAuditReport {
     pub top_quota_drain: TopQuotaDrain,
     #[serde(default)]
     pub split_cache: SplitCacheDiagnostics,
+}
+
+impl BurnAuditReport {
+    /// Concise single-line CLI summary emitted when upstream transport resets/timeouts occurred.
+    pub fn transport_summary_line(&self) -> Option<String> {
+        if self.transport_error_count == 0 {
+            return None;
+        }
+        Some(format!(
+            "  Transport Resets  : {} errors ({} EOF/reset) · {:.1}s lost to retry backoff",
+            self.transport_error_count,
+            self.eof_reset_count,
+            self.total_retry_backoff_ms as f64 / 1000.0
+        ))
+    }
 }
 
 fn percentile_u64(values: &mut [u64], pct: f64) -> u64 {
@@ -652,6 +675,7 @@ fn classify_audit_verdict(
     overall_cache_hit_ratio: f64,
     total_turns: usize,
     first_edit_p50_tokens: Option<u64>,
+    pre_edit_delta_p50_tokens: Option<u64>,
     blanket_read_turns: usize,
     split_cache: &SplitCacheDiagnostics,
     findings: &[AuditFinding],
@@ -659,8 +683,17 @@ fn classify_audit_verdict(
     let has_high = findings.iter().any(|f| f.severity == "high");
     let has_warn = findings.iter().any(|f| f.severity == "warn");
 
+    let bleeding_pre_edit = match pre_edit_delta_p50_tokens {
+        Some(delta) => delta >= 120_000,
+        None => first_edit_p50_tokens.is_some_and(|v| v >= 180_000) && blanket_read_turns >= 6,
+    };
+    let watch_pre_edit = match pre_edit_delta_p50_tokens {
+        Some(delta) => delta >= 60_000,
+        None => first_edit_p50_tokens.is_some_and(|v| v >= 90_000),
+    };
+
     if (total_turns >= 5 && overall_cache_hit_ratio < 0.65)
-        || first_edit_p50_tokens.is_some_and(|v| v >= 140_000)
+        || bleeding_pre_edit
         || (split_cache.headline_cache_drop_pct >= 65.0
             && split_cache.uncached_penalty_tokens >= 100_000)
         || has_high
@@ -670,11 +703,19 @@ fn classify_audit_verdict(
                 "Low overall prompt cache hit ({:.1}%) causing heavy cold re-prefills.",
                 overall_cache_hit_ratio * 100.0
             )
-        } else if let Some(fe) = first_edit_p50_tokens.filter(|&v| v >= 140_000) {
-            format!(
-                "Heavy pre-edit read bloat (first-edit P50 {} tok).",
-                fmt_tok_short(fe)
-            )
+        } else if bleeding_pre_edit {
+            if let Some(delta) = pre_edit_delta_p50_tokens {
+                format!(
+                    "Heavy pre-edit read bloat (+{} pre-edit delta).",
+                    fmt_tok_short(delta)
+                )
+            } else {
+                format!(
+                    "Heavy pre-edit read bloat (first-edit P50 {} tok · {} blanket-read turns).",
+                    fmt_tok_short(first_edit_p50_tokens.unwrap_or(0)),
+                    blanket_read_turns
+                )
+            }
         } else if split_cache.headline_cache_drop_pct >= 65.0
             && split_cache.uncached_penalty_tokens >= 100_000
         {
@@ -684,6 +725,10 @@ fn classify_audit_verdict(
                 fmt_tok_short(split_cache.uncached_penalty_tokens),
                 split_cache.total_transitions
             )
+        } else if let Some(reset_finding) =
+            findings.iter().find(|f| f.code == "upstream_stream_resets")
+        {
+            reset_finding.title.clone()
         } else {
             "High-severity cache or context burn risk detected.".to_string()
         };
@@ -691,7 +736,7 @@ fn classify_audit_verdict(
     }
 
     if (total_turns >= 5 && overall_cache_hit_ratio < 0.82)
-        || first_edit_p50_tokens.is_some_and(|v| v >= 90_000)
+        || watch_pre_edit
         || blanket_read_turns >= 8
         || (split_cache.total_transitions > 0 && split_cache.headline_cache_drop_pct >= 30.0)
         || has_warn
@@ -728,6 +773,11 @@ pub fn build_audit_report_from_parts_with_roles(
     cfg: &HyperConfig,
 ) -> BurnAuditReport {
     let mut first_edits: Vec<u64> = Vec::new();
+    let mut pre_edit_deltas: Vec<u64> = Vec::new();
+    let mut transport_error_count = 0usize;
+    let mut eof_reset_count = 0usize;
+    let mut total_retry_backoff_ms = 0u64;
+    let mut total_local_tool_ms = 0u64;
     let mut blanket_read_turns = 0usize;
     let mut sessions_with_blanket_reads = 0usize;
     let mut cache_break_turns = 0usize;
@@ -748,8 +798,15 @@ pub fn build_audit_report_from_parts_with_roles(
     for s in sessions {
         total_turns += s.valid_turns;
         cache_break_turns += s.cache_break_turns;
+        transport_error_count = transport_error_count.saturating_add(s.transport_error_count);
+        eof_reset_count = eof_reset_count.saturating_add(s.eof_reset_count);
+        total_retry_backoff_ms = total_retry_backoff_ms.saturating_add(s.total_retry_backoff_ms);
+        total_local_tool_ms = total_local_tool_ms.saturating_add(s.total_tool_ms);
         if let Some(fe) = s.first_edit_context_tokens {
             first_edits.push(fe);
+        }
+        if let Some(ped) = s.pre_edit_delta_tokens {
+            pre_edit_deltas.push(ped);
         }
         if s.blanket_read_turns > 0 {
             blanket_read_turns += s.blanket_read_turns;
@@ -810,6 +867,11 @@ pub fn build_audit_report_from_parts_with_roles(
         Some(percentile_u64(&mut first_edits, 0.90))
     };
     let first_edit_max_tokens = first_edits.iter().copied().max();
+    let pre_edit_delta_p50_tokens = if pre_edit_deltas.is_empty() {
+        None
+    } else {
+        Some(percentile_u64(&mut pre_edit_deltas, 0.50))
+    };
 
     let uncached_input_usd: f64 = usage
         .models
@@ -845,6 +907,26 @@ pub fn build_audit_report_from_parts_with_roles(
     let top_quota_drain = compute_top_quota_drain(usage, &context_categories);
 
     let mut findings: Vec<AuditFinding> = Vec::new();
+    if transport_error_count >= 3
+        && (transport_error_count as f64 / total_turns.max(1) as f64) >= 0.03
+    {
+        let err_rate_pct = (transport_error_count as f64 / total_turns.max(1) as f64) * 100.0;
+        let retry_secs = total_retry_backoff_ms as f64 / 1000.0;
+        let tool_secs = total_local_tool_ms as f64 / 1000.0;
+        findings.push(AuditFinding {
+            severity: "high".into(),
+            code: "upstream_stream_resets".into(),
+            title: format!(
+                "{} upstream stream resets/timeouts ({} EOFs · {:.1}% of turns · {:.1}s retry stall)",
+                transport_error_count, eof_reset_count, err_rate_pct, retry_secs
+            ),
+            detail: format!(
+                "Network/proxy retries stalled {:.1}s vs {:.1}s total local tool execution. Run 'agy-hyper doctor --net' to inspect upstream connection stability.",
+                retry_secs, tool_secs
+            ),
+        });
+    }
+
     if let Some(shortest) = ttl_cliffs
         .iter()
         .find(|m| m.source == "empirical" && m.effective_ttl_secs <= 180)
@@ -898,22 +980,59 @@ pub fn build_audit_report_from_parts_with_roles(
         });
     }
 
-    if let Some(fe_p50) = first_edit_p50_tokens {
-        if fe_p50 >= 90_000 || blanket_read_turns >= 10 {
-            findings.push(AuditFinding {
-                severity: if fe_p50 >= 120_000 { "high" } else { "warn" }.into(),
-                code: "pre_edit_bloat".into(),
-                title: format!(
-                    "First-edit context P50 is {:.0}k ({} blanket-read turns)",
-                    fe_p50 as f64 / 1000.0,
-                    blanket_read_turns
-                ),
-                detail: format!(
-                    "Across {} coding session(s), agents frequently bulk-read files before making the first edit. Use hyper_pack or ranged reads.",
-                    first_edits.len()
-                ),
-            });
-        }
+    let is_bleeding_pre_edit = match pre_edit_delta_p50_tokens {
+        Some(delta) => delta >= 120_000,
+        None => first_edit_p50_tokens.is_some_and(|v| v >= 180_000) && blanket_read_turns >= 6,
+    };
+    let is_watch_pre_edit = match pre_edit_delta_p50_tokens {
+        Some(delta) => delta >= 60_000 || blanket_read_turns >= 10,
+        None => first_edit_p50_tokens.is_some_and(|v| v >= 90_000) || blanket_read_turns >= 10,
+    };
+    if is_bleeding_pre_edit || is_watch_pre_edit {
+        let title = match (pre_edit_delta_p50_tokens, first_edit_p50_tokens) {
+            (Some(delta), Some(fe_p50)) => format!(
+                "Pre-edit growth P50 is +{:.0}k (first-edit {:.0}k · {} blanket-read turns)",
+                delta as f64 / 1000.0,
+                fe_p50 as f64 / 1000.0,
+                blanket_read_turns
+            ),
+            (_, Some(fe_p50)) => format!(
+                "First-edit context P50 is {:.0}k ({} blanket-read turns)",
+                fe_p50 as f64 / 1000.0,
+                blanket_read_turns
+            ),
+            _ => format!("{} blanket-read turns before first edit", blanket_read_turns),
+        };
+        findings.push(AuditFinding {
+            severity: if is_bleeding_pre_edit { "high" } else { "warn" }.into(),
+            code: "pre_edit_bloat".into(),
+            title,
+            detail: format!(
+                "Across {} coding session(s), agents frequently bulk-read files before making the first edit. Use hyper_pack or ranged reads.",
+                first_edits.len()
+            ),
+        });
+    }
+
+    let coding_sessions = first_edits.len();
+    if cfg.any_mcp_accel_enabled()
+        && coding_sessions >= 2
+        && blanket_read_turns >= 4
+        && comparison.hyper_turn_count * 10 < total_turns
+    {
+        let adopt_pct = (comparison.hyper_turn_count as f64 / total_turns.max(1) as f64) * 100.0;
+        findings.push(AuditFinding {
+            severity: "warn".into(),
+            code: "low_hyper_adoption".into(),
+            title: format!(
+                "Low Hyper MCP adoption ({:.1}% of turns) across {} coding sessions",
+                adopt_pct, coding_sessions
+            ),
+            detail: format!(
+                "Observed {} blanket-read turns while Hyper ran on {}/{} turns. Run 'agy-hyper doctor' to check for competing plugin rules or workspace setup.",
+                blanket_read_turns, comparison.hyper_turn_count, total_turns
+            ),
+        });
     }
 
     if uncached_input_usd >= 1.0 && usage.estimated_cost_usd > 0.0 {
@@ -962,6 +1081,7 @@ pub fn build_audit_report_from_parts_with_roles(
         usage.cache_hit_ratio,
         total_turns.max(usage.total_turns as usize),
         first_edit_p50_tokens,
+        pre_edit_delta_p50_tokens,
         blanket_read_turns,
         &split_cache,
         &findings,
@@ -972,7 +1092,7 @@ pub fn build_audit_report_from_parts_with_roles(
         window_days,
         usage_window: usage.window.clone(),
         sessions_analyzed: sessions.len(),
-        coding_sessions: first_edits.len(),
+        coding_sessions,
         total_turns,
         currency: usage.currency.clone(),
         fx_rate: fx,
@@ -988,6 +1108,10 @@ pub fn build_audit_report_from_parts_with_roles(
         first_edit_p50_tokens,
         first_edit_p90_tokens,
         first_edit_max_tokens,
+        pre_edit_delta_p50_tokens,
+        transport_error_count,
+        eof_reset_count,
+        total_retry_backoff_ms,
         blanket_read_turns,
         sessions_with_blanket_reads,
         context_categories,
@@ -1441,7 +1565,9 @@ mod tests {
                 used_hyper_tools: hyper_calls > 0,
                 tool_calls: 3,
                 tool_names: vec![],
+                ..Default::default()
             }],
+            ..Default::default()
         }
     }
 
@@ -1525,7 +1651,7 @@ mod tests {
         assert!(svg.contains("gemini-4-carbon"));
         assert!(svg.contains("90s · emp"));
         assert!(svg.contains("width=\"164\""), "TTL bar track must leave clearance before right label");
-        assert!(TTL_BAR_X + TTL_BAR_MAX_W <= 352.0);
+        const { assert!(TTL_BAR_X + TTL_BAR_MAX_W <= 352.0) };
         assert!(svg.ends_with("</svg>\n"));
 
         // Pure-Rust 2x Retina PNG export verification (1920x1200)
@@ -1590,5 +1716,80 @@ mod tests {
         assert!(svg.contains("HEALTHY"));
         assert!(svg.contains("No model switches or subagent splits detected"));
         assert_share_card_clean(&svg).unwrap();
+    }
+
+    #[test]
+    fn calibrated_verdict_avoids_false_bleeding_and_flags_stream_resets_and_low_adoption() {
+        let base_usage = UsageWindowReport {
+            window: "7d".into(),
+            currency: "USD".into(),
+            fx_rate: 1.0,
+            fx_source: "offline".into(),
+            fx_updated_at_ms: None,
+            available_currencies: BTreeMap::from([("USD".into(), 1.0)]),
+            total_turns: 12,
+            active_sessions: 2,
+            total_input_tokens: 80_000,
+            total_cache_read_tokens: 920_000,
+            total_output_tokens: 8_000,
+            total_tokens: 1_008_000,
+            cache_hit_ratio: 0.92,
+            attributed_tokens: 1_008_000,
+            unattributed_tokens: 0,
+            attributed_ratio: 1.0,
+            estimated_cost_usd: 0.8,
+            cache_saved_usd: 4.0,
+            estimated_cost: 0.8,
+            cache_saved: 4.0,
+            ledger_sessions_tracked: 2,
+            ledger_scan_ms: 1,
+            series: vec![],
+            models: vec![],
+        };
+
+        // 1. Heavy Turn-1 baseline (155k first-edit) with tiny pre-edit delta (+8k) -> HEALTHY, NOT BLEEDING!
+        let mut s_heavy_base = sample_session("heavy-1", 4, Some(155_000), 0);
+        s_heavy_base.pre_edit_delta_tokens = Some(8_000);
+        s_heavy_base.cache_break_turns = 0;
+        let healthy_report = build_audit_report_from_parts(7, &[s_heavy_base], &base_usage, vec![]);
+        assert_eq!(healthy_report.verdict, "HEALTHY", "heavy system baseline with low delta must not false-BLEED");
+        assert_eq!(healthy_report.pre_edit_delta_p50_tokens, Some(8_000));
+        assert!(healthy_report.transport_summary_line().is_none());
+
+        // 2. Native-only coding sessions with blanket reads + upstream stream resets -> emits both findings & BLEEDING
+        let mut s_nat_1 = sample_session("nat-1", 0, Some(170_000), 3);
+        s_nat_1.valid_turns = 6;
+        s_nat_1.pre_edit_delta_tokens = Some(15_000);
+        s_nat_1.transport_error_count = 3;
+        s_nat_1.eof_reset_count = 2;
+        s_nat_1.total_retry_backoff_ms = 48_000;
+
+        let mut s_nat_2 = sample_session("nat-2", 0, Some(168_000), 2);
+        s_nat_2.valid_turns = 6;
+        s_nat_2.pre_edit_delta_tokens = Some(12_000);
+        s_nat_2.transport_error_count = 1;
+        s_nat_2.eof_reset_count = 1;
+        s_nat_2.total_retry_backoff_ms = 15_000;
+
+        let roles = HashMap::new();
+        let cfg = HyperConfig::default();
+        assert!(cfg.any_mcp_accel_enabled());
+        let reset_report = build_audit_report_from_parts_with_roles(
+            7,
+            &[s_nat_1, s_nat_2],
+            &roles,
+            &base_usage,
+            vec![],
+            &cfg,
+        );
+        assert_eq!(reset_report.verdict, "BLEEDING");
+        assert_eq!(reset_report.transport_error_count, 4);
+        assert_eq!(reset_report.eof_reset_count, 3);
+        assert_eq!(reset_report.total_retry_backoff_ms, 63_000);
+        assert!(reset_report.findings.iter().any(|f| f.code == "upstream_stream_resets" && f.severity == "high"));
+        assert!(reset_report.findings.iter().any(|f| f.code == "low_hyper_adoption" && f.severity == "warn"));
+        let cli_line = reset_report.transport_summary_line().expect("summary line");
+        assert!(cli_line.contains("4 errors"));
+        assert!(cli_line.contains("63.0s"));
     }
 }

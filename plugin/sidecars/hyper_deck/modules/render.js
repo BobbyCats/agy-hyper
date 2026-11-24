@@ -95,7 +95,17 @@
     };
 
     const pills = [];
-    if (bench.first_edit_context_tokens > 0) {
+    if (bench.pre_edit_delta_tokens !== null && bench.pre_edit_delta_tokens !== undefined) {
+      const dCls = bench.pre_edit_delta_tokens >= 120000 ? 'status-pill err' : bench.pre_edit_delta_tokens >= 70000 ? 'status-pill warn' : 'mono-tag';
+      const tip = bench.first_edit_context_tokens > 0
+        ? t('context_pro.xray_first_edit', { ctx: `${(bench.first_edit_context_tokens / 1000).toFixed(0)}k` })
+        : '';
+      pills.push(
+        `<span class="${dCls}"${tip ? ` title="${escapeHtml(tip)}"` : ''}>${escapeHtml(
+          t('context_pro.xray_pre_edit_delta', { delta: fmtTokens(bench.pre_edit_delta_tokens) })
+        )}</span>`
+      );
+    } else if (bench.first_edit_context_tokens > 0) {
       const feK = `${(bench.first_edit_context_tokens / 1000).toFixed(0)}k`;
       const cls = bench.first_edit_context_tokens >= 180000 ? 'status-pill warn' : 'mono-tag';
       pills.push(`<span class="${cls}">${escapeHtml(t('context_pro.xray_first_edit', { ctx: feK }))}</span>`);
@@ -716,9 +726,43 @@
     }
 
     const pills = [];
-    if (audit.first_edit_p50_tokens > 0) {
+    if (audit.pre_edit_delta_p50_tokens !== null && audit.pre_edit_delta_p50_tokens !== undefined) {
+      const dCls =
+        audit.pre_edit_delta_p50_tokens >= 120000
+          ? 'status-pill err'
+          : audit.pre_edit_delta_p50_tokens >= 70000
+            ? 'status-pill warn'
+            : 'mono-tag';
+      const tip = audit.first_edit_p50_tokens > 0
+        ? t('usage.audit_pre_edit_delta_tip', {
+            delta: fmtTokens(audit.pre_edit_delta_p50_tokens),
+            raw: fmtTokens(audit.first_edit_p50_tokens),
+          })
+        : '';
+      pills.push(
+        `<span class="${dCls}"${tip ? ` title="${escapeHtml(tip)}"` : ''}>${escapeHtml(
+          t('usage.audit_pre_edit_delta', { delta: fmtTokens(audit.pre_edit_delta_p50_tokens) })
+        )}</span>`
+      );
+    } else if (audit.first_edit_p50_tokens > 0) {
       pills.push(
         `<span class="mono-tag">${escapeHtml(t('usage.audit_first_edit', { ctx: fmtTokens(audit.first_edit_p50_tokens) }))}</span>`
+      );
+    }
+    if ((audit.transport_error_count || 0) > 0) {
+      const rCls = audit.transport_error_count >= 3 ? 'status-pill err' : 'status-pill warn';
+      const rTip = t('usage.audit_transport_resets_tip', {
+        count: audit.transport_error_count,
+        eof: audit.eof_reset_count || 0,
+        time: fmtSec(audit.total_retry_backoff_ms || 0),
+      });
+      pills.push(
+        `<span class="${rCls}" title="${escapeHtml(rTip)}">${escapeHtml(
+          t('usage.audit_transport_resets', {
+            count: audit.transport_error_count,
+            time: fmtSec(audit.total_retry_backoff_ms || 0),
+          })
+        )}</span>`
       );
     }
     if (audit.blanket_read_turns > 0) {
@@ -840,6 +884,57 @@
       .join('');
   }
 
+  function renderUpdateRadar(snap, state) {
+    const pill = $('update-pill');
+    const banner = $('update-banner');
+    if (!pill || !banner) return;
+
+    const us = snap.update_state || null;
+    const cfg = snap.config || {};
+    const latest = String(us?.latest_version || '').trim().replace(/^v/i, '');
+    const dismissed = String(us?.dismissed_version || '').trim().replace(/^v/i, '');
+    const enabled = cfg.enable_update_check !== false || Boolean(state.forceShowUpdate);
+    const actionable = Boolean(
+      enabled &&
+        us?.update_available &&
+        latest &&
+        (Boolean(state.forceShowUpdate) || dismissed !== latest)
+    );
+
+    if (!actionable) {
+      pill.classList.add('hidden');
+      pill.classList.remove('active');
+      pill.setAttribute('aria-expanded', 'false');
+      banner.classList.add('hidden');
+      state.updateBannerOpen = false;
+      return;
+    }
+
+    pill.textContent = t('update.pill_badge', { version: latest });
+    pill.title = t('update.pill_tip', { version: latest });
+    pill.classList.remove('hidden');
+    pill.classList.toggle('active', Boolean(state.updateBannerOpen));
+    pill.setAttribute('aria-expanded', String(Boolean(state.updateBannerOpen)));
+
+    if (state.updateBannerOpen) {
+      banner.classList.remove('hidden');
+      const txtEl = $('update-banner-text');
+      if (txtEl) txtEl.textContent = t('update.banner_title', { version: latest });
+      const notesEl = $('btn-update-notes');
+      if (notesEl) {
+        notesEl.href =
+          us?.release_url || `https://github.com/BobbyCats/agy-hyper/releases/tag/v${latest}`;
+      }
+      const nowBtn = $('btn-update-now');
+      if (nowBtn) {
+        nowBtn.disabled = Boolean(state.updateApplying);
+        nowBtn.textContent = state.updateApplying ? t('update.btn_updating') : t('update.btn_now');
+      }
+    } else {
+      banner.classList.add('hidden');
+    }
+  }
+
   function renderSnapshot(snap, state, onRollback, onSelectSession, onToggleDiff) {
     const cfg = snap.config || {};
     const eng = snap.engine || {};
@@ -848,7 +943,8 @@
     const tree = snap.session_tree || null;
     const activeConvId = pulse?.conversation_id || bench?.conversation_id || '';
 
-    $('version-pill').textContent = `v${eng.version || snap.version || '0.4.4'}`;
+    $('version-pill').textContent = `v${eng.version || snap.version || snap.update_state?.current_version || '0.5.0'}`;
+    renderUpdateRadar(snap, state);
     const isUds = snap.transport === 'uds-daemon';
     $('daemon-dot').classList.toggle('warn', !isUds);
     $('daemon-label').textContent = isUds
@@ -990,6 +1086,7 @@
     $('tog-argv').checked = Boolean(cfg.allow_custom_argv_checks);
     $('tog-pill').checked = Boolean(cfg.enable_ui_pill);
     if ($('tog-watchdog-notify')) $('tog-watchdog-notify').checked = cfg.enable_watchdog_notify !== false;
+    if ($('tog-update-check')) $('tog-update-check').checked = cfg.enable_update_check !== false;
 
     renderToolsBars(eng);
 

@@ -17,7 +17,7 @@
     ],
     "PostToolUse": [
       {
-        "matcher": "edit_file|write_file|run_command|call_mcp_tool|mcp_agy-hyper.*hyper_edit",
+        "matcher": "edit_file|write_file",
         "hooks": [
           {
             "type": "command",

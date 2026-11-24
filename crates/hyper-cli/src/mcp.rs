@@ -11,13 +11,14 @@ use hyper_daemon::client::ensure_and_send;
 use hyper_daemon::protocol::{
     DaemonRequest, DaemonResponse, DrillOutput, HandleStored, PrewarmedCheck,
 };
+use hyper_daemon::server::socket_path;
 use serde_json::{json, Value};
 use std::collections::HashMap;
-use std::io::{self, BufRead, Write};
+use std::io::{self, BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 const MCP_PROTOCOL_VERSION: &str = "2024-11-05";
 
@@ -565,38 +566,46 @@ fn handle_check(
     }
     if cfg.prewarm_tier2 {
         if let Some(preset_id) = &req.preset {
-            if let Ok(DaemonResponse::Ok { data }) = ensure_and_send(&DaemonRequest::LookupPrewarm {
-                workspace: jail.root().display().to_string(),
-                preset: preset_id.clone(),
-            }) {
-                if !data.is_null() {
-                    if let Ok(hit) = serde_json::from_value::<PrewarmedCheck>(data) {
-                        record_telemetry(
-                            "hyper_check_prewarm_hit",
-                            Some(jail.root().display().to_string()),
-                            started.elapsed().as_millis() as u64,
-                            hit.duration_ms,
-                            0,
-                            format!("prewarmed `{}` rev#{} exit={} (0ms wait)", hit.command_display, hit.workspace_rev, hit.exit_code),
-                            false,
-                        );
-                        let mut out = format!(
-                            "# check `{}` · exit={} · {}ms [prewarmed · rev #{}] · {}B\n",
-                            hit.command_display, hit.exit_code, hit.duration_ms, hit.workspace_rev, hit.total_output_bytes
-                        );
-                        if let Some(hint) = &hit.toc_hint {
-                            out.push_str(&format!("digest: {}\n", hint));
-                        }
-                        if let Some(h) = &hit.spill_handle {
-                            out.push_str(&format!("handle: {} (call hyper_tx action=\"drill\" handle_id=\"{}\")\n", h, h));
-                        }
-                        for l in &hit.summary_lines {
-                            out.push_str(l);
-                            out.push('\n');
-                        }
-                        return Ok(out);
-                    }
+            let wait_t0 = Instant::now();
+            if let Some(hit) =
+                lookup_prewarm_singleflight(&jail.root().display().to_string(), preset_id)
+            {
+                let waited_ms = wait_t0.elapsed().as_millis() as u64;
+                let saved_ms = hit.duration_ms.saturating_sub(waited_ms);
+                record_telemetry(
+                    "hyper_check_prewarm_hit",
+                    Some(jail.root().display().to_string()),
+                    started.elapsed().as_millis() as u64,
+                    saved_ms,
+                    0,
+                    format!(
+                        "prewarmed `{}` rev#{} exit={} ({}ms wait)",
+                        hit.command_display, hit.workspace_rev, hit.exit_code, waited_ms
+                    ),
+                    false,
+                );
+                let mut out = format!(
+                    "# check `{}` · exit={} · {}ms [prewarmed · rev #{}] · {}B\n",
+                    hit.command_display,
+                    hit.exit_code,
+                    hit.duration_ms,
+                    hit.workspace_rev,
+                    hit.total_output_bytes
+                );
+                if let Some(hint) = &hit.toc_hint {
+                    out.push_str(&format!("digest: {}\n", hint));
                 }
+                if let Some(h) = &hit.spill_handle {
+                    out.push_str(&format!(
+                        "handle: {} (call hyper_tx action=\"drill\" handle_id=\"{}\")\n",
+                        h, h
+                    ));
+                }
+                for l in &hit.summary_lines {
+                    out.push_str(l);
+                    out.push('\n');
+                }
+                return Ok(out);
             }
         }
     }
@@ -746,6 +755,57 @@ fn handle_tx(workspace: Option<&str>, args: Value, started: Instant) -> Result<S
     }
 }
 
+fn lookup_prewarm_singleflight(workspace: &str, preset: &str) -> Option<PrewarmedCheck> {
+    let req = DaemonRequest::LookupPrewarm {
+        workspace: workspace.to_string(),
+        preset: preset.to_string(),
+    };
+    let timeout = Duration::from_secs(26);
+
+    #[cfg(unix)]
+    let resp: DaemonResponse = {
+        use std::os::unix::net::UnixStream;
+        let sock = socket_path();
+        let mut stream = UnixStream::connect(sock).ok()?;
+        let _ = stream.set_read_timeout(Some(timeout));
+        let _ = stream.set_write_timeout(Some(Duration::from_millis(500)));
+        let mut payload = serde_json::to_string(&req).ok()?;
+        payload.push('\n');
+        stream.write_all(payload.as_bytes()).ok()?;
+        stream.flush().ok()?;
+        let mut reader = BufReader::new(stream);
+        let mut line = String::new();
+        reader.read_line(&mut line).ok()?;
+        serde_json::from_str(line.trim()).ok()?
+    };
+
+    #[cfg(not(unix))]
+    let resp: DaemonResponse = {
+        use std::net::TcpStream;
+        let _ = socket_path();
+        let run_dir = HyperConfig::run_dir();
+        let addr = std::fs::read_to_string(run_dir.join("agy-hyper-v1.addr")).ok()?;
+        let token = std::fs::read_to_string(run_dir.join("agy-hyper-v1.token")).ok()?;
+        let mut stream = TcpStream::connect(addr.trim()).ok()?;
+        let _ = stream.set_read_timeout(Some(timeout));
+        let payload = format!(
+            "{}\n{}\n",
+            token.trim(),
+            serde_json::to_string(&req).ok()?
+        );
+        stream.write_all(payload.as_bytes()).ok()?;
+        let mut reader = BufReader::new(stream);
+        let mut line = String::new();
+        reader.read_line(&mut line).ok()?;
+        serde_json::from_str(line.trim()).ok()?
+    };
+
+    match resp {
+        DaemonResponse::Ok { data } if !data.is_null() => serde_json::from_value(data).ok(),
+        _ => None,
+    }
+}
+
 fn record_telemetry(
     kind: &str,
     workspace: Option<String>,
@@ -778,6 +838,7 @@ fn tool_definitions(cfg: &HyperConfig) -> Value {
                 "properties": {
                     "workspace": { "type": "string", "description": "Absolute project workspace root path (required when host spawns MCP outside the project directory)" },
                     "query": { "type": "string", "description": "Task keywords or symbol names to pack" },
+                    "symbols": { "type": "array", "items": { "type": "string" }, "description": "Optional symbol names to inline full AST-sliced bodies for (eliminates follow-up read_file)." },
                     "focus_paths": { "type": "array", "items": { "type": "string" } },
                     "include_outlines": { "type": "boolean", "default": true },
                     "include_git": { "type": "boolean", "default": true },
@@ -966,5 +1027,23 @@ mod tests {
         }
 
         let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn hyper_pack_schema_exposes_symbols_array_property() {
+        let cfg = HyperConfig::default();
+        let defs = tool_definitions(&cfg);
+        let tools = defs.as_array().unwrap();
+        let pack = tools
+            .iter()
+            .find(|t| t.get("name").and_then(Value::as_str) == Some("hyper_pack"))
+            .expect("hyper_pack definition present");
+        let symbols_prop = &pack["inputSchema"]["properties"]["symbols"];
+        assert_eq!(symbols_prop["type"], "array");
+        assert_eq!(symbols_prop["items"]["type"], "string");
+        assert!(symbols_prop["description"]
+            .as_str()
+            .unwrap()
+            .contains("AST-sliced bodies"));
     }
 }

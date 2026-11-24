@@ -14,6 +14,7 @@ pub mod sessions;
 pub mod share_card;
 pub mod transcript;
 pub mod tx_edit;
+pub mod update;
 pub mod usage;
 pub mod wal;
 

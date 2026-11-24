@@ -16,6 +16,9 @@
     usageWindow: localStorage.getItem('agy-hyper-uwin') || '7d',
     usageMetric: localStorage.getItem('agy-hyper-umetric') || 'cost',
     sharePreviewOpen: false,
+    updateBannerOpen: false,
+    updateApplying: false,
+    forceShowUpdate: false,
   };
   let pollInFlight = false;
   let pollSeq = 0;
@@ -520,6 +523,108 @@
     }
   }
 
+  async function checkUpdateNow() {
+    const btn = $('btn-check-update');
+    if (!btn || btn.disabled) return;
+    btn.disabled = true;
+    btn.textContent = t('update.checking');
+    try {
+      const r = await apiFetch('/api/update/status?force=1', { method: 'GET' })
+        .then((x) => x.json())
+        .catch((e) => ({ ok: false, error: String(e?.message || e) }));
+      if (r?.ok) {
+        const { ok: _ok, ...nextUpdateState } = r;
+        if (state.lastSnap) state.lastSnap.update_state = nextUpdateState;
+        const latest = String(r.latest_version || '').replace(/^v/i, '');
+        if (r.update_available && latest) {
+          state.forceShowUpdate = true;
+          state.updateBannerOpen = true;
+          render();
+          showToast(t('update.toast_available', { version: latest }));
+        } else if (r.last_error) {
+          render();
+          showToast(t('update.toast_check_err', { err: r.last_error }));
+        } else {
+          render();
+          showToast(t('update.toast_up_to_date', { version: r.current_version || '0.5.0' }));
+        }
+      } else {
+        showToast(t('update.toast_check_err', { err: r?.error || 'error' }));
+      }
+    } finally {
+      btn.disabled = false;
+      btn.textContent = t('engine.btn_check_update');
+    }
+  }
+
+  async function applyReleaseUpdateNow() {
+    if (state.updateApplying) return;
+    const latest = String(state.lastSnap?.update_state?.latest_version || '').replace(/^v/i, '') || 'latest';
+    state.updateApplying = true;
+    render();
+    showToast(t('update.toast_applying', { version: latest }));
+    try {
+      const r = await apiFetch('/api/update/apply', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: '{}',
+      })
+        .then((x) => x.json())
+        .catch((e) => ({ ok: false, error: String(e?.message || e) }));
+      if (r?.ok) {
+        const installed = String(r.result?.installed_version || latest).replace(/^v/i, '');
+        state.updateApplying = false;
+        state.updateBannerOpen = false;
+        state.forceShowUpdate = false;
+        if (state.lastSnap?.update_state) {
+          state.lastSnap.update_state.update_available = false;
+          state.lastSnap.update_state.current_version = installed;
+        }
+        render();
+        showToast(t('update.toast_applied', { version: installed }));
+        poll(true);
+        if (r.restarting) {
+          setTimeout(() => {
+            try { location.reload(); } catch { /* ignore */ }
+          }, 1200);
+        }
+      } else {
+        state.updateApplying = false;
+        render();
+        showToast(t('update.toast_apply_err', { err: r?.error || 'error' }));
+      }
+    } catch (e) {
+      state.updateApplying = false;
+      render();
+      showToast(t('update.toast_apply_err', { err: String(e?.message || e) }));
+    }
+  }
+
+  async function dismissReleaseUpdateBanner() {
+    const latest = String(state.lastSnap?.update_state?.latest_version || '').replace(/^v/i, '');
+    state.updateBannerOpen = false;
+    state.forceShowUpdate = false;
+    if (state.lastSnap?.update_state && latest) {
+      state.lastSnap.update_state.dismissed_version = latest;
+    }
+    render();
+    const r = await apiFetch('/api/update/dismiss', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ version: latest }),
+    })
+      .then((x) => x.json())
+      .catch(() => ({ ok: false }));
+    if (r?.ok && state.lastSnap) {
+      const { ok: _ok, ...nextUpdateState } = r;
+      state.lastSnap.update_state = nextUpdateState;
+      render();
+    }
+    if (latest) {
+      showToast(t('update.toast_dismissed', { version: latest }));
+    }
+  }
+
   async function triggerRollback(txId, force = false) {
     const r = await apiFetch('/api/rollback', {
       method: 'POST',
@@ -637,6 +742,34 @@
     toggleSharePreview();
   });
 
+  $('update-pill')?.addEventListener('click', () => {
+    state.updateBannerOpen = !state.updateBannerOpen;
+    render();
+  });
+
+  $('btn-update-now')?.addEventListener('click', () => {
+    applyReleaseUpdateNow();
+  });
+
+  $('btn-update-notes')?.addEventListener('click', () => {
+    const url =
+      $('btn-update-notes')?.getAttribute('href') ||
+      'https://github.com/BobbyCats/agy-hyper/releases/latest';
+    copyTextReliable(url).then((ok) => {
+      if (ok && !window.__AGY_HYPER_STANDALONE__) {
+        showToast(t('update.toast_notes_copied'));
+      }
+    });
+  });
+
+  $('btn-update-dismiss')?.addEventListener('click', () => {
+    dismissReleaseUpdateBanner();
+  });
+
+  $('btn-check-update')?.addEventListener('click', () => {
+    checkUpdateNow();
+  });
+
   document.querySelectorAll('.win-btn[data-uwin]').forEach((btn) => {
     btn.addEventListener('click', () => {
       state.usageWindow = btn.dataset.uwin;
@@ -680,6 +813,10 @@
         body: JSON.stringify({ key, value }),
       }).then((x) => x.json()).catch(() => ({ ok: false }));
       if (r.ok) {
+        if (key === 'enable_update_check' && !value) {
+          state.forceShowUpdate = false;
+          state.updateBannerOpen = false;
+        }
         showToast(t('engine.toast_toggle_ok', { key, state: value ? 'ON' : 'OFF' }));
         poll(true);
       } else {

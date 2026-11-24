@@ -6,7 +6,7 @@ use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::{Mutex, OnceLock};
-use std::time::UNIX_EPOCH;
+use std::time::{Duration, Instant, UNIX_EPOCH};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionSummary {
@@ -328,7 +328,7 @@ pub fn discover_active_child_sessions(parent_conv_id: &str) -> Vec<ActiveChildSe
             mtime_ms,
         });
     }
-    out.sort_by(|a, b| b.mtime_ms.cmp(&a.mtime_ms));
+    out.sort_by_key(|b| std::cmp::Reverse(b.mtime_ms));
     out
 }
 
@@ -373,39 +373,126 @@ pub fn discover_all_active_subagents(max_age_secs: u64) -> Vec<ActiveChildSessio
             mtime_ms,
         });
     }
-    out.sort_by(|a, b| b.mtime_ms.cmp(&a.mtime_ms));
+    out.sort_by_key(|b| std::cmp::Reverse(b.mtime_ms));
     out
 }
 
+const SESSION_SUMMARY_CACHE_TTL: Duration = Duration::from_secs(4);
+
+#[derive(Debug, Clone)]
+struct CachedSessionSummaries {
+    cached_at: Instant,
+    brain_dirs_mtime_fingerprint: Vec<(PathBuf, u128, u64)>,
+    cached_limit: usize,
+    summaries: Vec<SessionSummary>,
+}
+
+fn compute_brain_dirs_fingerprint(brain_dirs: &[PathBuf]) -> Vec<(PathBuf, u128, u64)> {
+    brain_dirs
+        .iter()
+        .map(|dir| {
+            if let Ok(meta) = fs::metadata(dir) {
+                let mtime_ns = meta
+                    .modified()
+                    .ok()
+                    .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+                    .map(|d| d.as_nanos())
+                    .unwrap_or(0);
+                (dir.clone(), mtime_ns, meta.len())
+            } else {
+                (dir.clone(), 0, 0)
+            }
+        })
+        .collect()
+}
+
 pub fn discover_session_summaries(limit: usize) -> Vec<SessionSummary> {
+    static SUMMARY_CACHE: OnceLock<Mutex<Option<CachedSessionSummaries>>> = OnceLock::new();
+
+    let clamped_limit = limit.clamp(1, 200);
+    let has_custom_brain_env = std::env::var_os("AGY_HYPER_BRAIN_DIR").is_some();
     let custom_brain = std::env::var("AGY_HYPER_BRAIN_DIR")
         .ok()
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
         .map(PathBuf::from);
-    let db_index = if custom_brain.is_some() {
-        HashMap::new()
-    } else {
-        load_antigravity_title_index()
+
+    if has_custom_brain_env {
+        let Some(cb) = custom_brain else {
+            return Vec::new();
+        };
+        return scan_session_summaries(clamped_limit, &[cb], &HashMap::new());
+    }
+
+    let Some(home) = dirs::home_dir() else {
+        return Vec::new();
     };
+    let brain_dirs: Vec<PathBuf> = ["antigravity", "antigravity-ide", "antigravity-cli"]
+        .into_iter()
+        .map(|product| home.join(".gemini").join(product).join("brain"))
+        .collect();
+
+    discover_session_summaries_cached(
+        clamped_limit,
+        &brain_dirs,
+        SUMMARY_CACHE.get_or_init(|| Mutex::new(None)),
+        SESSION_SUMMARY_CACHE_TTL,
+        load_antigravity_title_index,
+    )
+}
+
+fn discover_session_summaries_cached<F>(
+    clamped_limit: usize,
+    brain_dirs: &[PathBuf],
+    cache_lock: &Mutex<Option<CachedSessionSummaries>>,
+    ttl: Duration,
+    load_db: F,
+) -> Vec<SessionSummary>
+where
+    F: FnOnce() -> HashMap<String, DbSessionMeta>,
+{
+    let fingerprint = compute_brain_dirs_fingerprint(brain_dirs);
+    if let Ok(guard) = cache_lock.lock() {
+        if let Some(cached) = guard.as_ref() {
+            if cached.cached_at.elapsed() <= ttl
+                && cached.brain_dirs_mtime_fingerprint == fingerprint
+                && cached.cached_limit >= clamped_limit
+            {
+                return cached
+                    .summaries
+                    .iter()
+                    .take(clamped_limit)
+                    .cloned()
+                    .collect();
+            }
+        }
+    }
+
+    let db_index = load_db();
+    let summaries = scan_session_summaries(clamped_limit, brain_dirs, &db_index);
+    if let Ok(mut guard) = cache_lock.lock() {
+        *guard = Some(CachedSessionSummaries {
+            cached_at: Instant::now(),
+            brain_dirs_mtime_fingerprint: fingerprint,
+            cached_limit: clamped_limit,
+            summaries: summaries.clone(),
+        });
+    }
+    summaries
+}
+
+fn scan_session_summaries(
+    clamped_limit: usize,
+    brain_dirs: &[PathBuf],
+    db_index: &HashMap<String, DbSessionMeta>,
+) -> Vec<SessionSummary> {
     let now_ms = std::time::SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_millis() as u64)
         .unwrap_or(0);
     let mut found: Vec<(std::time::SystemTime, u64, PathBuf)> = Vec::new();
-    let brain_dirs: Vec<PathBuf> = if let Some(cb) = custom_brain {
-        vec![cb]
-    } else {
-        let Some(home) = dirs::home_dir() else {
-            return Vec::new();
-        };
-        ["antigravity", "antigravity-ide", "antigravity-cli"]
-            .into_iter()
-            .map(|product| home.join(".gemini").join(product).join("brain"))
-            .collect()
-    };
     for brain in brain_dirs {
-        let Ok(entries) = fs::read_dir(&brain) else {
+        let Ok(entries) = fs::read_dir(brain) else {
             continue;
         };
         for ent in entries.flatten() {
@@ -421,10 +508,10 @@ pub fn discover_session_summaries(limit: usize) -> Vec<SessionSummary> {
             }
         }
     }
-    found.sort_by(|a, b| b.0.cmp(&a.0));
+    found.sort_by_key(|b| std::cmp::Reverse(b.0));
     let mut summaries: Vec<SessionSummary> = found
         .into_iter()
-        .take(limit.clamp(1, 200))
+        .take(clamped_limit)
         .map(|(mtime, size_bytes, p)| {
             let conv_id = p
                 .parent()
@@ -693,5 +780,73 @@ mod tests {
         let kids = collect_descendant_sessions("root-1", &sessions);
         let ids: Vec<&str> = kids.iter().map(|s| s.conversation_id.as_str()).collect();
         assert_eq!(ids, vec!["child-b", "grandchild", "child-a"]);
+    }
+
+    #[test]
+    fn session_summary_cache_respects_ttl_limit_and_dir_mtime_fingerprint() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use tempfile::tempdir;
+
+        let dir = tempdir().unwrap();
+        let brain = dir.path().join("brain");
+        let write_conv = |cid: &str| {
+            let log_dir = brain.join(cid).join(".system_generated").join("logs");
+            fs::create_dir_all(&log_dir).unwrap();
+            let line = format!(
+                "{{\"step_index\":1,\"type\":\"USER_INPUT\",\"created_at\":\"2026-11-20T10:00:00Z\",\"content\":\"Task {} {}\"}}\n",
+                cid,
+                "x".repeat(240)
+            );
+            fs::write(log_dir.join("transcript.jsonl"), line).unwrap();
+        };
+        write_conv("conv-alpha");
+        write_conv("conv-beta");
+
+        let cache: Mutex<Option<CachedSessionSummaries>> = Mutex::new(None);
+        let db_loads = AtomicUsize::new(0);
+        let brain_dirs = vec![brain.clone()];
+
+        // 1. Cold scan with limit=10 populates cache
+        let first = discover_session_summaries_cached(10, &brain_dirs, &cache, Duration::from_secs(4), || {
+            db_loads.fetch_add(1, Ordering::SeqCst);
+            HashMap::new()
+        });
+        assert_eq!(first.len(), 2);
+        assert_eq!(db_loads.load(Ordering::SeqCst), 1);
+
+        // 2. Smaller/equal limit within 4s TTL and unchanged brain dir mtime hits cache without rescanning
+        let hit_slice = discover_session_summaries_cached(1, &brain_dirs, &cache, Duration::from_secs(4), || {
+            db_loads.fetch_add(1, Ordering::SeqCst);
+            HashMap::new()
+        });
+        assert_eq!(hit_slice.len(), 1);
+        assert_eq!(db_loads.load(Ordering::SeqCst), 1, "expected cache hit for limit <= cached_limit");
+
+        // 3. Larger limit > cached_limit misses and refreshes
+        let larger = discover_session_summaries_cached(25, &brain_dirs, &cache, Duration::from_secs(4), || {
+            db_loads.fetch_add(1, Ordering::SeqCst);
+            HashMap::new()
+        });
+        assert_eq!(larger.len(), 2);
+        assert_eq!(db_loads.load(Ordering::SeqCst), 2);
+
+        // 4. Adding a new conversation directory updates `brain` mtime fingerprint -> invalidates immediately
+        std::thread::sleep(Duration::from_millis(5));
+        write_conv("conv-gamma");
+        let after_new_dir =
+            discover_session_summaries_cached(25, &brain_dirs, &cache, Duration::from_secs(4), || {
+                db_loads.fetch_add(1, Ordering::SeqCst);
+                HashMap::new()
+            });
+        assert_eq!(after_new_dir.len(), 3);
+        assert_eq!(db_loads.load(Ordering::SeqCst), 3);
+
+        // 5. Expired TTL forces refresh even with identical fingerprint
+        std::thread::sleep(Duration::from_millis(8));
+        let _ = discover_session_summaries_cached(10, &brain_dirs, &cache, Duration::from_millis(2), || {
+            db_loads.fetch_add(1, Ordering::SeqCst);
+            HashMap::new()
+        });
+        assert_eq!(db_loads.load(Ordering::SeqCst), 4);
     }
 }

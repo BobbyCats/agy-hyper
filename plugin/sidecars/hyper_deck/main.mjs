@@ -4,7 +4,7 @@
  * and gracefully falls back to `agy-hyper snapshot` CLI if the daemon is cold.
  */
 import { execFile, spawnSync } from 'node:child_process';
-import { existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';
 import http from 'node:http';
 import net from 'node:net';
 import { homedir, tmpdir } from 'node:os';
@@ -209,6 +209,320 @@ function runCliJson(args) {
   });
 }
 
+const UPDATE_REPO = 'BobbyCats/agy-hyper';
+const UPDATE_TTL_MS = 6 * 3600 * 1000;
+let updateCheckInFlight = null;
+
+function resolveUpdateStatePath() {
+  return join(resolveDataDir(), 'update_state.json');
+}
+
+function readInstalledVersion() {
+  try {
+    const pkgPath = join(__dirname, '..', '..', 'plugin.json');
+    if (existsSync(pkgPath)) {
+      const parsed = JSON.parse(readFileSync(pkgPath, 'utf8'));
+      const ver = String(parsed?.version || '').trim().replace(/^v/i, '');
+      if (/^\d+\.\d+\.\d+/.test(ver)) return ver;
+    }
+  } catch {
+    // fallback to built-in version
+  }
+  return '0.5.0';
+}
+
+function parseSemverStrict(raw) {
+  const clean = String(raw || '').trim().replace(/^v/i, '');
+  const m = /^(\d+)\.(\d+)\.(\d+)(?:\+[0-9A-Za-z.-]+)?$/.exec(clean);
+  if (!m) return null;
+  return [Number(m[1]), Number(m[2]), Number(m[3])];
+}
+
+function isNewerSemver(currentVersion, latestVersion) {
+  const cand = parseSemverStrict(latestVersion);
+  if (!cand) return false;
+  const curClean = String(currentVersion || '').trim().replace(/^v/i, '').split('+')[0] || '';
+  const dashIdx = curClean.indexOf('-');
+  const curBase = dashIdx === -1 ? curClean : curClean.slice(0, dashIdx);
+  const curHasPrerelease = dashIdx !== -1 && curClean.slice(dashIdx + 1).length > 0;
+  const cur = parseSemverStrict(curBase);
+  if (!cur) return false;
+  if (cand[0] !== cur[0]) return cand[0] > cur[0];
+  if (cand[1] !== cur[1]) return cand[1] > cur[1];
+  if (cand[2] !== cur[2]) return cand[2] > cur[2];
+  return curHasPrerelease;
+}
+
+function readUpdateState() {
+  const currentVersion = readInstalledVersion();
+  const base = {
+    checked_at_ms: 0,
+    current_version: currentVersion,
+    latest_version: null,
+    update_available: false,
+    release_url: null,
+    published_at: null,
+    dismissed_version: null,
+    last_error: null,
+  };
+  try {
+    const p = resolveUpdateStatePath();
+    if (!existsSync(p)) return base;
+    const raw = JSON.parse(readFileSync(p, 'utf8'));
+    const latest = raw?.latest_version ? String(raw.latest_version).trim().replace(/^v/i, '') : null;
+    const dismissed = raw?.dismissed_version ? String(raw.dismissed_version).trim().replace(/^v/i, '') : null;
+    return {
+      checked_at_ms: Math.max(0, Math.trunc(Number(raw?.checked_at_ms) || 0)),
+      current_version: currentVersion,
+      latest_version: latest,
+      update_available: Boolean(latest && isNewerSemver(currentVersion, latest)),
+      release_url: raw?.release_url
+        ? String(raw.release_url)
+        : latest
+          ? `https://github.com/${UPDATE_REPO}/releases/tag/v${latest}`
+          : null,
+      published_at: raw?.published_at ? String(raw.published_at) : null,
+      dismissed_version: dismissed,
+      last_error: raw?.last_error ? String(raw.last_error) : null,
+    };
+  } catch {
+    return base;
+  }
+}
+
+function writeUpdateStateAtomic(nextState) {
+  const dir = resolveDataDir();
+  mkdirSync(dir, { recursive: true });
+  const target = resolveUpdateStatePath();
+  const payload = JSON.stringify(nextState, null, 2);
+  const tmp = join(dir, `.update_state.${process.pid}.${Date.now()}.tmp`);
+  try {
+    writeFileSync(tmp, payload, { mode: 0o600 });
+    renameSync(tmp, target);
+  } catch {
+    try {
+      if (existsSync(tmp)) unlinkSync(tmp);
+    } catch {
+      // ignore
+    }
+    writeFileSync(target, payload, { mode: 0o600 });
+  }
+  return nextState;
+}
+
+function isUpdateCheckEnabled() {
+  if (process.env.AGY_HYPER_NO_UPDATE_CHECK) return false;
+  try {
+    const cfgPath = join(resolveDataDir(), 'config.json');
+    if (existsSync(cfgPath)) {
+      const cfg = JSON.parse(readFileSync(cfgPath, 'utf8'));
+      if (cfg && cfg.enable_update_check === false) return false;
+    }
+  } catch {
+    // default enabled
+  }
+  return true;
+}
+
+async function fetchReleaseRedirectTag(method, timeoutMs = 3500) {
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), timeoutMs);
+  try {
+    const res = await fetch(`https://github.com/${UPDATE_REPO}/releases/latest`, {
+      method,
+      redirect: 'manual',
+      headers: { 'User-Agent': 'agy-hyper-deck' },
+      signal: ctrl.signal,
+    });
+    const loc = res.headers.get('location') || '';
+    const m = /\/releases\/tag\/v?([0-9]+\.[0-9]+\.[0-9]+)(?=$|[/?#])/i.exec(loc);
+    if (!m) return null;
+    const latestVersion = m[1];
+    const releaseUrl = loc.startsWith('http')
+      ? loc
+      : `https://github.com${loc.startsWith('/') ? '' : '/'}${loc}`;
+    return { latestVersion, releaseUrl, publishedAt: null };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function checkReleaseUpdate(force = false) {
+  if (process.env.AGY_HYPER_NO_UPDATE_CHECK) {
+    return readUpdateState();
+  }
+  const prev = readUpdateState();
+  if (!force) {
+    if (!isUpdateCheckEnabled()) return prev;
+    if (prev.checked_at_ms > 0 && Date.now() - prev.checked_at_ms < UPDATE_TTL_MS) {
+      return prev;
+    }
+  }
+  if (updateCheckInFlight) return updateCheckInFlight;
+
+  updateCheckInFlight = (async () => {
+    let resolved = null;
+    let lastErr = null;
+
+    for (const method of ['HEAD', 'GET']) {
+      try {
+        resolved = await fetchReleaseRedirectTag(method, 3500);
+        if (resolved?.latestVersion) break;
+      } catch (e) {
+        lastErr = String(e?.message || e);
+      }
+    }
+
+    if (!resolved?.latestVersion) {
+      try {
+        const apiPayload = await fetchJsonWithTimeout(
+          `https://api.github.com/repos/${UPDATE_REPO}/releases/latest`,
+          3500
+        );
+        const rawTag = String(apiPayload?.tag_name || '').trim().replace(/^v/i, '');
+        if (parseSemverStrict(rawTag) && !apiPayload?.prerelease && !apiPayload?.draft) {
+          resolved = {
+            latestVersion: rawTag,
+            releaseUrl:
+              apiPayload?.html_url || `https://github.com/${UPDATE_REPO}/releases/tag/v${rawTag}`,
+            publishedAt: apiPayload?.published_at ? String(apiPayload.published_at) : null,
+          };
+        }
+      } catch (e) {
+        lastErr = String(e?.message || e);
+      }
+    }
+
+    const latestDisk = readUpdateState();
+    const currentVersion = readInstalledVersion();
+    const now = Date.now();
+
+    if (resolved?.latestVersion) {
+      const latestVersion = resolved.latestVersion;
+      const next = {
+        checked_at_ms: now,
+        current_version: currentVersion,
+        latest_version: latestVersion,
+        update_available: isNewerSemver(currentVersion, latestVersion),
+        release_url:
+          resolved.releaseUrl || `https://github.com/${UPDATE_REPO}/releases/tag/v${latestVersion}`,
+        published_at: resolved.publishedAt || latestDisk.published_at || null,
+        dismissed_version: latestDisk.dismissed_version || null,
+        last_error: null,
+      };
+      return writeUpdateStateAtomic(next);
+    }
+
+    const fallbackState = {
+      ...latestDisk,
+      checked_at_ms: now,
+      current_version: currentVersion,
+      last_error: lastErr || 'unable to resolve latest release tag',
+    };
+    return writeUpdateStateAtomic(fallbackState);
+  })().finally(() => {
+    updateCheckInFlight = null;
+  });
+
+  return updateCheckInFlight;
+}
+
+function dismissReleaseUpdate(version) {
+  const cur = readUpdateState();
+  const raw = String(version ?? '').trim();
+  let ver = null;
+  if (raw && !/^(clear|none)$/i.test(raw)) {
+    ver = raw.replace(/^v/i, '').trim() || null;
+  } else if (!raw && cur.latest_version) {
+    ver = String(cur.latest_version).trim().replace(/^v/i, '') || null;
+  }
+  return writeUpdateStateAtomic({
+    ...cur,
+    dismissed_version: ver,
+  });
+}
+
+function execHyperUpdate(args) {
+  return new Promise((resolve, reject) => {
+    execFile(
+      resolveHyperBin(),
+      args,
+      { timeout: 90000, maxBuffer: 4 * 1024 * 1024 },
+      (err, stdout, stderr) => {
+        if (err) {
+          const detail = String(stderr || stdout || err.message || err).trim();
+          return reject(new Error(detail || 'update command failed'));
+        }
+        resolve({ stdout: String(stdout || ''), stderr: String(stderr || '') });
+      }
+    );
+  });
+}
+
+async function applyReleaseUpdate(isSidecarMode = false) {
+  let out;
+  try {
+    out = await execHyperUpdate(['update', '--json']);
+  } catch (err) {
+    const msg = String(err?.message || err);
+    if (msg.includes('--json') || msg.includes('unexpected argument')) {
+      out = await execHyperUpdate(['update']);
+    } else {
+      return { ok: false, error: msg };
+    }
+  }
+
+  let result = null;
+  const trimmed = out.stdout.trim();
+  if (trimmed) {
+    try {
+      result = JSON.parse(trimmed);
+    } catch {
+      result = { message: trimmed };
+    }
+  } else {
+    result = { installed_version: readInstalledVersion() };
+  }
+
+  if (result && (result.ok === false || result.error)) {
+    return { ok: false, error: String(result.error || 'update failed'), result };
+  }
+
+  const installedVersion = String(
+    result?.installed_version || result?.version || readInstalledVersion()
+  )
+    .trim()
+    .replace(/^v/i, '');
+  const curState = readUpdateState();
+  writeUpdateStateAtomic({
+    ...curState,
+    checked_at_ms: Date.now(),
+    current_version: installedVersion || curState.current_version,
+    update_available: Boolean(
+      curState.latest_version && isNewerSemver(installedVersion || curState.current_version, curState.latest_version)
+    ),
+    last_error: null,
+  });
+
+  if (isSidecarMode) {
+    const t = setTimeout(() => process.exit(0), 600);
+    if (typeof t.unref === 'function') t.unref();
+  }
+  return { ok: true, restarting: Boolean(isSidecarMode), result };
+}
+
+function scheduleUpdateRadar() {
+  if (process.env.AGY_HYPER_NO_UPDATE_CHECK) return;
+  const runBg = () => {
+    if (!isUpdateCheckEnabled()) return;
+    checkReleaseUpdate(false).catch(() => {});
+  };
+  const initTimer = setTimeout(runBg, 3500);
+  if (typeof initTimer.unref === 'function') initTimer.unref();
+  const loopTimer = setInterval(runBg, UPDATE_TTL_MS);
+  if (typeof loopTimer.unref === 'function') loopTimer.unref();
+}
+
 async function getSnapshot(conversationId, transcriptPath) {
   const t0 = performance.now();
   try {
@@ -218,11 +532,13 @@ async function getSnapshot(conversationId, transcriptPath) {
       transcript_path: transcriptPath || null,
     });
     if (resp && resp.status === 'ok') {
-      return {
+      const snap = {
         ...resp.data,
         transport: 'uds-daemon',
         rpc_rtt_ms: Math.round((performance.now() - t0) * 100) / 100,
       };
+      if (!snap.update_state) snap.update_state = readUpdateState();
+      return snap;
     }
   } catch {
     // Fall back to direct CLI snapshot (also auto-spawns daemon if available)
@@ -231,11 +547,13 @@ async function getSnapshot(conversationId, transcriptPath) {
   if (conversationId) args.push('--conversation-id', conversationId);
   if (transcriptPath) args.push('--transcript-path', transcriptPath);
   const data = await runCliJson(args);
-  return {
+  const snap = {
     ...data,
     transport: 'cli-fallback',
     rpc_rtt_ms: Math.round((performance.now() - t0) * 100) / 100,
   };
+  if (!snap.update_state) snap.update_state = readUpdateState();
+  return snap;
 }
 
 async function setProfile(profile) {
@@ -731,6 +1049,34 @@ async function startSidecarNative() {
     return writeNativeClipboard(data?.text || '');
   }, 'POST');
 
+  app.api('/api/update/status', async (data) => {
+    try {
+      const force = data?.force === '1' || data?.force === 'true' || data?.force === true;
+      const st = force ? await checkReleaseUpdate(true) : readUpdateState();
+      return { ok: true, ...st };
+    } catch (e) {
+      return { ok: false, error: String(e?.message || e) };
+    }
+  }, 'GET');
+
+  app.api('/api/update/dismiss', async (data) => {
+    try {
+      const st = dismissReleaseUpdate(data?.version || '');
+      return { ok: true, ...st };
+    } catch (e) {
+      return { ok: false, error: String(e?.message || e) };
+    }
+  }, 'POST');
+
+  app.api('/api/update/apply', async () => {
+    try {
+      return await applyReleaseUpdate(true);
+    } catch (e) {
+      return { ok: false, error: String(e?.message || e) };
+    }
+  }, 'POST');
+
+  scheduleUpdateRadar();
   app.run();
 }
 
@@ -864,12 +1210,26 @@ function startStandaloneHttp() {
         const body = await readBody(req);
         return sendJson(200, writeNativeClipboard(body.text || ''));
       }
+      if (pathname === '/api/update/status' && req.method === 'GET') {
+        const force = url.searchParams.get('force') === '1' || url.searchParams.get('force') === 'true';
+        const st = force ? await checkReleaseUpdate(true) : readUpdateState();
+        return sendJson(200, { ok: true, ...st });
+      }
+      if (pathname === '/api/update/dismiss' && req.method === 'POST') {
+        const body = await readBody(req);
+        const st = dismissReleaseUpdate(body.version || '');
+        return sendJson(200, { ok: true, ...st });
+      }
+      if (pathname === '/api/update/apply' && req.method === 'POST') {
+        return sendJson(200, await applyReleaseUpdate(false));
+      }
       sendJson(404, { error: 'not found' });
     } catch (err) {
       sendJson(500, { ok: false, error: String(err?.message || err) });
     }
   });
 
+  scheduleUpdateRadar();
   server.listen(port, '127.0.0.1', () => {
     console.log(`[agy-hyper-deck] standalone cockpit listening on http://127.0.0.1:${port}`);
   });

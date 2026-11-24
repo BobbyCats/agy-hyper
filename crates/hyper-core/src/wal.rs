@@ -109,6 +109,7 @@ pub(crate) fn with_wal_lock<T>(
     fs::create_dir_all(wal_root).context("create WAL root dir")?;
     let lock_file = OpenOptions::new()
         .create(true)
+        .truncate(false)
         .read(true)
         .write(true)
         .open(wal_root.join(".tx.lock"))
@@ -260,7 +261,7 @@ pub fn list_transactions(wal_root: &Path, limit: usize) -> Vec<WalManifest> {
             serde_json::from_str::<WalManifest>(&raw).ok()
         })
         .collect();
-    manifests.sort_by(|a, b| b.timestamp_ms.cmp(&a.timestamp_ms));
+    manifests.sort_by_key(|b| std::cmp::Reverse(b.timestamp_ms));
     manifests.truncate(limit.clamp(1, 200));
     manifests
 }

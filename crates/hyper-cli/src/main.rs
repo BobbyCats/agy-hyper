@@ -13,6 +13,10 @@ use hyper_core::bench::{aggregate_sessions, render_waterfall_svg};
 use hyper_core::config::{HyperConfig, Profile};
 use hyper_core::git::quick_head;
 use hyper_core::sessions::discover_transcripts;
+use hyper_core::update::{
+    check_latest_release, dismiss_update_version, is_newer_version, load_update_state,
+    perform_verified_update, DEFAULT_GITHUB_REPO,
+};
 use hyper_core::usage::{
     default_brain_dirs, now_epoch_ms, ModelTtlEstimate, UsageLedger, UsageWindow,
     UsageWindowReport,
@@ -22,10 +26,11 @@ use hyper_daemon::client::{ensure_and_send, send_request, spawn_daemon_detached}
 use hyper_daemon::protocol::{DaemonRequest, DaemonResponse, EngineStatus};
 use hyper_daemon::server::{run_daemon_server, socket_path};
 use hyper_daemon::state::build_cockpit_snapshot;
-use std::collections::BTreeMap;
+use serde::{Deserialize, Serialize};
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::time::Instant;
 
 #[derive(Parser)]
@@ -125,8 +130,33 @@ enum Commands {
         #[arg(long, default_value = "compact")]
         format: String,
     },
-    /// Run comprehensive health, latency, grammar & security diagnostics
-    Doctor,
+    /// Run comprehensive health, latency, conflict, context-load & network diagnostics
+    Doctor {
+        /// Probe HTTPS TLS/TTFB latency and flag IPv6 dual-stack blackholes
+        #[arg(long)]
+        net: bool,
+        /// Output structured JSON report
+        #[arg(long)]
+        json: bool,
+    },
+    /// Check for new GitHub releases or install a SHA-256 verified update
+    Update {
+        /// Check GitHub releases without installing
+        #[arg(long)]
+        check: bool,
+        /// Silent background check invoked by SessionStart
+        #[arg(long, hide = true)]
+        check_quiet: bool,
+        /// Dismiss notifications for a specific version (e.g. 0.5.1, or 'clear')
+        #[arg(long)]
+        dismiss: Option<String>,
+        /// Target release version to install (defaults to latest)
+        #[arg(long)]
+        version: Option<String>,
+        /// Output raw JSON
+        #[arg(long)]
+        json: bool,
+    },
     /// Inspect or atomically rollback WAL edit transactions
     Tx {
         #[command(subcommand)]
@@ -211,7 +241,7 @@ enum ConfigAction {
         name: String,
     },
     Toggle {
-        /// prewarm_tier2 | block_secret_files | allow_custom_argv_checks | enable_ui_pill | enable_watchdog_notify
+        /// prewarm_tier2 | block_secret_files | allow_custom_argv_checks | enable_ui_pill | enable_watchdog_notify | enable_update_check | enable_mcp_read | enable_mcp_edit | enable_mcp_check
         key: String,
         value: bool,
     },
@@ -279,7 +309,14 @@ fn main() -> Result<()> {
             no_color,
         } => statusline::run_statusline(&format, title, no_color),
         Commands::CliSetup { apply, format } => statusline::run_cli_setup(apply, &format),
-        Commands::Doctor => handle_doctor(),
+        Commands::Doctor { net, json } => handle_doctor(net, json),
+        Commands::Update {
+            check,
+            check_quiet,
+            dismiss,
+            version,
+            json,
+        } => handle_update(check, check_quiet, dismiss, version, json),
         Commands::Tx { action } => handle_tx(action),
         Commands::Config { action } => handle_config(action),
         Commands::Snapshot {
@@ -461,22 +498,428 @@ fn handle_bench(
     Ok(())
 }
 
-fn handle_doctor() -> Result<()> {
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct DoctorCheckItem {
+    id: String,
+    status: String,
+    label: String,
+    detail: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct DoctorReport {
+    version: String,
+    profile: String,
+    ok_count: usize,
+    warn_count: usize,
+    info_count: usize,
+    checks: Vec<DoctorCheckItem>,
+}
+
+#[derive(Debug, Clone, Default)]
+struct ContextBaselineDiag {
+    agents_skill_count: usize,
+    gemini_skill_count: usize,
+    total_skill_files: usize,
+    duplicate_skill_folders: Vec<String>,
+    mcp_server_count: usize,
+}
+
+#[derive(Debug, Clone)]
+struct NetProbeSample {
+    ok: bool,
+    http_code: u16,
+    tls_ms: u64,
+    ttfb_ms: u64,
+    total_ms: u64,
+    error: Option<String>,
+}
+
+fn has_competing_lifecycle_hooks(val: &serde_json::Value) -> Vec<&'static str> {
+    let mut found = Vec::new();
+    let Some(obj) = val.as_object() else {
+        return found;
+    };
+    if obj.get("enabled").and_then(|v| v.as_bool()) == Some(false) {
+        return found;
+    }
+
+    let check_obj = |map: &serde_json::Map<String, serde_json::Value>, out: &mut Vec<&'static str>| {
+        if map.get("enabled").and_then(|v| v.as_bool()) == Some(false) {
+            return;
+        }
+        for key in ["PreInvocation", "PostToolUse"] {
+            if map
+                .get(key)
+                .and_then(|v| v.as_array())
+                .is_some_and(|arr| !arr.is_empty())
+                && !out.contains(&key)
+            {
+                out.push(key);
+            }
+        }
+    };
+
+    check_obj(obj, &mut found);
+    for child in obj.values() {
+        if let Some(sub) = child.as_object() {
+            check_obj(sub, &mut found);
+        }
+    }
+    found
+}
+
+fn detect_anti_mcp_directive(markdown: &str) -> Option<String> {
+    for raw_line in markdown.lines() {
+        let normalized: String = raw_line
+            .chars()
+            .map(|c| match c {
+                '`' | '"' | '\'' | '*' => ' ',
+                _ => c.to_ascii_lowercase(),
+            })
+            .collect::<String>()
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        if normalized.is_empty() {
+            continue;
+        }
+        let compact = normalized
+            .replace(" / ", "/")
+            .replace("/ ", "/")
+            .replace(" /", "/");
+
+        let patterns = [
+            "only use read_file",
+            "only use edit_file",
+            "use only read_file",
+            "use only edit_file",
+            "only use native read_file",
+            "only use native edit_file",
+            "only use built-in read_file",
+            "exclusively use read_file",
+            "never use mcp",
+            "do not use mcp",
+            "don t use mcp",
+            "avoid mcp tools",
+            "do not call mcp",
+            "never call_mcp_tool",
+            "do not use call_mcp_tool",
+        ];
+        if patterns.iter().any(|p| compact.contains(p)) {
+            let snippet: String = raw_line.trim().chars().take(72).collect();
+            return Some(snippet);
+        }
+    }
+    None
+}
+
+fn audit_plugin_conflicts(plugins_root: &Path, mcp_accel_enabled: bool) -> (usize, Vec<String>) {
+    let Ok(entries) = fs::read_dir(plugins_root) else {
+        return (0, Vec::new());
+    };
+    let mut scanned = 0usize;
+    let mut conflicts = Vec::new();
+    let mut dirs: Vec<PathBuf> = entries.flatten().map(|e| e.path()).collect();
+    dirs.sort();
+
+    for dir in dirs {
+        if !dir.is_dir() {
+            continue;
+        }
+        let Some(name) = dir.file_name().and_then(|s| s.to_str()) else {
+            continue;
+        };
+        if name == "agy-hyper"
+            || name.starts_with('.')
+            || name.starts_with("agy-hyper.bak.")
+            || name.contains(".bak.")
+        {
+            continue;
+        }
+        scanned += 1;
+
+        for rel_hook in ["hooks.json", "hooks/hooks.json"] {
+            let hook_path = dir.join(rel_hook);
+            if let Ok(raw) = fs::read_to_string(&hook_path) {
+                if let Ok(val) = serde_json::from_str::<serde_json::Value>(&raw) {
+                    let events = has_competing_lifecycle_hooks(&val);
+                    if !events.is_empty() {
+                        conflicts.push(format!(
+                            "{}/{} (competing {} hook)",
+                            name,
+                            rel_hook,
+                            events.join("+")
+                        ));
+                    }
+                }
+            }
+        }
+
+        if mcp_accel_enabled {
+            let mut rule_files = Vec::new();
+            let rules_dir = dir.join("rules");
+            if let Ok(r_entries) = fs::read_dir(&rules_dir) {
+                for re in r_entries.flatten() {
+                    let p = re.path();
+                    if p.extension()
+                        .and_then(|e| e.to_str())
+                        .is_some_and(|ext| ext.eq_ignore_ascii_case("md"))
+                    {
+                        rule_files.push((
+                            format!(
+                                "{}/rules/{}",
+                                name,
+                                p.file_name().and_then(|s| s.to_str()).unwrap_or("rule.md")
+                            ),
+                            p,
+                        ));
+                    }
+                }
+            }
+            rule_files.sort_by(|a, b| a.0.cmp(&b.0));
+            for (rel_display, path) in rule_files {
+                if let Ok(raw) = fs::read_to_string(&path) {
+                    if let Some(snippet) = detect_anti_mcp_directive(&raw) {
+                        conflicts.push(format!(
+                            "{} (anti-MCP directive: \"{}\")",
+                            rel_display, snippet
+                        ));
+                    }
+                }
+            }
+        }
+    }
+
+    (scanned, conflicts)
+}
+
+fn count_skills_in_root(root: &Path) -> (usize, BTreeSet<String>) {
+    let mut count = 0usize;
+    let mut folder_names = BTreeSet::new();
+    let Ok(entries) = fs::read_dir(root) else {
+        return (0, folder_names);
+    };
+
+    fn walk_skill_dir(dir: &Path, depth: usize, count: &mut usize) {
+        if depth > 3 {
+            return;
+        }
+        if fs::metadata(dir.join("SKILL.md")).is_ok_and(|m| m.is_file()) {
+            *count += 1;
+        }
+        if depth == 3 {
+            return;
+        }
+        let Ok(children) = fs::read_dir(dir) else {
+            return;
+        };
+        for entry in children.flatten() {
+            let p = entry.path();
+            let Some(fname) = p.file_name().and_then(|s| s.to_str()) else {
+                continue;
+            };
+            if fname.starts_with('.') || fname == "node_modules" || fname == "references" || fname == "scripts" {
+                continue;
+            }
+            if fs::metadata(&p).is_ok_and(|m| m.is_dir()) {
+                walk_skill_dir(&p, depth + 1, count);
+            }
+        }
+    }
+
+    for entry in entries.flatten() {
+        let p = entry.path();
+        let Some(fname) = p.file_name().and_then(|s| s.to_str()) else {
+            continue;
+        };
+        if fname.starts_with('.') {
+            continue;
+        }
+        if fs::metadata(&p).is_ok_and(|m| m.is_dir()) {
+            let before = count;
+            walk_skill_dir(&p, 1, &mut count);
+            if count > before {
+                folder_names.insert(fname.to_string());
+            }
+        }
+    }
+    (count, folder_names)
+}
+
+fn inspect_context_baseline(
+    agents_skills_root: &Path,
+    gemini_skills_root: &Path,
+    mcp_config_path: &Path,
+) -> ContextBaselineDiag {
+    let (agents_skill_count, agents_folders) = count_skills_in_root(agents_skills_root);
+    let (gemini_skill_count, gemini_folders) = count_skills_in_root(gemini_skills_root);
+    let duplicate_skill_folders: Vec<String> = agents_folders
+        .intersection(&gemini_folders)
+        .cloned()
+        .collect();
+
+    let mcp_server_count = fs::read_to_string(mcp_config_path)
+        .ok()
+        .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
+        .and_then(|val| {
+            val.get("mcpServers")
+                .and_then(|m| m.as_object())
+                .map(|m| m.len())
+        })
+        .unwrap_or(0);
+
+    ContextBaselineDiag {
+        agents_skill_count,
+        gemini_skill_count,
+        total_skill_files: agents_skill_count + gemini_skill_count,
+        duplicate_skill_folders,
+        mcp_server_count,
+    }
+}
+
+fn run_curl_net_probe(force_ipv4: bool) -> NetProbeSample {
+    let curl_bin = if cfg!(windows) { "curl.exe" } else { "curl" };
+    let null_dev = if cfg!(windows) { "NUL" } else { "/dev/null" };
+    let mut cmd = Command::new(curl_bin);
+    if force_ipv4 {
+        cmd.arg("-4");
+    }
+    cmd.args([
+        "-fsS",
+        "-o",
+        null_dev,
+        "-w",
+        "%{http_code} %{time_appconnect} %{time_starttransfer} %{time_total}",
+        "--max-time",
+        "5",
+        "https://www.gstatic.com/generate_204",
+    ])
+    .stdin(Stdio::null());
+
+    let t0 = Instant::now();
+    match cmd.output() {
+        Ok(out) => {
+            let wall_ms = t0.elapsed().as_millis() as u64;
+            if out.status.success() {
+                let text = String::from_utf8_lossy(&out.stdout);
+                let mut cols = text.split_whitespace();
+                let code = cols
+                    .next()
+                    .and_then(|s| s.parse::<u16>().ok())
+                    .unwrap_or(0);
+                let tls_ms = cols
+                    .next()
+                    .and_then(|s| s.parse::<f64>().ok())
+                    .map(|sec| (sec * 1000.0).round() as u64)
+                    .unwrap_or(0);
+                let ttfb_ms = cols
+                    .next()
+                    .and_then(|s| s.parse::<f64>().ok())
+                    .map(|sec| (sec * 1000.0).round() as u64)
+                    .unwrap_or(wall_ms);
+                let total_ms = cols
+                    .next()
+                    .and_then(|s| s.parse::<f64>().ok())
+                    .map(|sec| (sec * 1000.0).round() as u64)
+                    .unwrap_or(wall_ms);
+                NetProbeSample {
+                    ok: (200..400).contains(&code),
+                    http_code: code,
+                    tls_ms,
+                    ttfb_ms,
+                    total_ms,
+                    error: None,
+                }
+            } else {
+                let stderr = String::from_utf8_lossy(&out.stderr);
+                NetProbeSample {
+                    ok: false,
+                    http_code: 0,
+                    tls_ms: 0,
+                    ttfb_ms: wall_ms,
+                    total_ms: wall_ms,
+                    error: Some(stderr.trim().to_string()),
+                }
+            }
+        }
+        Err(e) => NetProbeSample {
+            ok: false,
+            http_code: 0,
+            tls_ms: 0,
+            ttfb_ms: 0,
+            total_ms: t0.elapsed().as_millis() as u64,
+            error: Some(e.to_string()),
+        },
+    }
+}
+
+fn evaluate_dual_stack_probe(ipv4: &NetProbeSample, auto_stack: &NetProbeSample) -> (String, String) {
+    if ipv4.ok && (!auto_stack.ok || auto_stack.total_ms.saturating_sub(ipv4.total_ms) > 2_500) {
+        let auto_desc = if auto_stack.ok {
+            format!("lagged at {}ms", auto_stack.total_ms)
+        } else {
+            format!(
+                "failed/timed out after {}ms ({})",
+                auto_stack.total_ms,
+                auto_stack.error.as_deref().unwrap_or("timeout")
+            )
+        };
+        return (
+            "warn".to_string(),
+            format!(
+                "IPv6 blackhole suspected: IPv4 succeeded in {}ms (TLS {}ms, TTFB {}ms) while dual-stack {} — prefer IPv4 or fix broken IPv6 routing",
+                ipv4.total_ms, ipv4.tls_ms, ipv4.ttfb_ms, auto_desc
+            ),
+        );
+    }
+    if !ipv4.ok && !auto_stack.ok {
+        return (
+            "warn".to_string(),
+            format!(
+                "HTTPS probe failed on both stacks (auto: {}, ipv4: {})",
+                auto_stack.error.as_deref().unwrap_or("error"),
+                ipv4.error.as_deref().unwrap_or("error")
+            ),
+        );
+    }
+    (
+        "ok".to_string(),
+        format!(
+            "dual-stack HTTP {} {}ms (TLS {}ms, TTFB {}ms) · IPv4 HTTP {} {}ms (TLS {}ms, TTFB {}ms)",
+            auto_stack.http_code,
+            auto_stack.total_ms,
+            auto_stack.tls_ms,
+            auto_stack.ttfb_ms,
+            ipv4.http_code,
+            ipv4.total_ms,
+            ipv4.tls_ms,
+            ipv4.ttfb_ms
+        ),
+    )
+}
+
+fn handle_doctor(with_net: bool, as_json: bool) -> Result<()> {
     let cfg = HyperConfig::load();
-    println!("\n⚡ AGY HYPER DOCTOR · v{}", hyper_core::version());
-    println!("─────────────────────────────────────────────────────────────────");
+    let home = dirs::home_dir();
+    let mut checks: Vec<DoctorCheckItem> = Vec::new();
 
     // 1. Tree-sitter parse latency self-test
     let t_ast = Instant::now();
     let sample = "pub struct S<'a> { x: &'a str }\nimpl<'a> S<'a> { pub fn ok(&self) -> usize { 1 } }\n";
     let outline = outline_source(Path::new("doctor.rs"), sample);
     let ast_us = t_ast.elapsed().as_micros();
-    println!(
-        "  [OK] Tree-sitter AST  : {} ({} symbols, {}us, 7 compiled grammars)",
-        outline.parser_engine,
-        outline.symbols.len(),
-        ast_us
-    );
+    checks.push(DoctorCheckItem {
+        id: "tree_sitter_ast".into(),
+        status: "ok".into(),
+        label: "Tree-sitter AST".into(),
+        detail: format!(
+            "{} ({} symbols, {}us, 7 compiled grammars)",
+            outline.parser_engine,
+            outline.symbols.len(),
+            ast_us
+        ),
+    });
 
     // 2. Pure-Rust gix self-test
     let t_git = Instant::now();
@@ -485,57 +928,308 @@ fn handle_doctor() -> Result<()> {
         Some((b, o)) => format!("{}@{} ({}us)", b, o, t_git.elapsed().as_micros()),
         None => format!("no git repo in cwd ({}us)", t_git.elapsed().as_micros()),
     };
-    println!("  [OK] Read-only Git    : gix-readonly · {}", git_label);
+    checks.push(DoctorCheckItem {
+        id: "readonly_git".into(),
+        status: "ok".into(),
+        label: "Read-only Git".into(),
+        detail: format!("gix-readonly · {}", git_label),
+    });
 
     // 3. Daemon UDS ping
     let t_rpc = Instant::now();
     match ensure_and_send(&DaemonRequest::Ping) {
         Ok(DaemonResponse::Ok { data }) => {
             let st: EngineStatus = serde_json::from_value(data)?;
-            println!(
-                "  [OK] Shared Daemon    : pid={} · UDS rtt={:.2}ms · rss={:.1}MB",
-                st.pid,
-                t_rpc.elapsed().as_secs_f64() * 1000.0,
-                st.rss_mb
-            );
+            checks.push(DoctorCheckItem {
+                id: "shared_daemon".into(),
+                status: "ok".into(),
+                label: "Shared Daemon".into(),
+                detail: format!(
+                    "pid={} · UDS rtt={:.2}ms · rss={:.1}MB",
+                    st.pid,
+                    t_rpc.elapsed().as_secs_f64() * 1000.0,
+                    st.rss_mb
+                ),
+            });
         }
         _ => {
-            println!("  [WARN] Shared Daemon  : unreachable (in-process fallback active)");
+            checks.push(DoctorCheckItem {
+                id: "shared_daemon".into(),
+                status: "warn".into(),
+                label: "Shared Daemon".into(),
+                detail: "unreachable (in-process fallback active)".into(),
+            });
         }
     }
 
     // 4. Security posture
-    println!(
-        "  [OK] Security Policy  : profile={} · jail={} · secret_shield={} · shell_exec=DISABLED",
-        cfg.profile.as_str(),
-        if cfg.allow_outside_workspace { "OFF" } else { "STRICT" },
-        if cfg.block_secret_files { "ON" } else { "OFF" }
-    );
+    checks.push(DoctorCheckItem {
+        id: "security_policy".into(),
+        status: "ok".into(),
+        label: "Security Policy".into(),
+        detail: format!(
+            "profile={} · jail={} · secret_shield={} · shell_exec=DISABLED",
+            cfg.profile.as_str(),
+            if cfg.allow_outside_workspace { "OFF" } else { "STRICT" },
+            if cfg.block_secret_files { "ON" } else { "OFF" }
+        ),
+    });
 
-    // 5. WAL storage & plugin registration
+    // 5. WAL storage
     let txs = list_transactions(&HyperConfig::wal_dir(), 50);
-    println!(
-        "  [OK] WAL Journal      : {} ({} recorded transaction(s))",
-        HyperConfig::wal_dir().display(),
-        txs.len()
-    );
+    checks.push(DoctorCheckItem {
+        id: "wal_journal".into(),
+        status: "ok".into(),
+        label: "WAL Journal".into(),
+        detail: format!(
+            "{} ({} recorded transaction(s))",
+            HyperConfig::wal_dir().display(),
+            txs.len()
+        ),
+    });
 
-    let plugin_dir = dirs::home_dir()
-        .unwrap_or_default()
-        .join(".gemini")
-        .join("config")
-        .join("plugins")
-        .join("agy-hyper");
-    println!(
-        "  [{}] Antigravity Plugin: {}",
-        if plugin_dir.join("plugin.json").exists() { "OK" } else { "INFO" },
-        if plugin_dir.join("plugin.json").exists() {
+    // 6. Antigravity Plugin registration
+    let home_base = home.clone().unwrap_or_default();
+    let plugins_root = home_base.join(".gemini").join("config").join("plugins");
+    let plugin_dir = plugins_root.join("agy-hyper");
+    let plugin_installed = plugin_dir.join("plugin.json").exists();
+    checks.push(DoctorCheckItem {
+        id: "antigravity_plugin".into(),
+        status: if plugin_installed { "ok" } else { "info" }.into(),
+        label: "Antigravity Plugin".into(),
+        detail: if plugin_installed {
             format!("installed at {}", plugin_dir.display())
         } else {
             format!("not linked yet at {}", plugin_dir.display())
-        }
+        },
+    });
+
+    // 7. Plugin Conflict & Hook Audit
+    let (other_plugins, conflicts) =
+        audit_plugin_conflicts(&plugins_root, cfg.any_mcp_accel_enabled());
+    if conflicts.is_empty() {
+        checks.push(DoctorCheckItem {
+            id: "plugin_conflicts".into(),
+            status: "ok".into(),
+            label: "Plugin Conflicts".into(),
+            detail: format!(
+                "none detected across {} other plugin(s)",
+                other_plugins
+            ),
+        });
+    } else {
+        checks.push(DoctorCheckItem {
+            id: "plugin_conflicts".into(),
+            status: "warn".into(),
+            label: "Plugin Conflicts".into(),
+            detail: conflicts.join("; "),
+        });
+    }
+
+    // 8. Context Baseline Load
+    let ctx_diag = inspect_context_baseline(
+        &home_base.join(".agents").join("skills"),
+        &home_base.join(".gemini").join("config").join("skills"),
+        &home_base
+            .join(".gemini")
+            .join("config")
+            .join("mcp_config.json"),
     );
+    let dup_note = if ctx_diag.duplicate_skill_folders.is_empty() {
+        String::new()
+    } else {
+        let preview: Vec<&str> = ctx_diag
+            .duplicate_skill_folders
+            .iter()
+            .take(4)
+            .map(String::as_str)
+            .collect();
+        let more = if ctx_diag.duplicate_skill_folders.len() > 4 {
+            format!(", +{} more", ctx_diag.duplicate_skill_folders.len() - 4)
+        } else {
+            String::new()
+        };
+        format!(
+            " · {} duplicate skill folder(s) across roots ({}{})",
+            ctx_diag.duplicate_skill_folders.len(),
+            preview.join(", "),
+            more
+        )
+    };
+    let trunc_note = if ctx_diag.total_skill_files > 120 {
+        " [>120 SKILL.md risks context-budget truncation]"
+    } else {
+        ""
+    };
+    checks.push(DoctorCheckItem {
+        id: "context_baseline".into(),
+        status: if ctx_diag.total_skill_files > 120 {
+            "warn"
+        } else {
+            "ok"
+        }
+        .into(),
+        label: "Context Baseline".into(),
+        detail: format!(
+            "{} SKILL.md ({} ~/.agents + {} ~/.gemini/config){} · {} MCP server(s){}",
+            ctx_diag.total_skill_files,
+            ctx_diag.agents_skill_count,
+            ctx_diag.gemini_skill_count,
+            dup_note,
+            ctx_diag.mcp_server_count,
+            trunc_note
+        ),
+    });
+
+    // 9. Workspace Safety
+    let is_broad_cwd = hooks::is_home_or_root_workspace(&cwd, home.as_deref());
+    checks.push(DoctorCheckItem {
+        id: "workspace_safety".into(),
+        status: if is_broad_cwd { "warn" } else { "ok" }.into(),
+        label: "Workspace Safety".into(),
+        detail: if is_broad_cwd {
+            format!(
+                "cwd is $HOME or filesystem root ({}) — open a specific project directory",
+                cwd.display()
+            )
+        } else {
+            format!("project-scoped cwd ({})", cwd.display())
+        },
+    });
+
+    // 10. Release Status
+    let cur_ver = hyper_core::version();
+    let upd_state = load_update_state(cur_ver);
+    let (rel_status, rel_detail) = match upd_state.latest_version.as_deref() {
+        Some(lat) if upd_state.update_available && is_newer_version(cur_ver, lat) => (
+            "info",
+            format!(
+                "update v{} available (current v{} — run 'agy-hyper update')",
+                lat, cur_ver
+            ),
+        ),
+        Some(_) => ("ok", format!("up to date (v{})", cur_ver)),
+        None => ("ok", format!("v{} (release radar idle)", cur_ver)),
+    };
+    checks.push(DoctorCheckItem {
+        id: "release_status".into(),
+        status: rel_status.into(),
+        label: "Release Status".into(),
+        detail: rel_detail,
+    });
+
+    // 11. Optional --net Stream & Dual-Stack Probe
+    if with_net {
+        let ipv4 = run_curl_net_probe(true);
+        let auto_stack = run_curl_net_probe(false);
+        let (net_status, net_detail) = evaluate_dual_stack_probe(&ipv4, &auto_stack);
+        checks.push(DoctorCheckItem {
+            id: "network_probe".into(),
+            status: net_status,
+            label: "Stream & Dual-Stack".into(),
+            detail: net_detail,
+        });
+    }
+
+    let ok_count = checks.iter().filter(|c| c.status == "ok").count();
+    let warn_count = checks.iter().filter(|c| c.status == "warn").count();
+    let info_count = checks.iter().filter(|c| c.status == "info").count();
+    let report = DoctorReport {
+        version: cur_ver.to_string(),
+        profile: cfg.profile.as_str().to_string(),
+        ok_count,
+        warn_count,
+        info_count,
+        checks,
+    };
+
+    if as_json {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+        return Ok(());
+    }
+
+    println!("\n⚡ AGY HYPER DOCTOR · v{}", report.version);
+    println!("─────────────────────────────────────────────────────────────────");
+    for item in &report.checks {
+        let badge = match item.status.as_str() {
+            "warn" => "[WARN]",
+            "info" => "[INFO]",
+            _ => "[OK]  ",
+        };
+        println!("  {} {:<19}: {}", badge, item.label, item.detail);
+    }
     println!();
+    Ok(())
+}
+
+fn handle_update(
+    check: bool,
+    check_quiet: bool,
+    dismiss: Option<String>,
+    version: Option<String>,
+    as_json: bool,
+) -> Result<()> {
+    let repo = std::env::var("AGY_HYPER_REPO")
+        .ok()
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| DEFAULT_GITHUB_REPO.to_string());
+    let current_ver = hyper_core::version();
+
+    if check_quiet {
+        let cfg = HyperConfig::load();
+        if !cfg.enable_update_check || std::env::var_os("AGY_HYPER_NO_UPDATE_CHECK").is_some() {
+            return Ok(());
+        }
+        let _ = check_latest_release(&repo, current_ver);
+        return Ok(());
+    }
+
+    if let Some(dismiss_ver) = dismiss {
+        let st = dismiss_update_version(&dismiss_ver, current_ver)?;
+        if as_json {
+            println!("{}", serde_json::to_string_pretty(&st)?);
+        } else if let Some(v) = &st.dismissed_version {
+            println!("Dismissed update notifications for v{}.", v);
+        } else {
+            println!("Cleared dismissed update version.");
+        }
+        return Ok(());
+    }
+
+    if check {
+        let st = check_latest_release(&repo, current_ver)?;
+        if as_json {
+            println!("{}", serde_json::to_string_pretty(&st)?);
+        } else if st.update_available {
+            let latest = st.latest_version.as_deref().unwrap_or("latest");
+            println!(
+                "⚡ Update available: v{} -> v{} ({})",
+                st.current_version,
+                latest,
+                st.release_url.as_deref().unwrap_or("")
+            );
+            println!("  Run 'agy-hyper update' to install (SHA-256 verified).");
+        } else {
+            println!("✓ AGY Hyper v{} is up to date.", st.current_version);
+        }
+        return Ok(());
+    }
+
+    if !as_json {
+        println!(
+            "⚡ Updating AGY Hyper ({})...",
+            version.as_deref().unwrap_or("latest")
+        );
+    }
+    let outcome = perform_verified_update(&repo, version.as_deref())?;
+    if as_json {
+        println!("{}", serde_json::to_string_pretty(&outcome)?);
+    } else {
+        println!(
+            "✓ Installed AGY Hyper v{} (was v{}) at {} [SHA-256 verified]",
+            outcome.installed_version, outcome.previous_version, outcome.plugin_dir
+        );
+    }
     Ok(())
 }
 
@@ -987,6 +1681,9 @@ fn handle_audit(
             report.sessions_with_blanket_reads
         );
     }
+    if let Some(line) = report.transport_summary_line() {
+        println!("{}", line);
+    }
     let sc = &report.split_cache;
     if sc.total_transitions > 0 {
         println!("\n  Split-Session / Model-Switch Cache Diagnostics:");
@@ -1135,5 +1832,160 @@ mod tests {
             }
             _ => panic!("expected Audit command"),
         }
+    }
+
+    #[test]
+    fn parses_update_and_doctor_cli_flags() {
+        let doc = Cli::try_parse_from(["agy-hyper", "doctor", "--net", "--json"]).unwrap();
+        match doc.command {
+            Commands::Doctor { net, json } => {
+                assert!(net);
+                assert!(json);
+            }
+            _ => panic!("expected Doctor command"),
+        }
+
+        let upd = Cli::try_parse_from([
+            "agy-hyper",
+            "update",
+            "--check",
+            "--dismiss",
+            "0.5.1",
+            "--version",
+            "v0.5.1",
+            "--json",
+        ])
+        .unwrap();
+        match upd.command {
+            Commands::Update {
+                check,
+                check_quiet,
+                dismiss,
+                version,
+                json,
+            } => {
+                assert!(check);
+                assert!(!check_quiet);
+                assert_eq!(dismiss.as_deref(), Some("0.5.1"));
+                assert_eq!(version.as_deref(), Some("v0.5.1"));
+                assert!(json);
+            }
+            _ => panic!("expected Update command"),
+        }
+
+        let quiet = Cli::try_parse_from(["agy-hyper", "update", "--check-quiet"]).unwrap();
+        match quiet.command {
+            Commands::Update { check_quiet, .. } => assert!(check_quiet),
+            _ => panic!("expected Update command"),
+        }
+    }
+
+    #[test]
+    fn doctor_conflict_audit_context_baseline_and_dual_stack_probe_work() {
+        let tmp = std::env::temp_dir().join(format!(
+            "agy-hyper-doctor-test-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&tmp);
+
+        let plugins = tmp.join("plugins");
+        fs::create_dir_all(plugins.join("agy-hyper/rules")).unwrap();
+        fs::write(
+            plugins.join("agy-hyper/hooks.json"),
+            r#"{"agy-hyper":{"enabled":true,"PreInvocation":[{"type":"command"}]}}"#,
+        )
+        .unwrap();
+
+        // Competing enabled plugin with PreInvocation + anti-MCP rule
+        fs::create_dir_all(plugins.join("other-guard/rules")).unwrap();
+        fs::write(
+            plugins.join("other-guard/hooks.json"),
+            r#"{"guard":{"enabled":true,"PreInvocation":[{"type":"command"}],"PostToolUse":[{"hooks":[1]}]}}"#,
+        )
+        .unwrap();
+        fs::write(
+            plugins.join("other-guard/rules/AGENTS.md"),
+            "# Policy\nAlways only use `read_file` / `edit_file` for code changes.\n",
+        )
+        .unwrap();
+
+        // Disabled plugin must not be flagged for hooks
+        fs::create_dir_all(plugins.join("disabled-plugin")).unwrap();
+        fs::write(
+            plugins.join("disabled-plugin/hooks.json"),
+            r#"{"enabled":false,"PreInvocation":[{"type":"command"}]}"#,
+        )
+        .unwrap();
+
+        let (scanned, conflicts_accel) = audit_plugin_conflicts(&plugins, true);
+        assert_eq!(scanned, 2);
+        assert_eq!(conflicts_accel.len(), 2);
+        assert!(conflicts_accel
+            .iter()
+            .any(|c| c.contains("other-guard/hooks.json") && c.contains("PreInvocation+PostToolUse")));
+        assert!(conflicts_accel
+            .iter()
+            .any(|c| c.contains("other-guard/rules/AGENTS.md") && c.contains("anti-MCP directive")));
+
+        // In Observe mode (mcp_accel_enabled = false), anti-MCP rules are not flagged
+        let (_, conflicts_observe) = audit_plugin_conflicts(&plugins, false);
+        assert_eq!(conflicts_observe.len(), 1);
+
+        // Context baseline load + duplicate skill folders + MCP count
+        let agents_skills = tmp.join("agents-skills");
+        let gemini_skills = tmp.join("gemini-skills");
+        for idx in 0..65 {
+            let s1 = agents_skills.join(format!("skill-{}", idx));
+            fs::create_dir_all(&s1).unwrap();
+            fs::write(s1.join("SKILL.md"), "---\nname: test\n---\n").unwrap();
+
+            let s2 = gemini_skills.join(format!("skill-{}", idx));
+            fs::create_dir_all(&s2).unwrap();
+            fs::write(s2.join("SKILL.md"), "---\nname: test\n---\n").unwrap();
+        }
+        let mcp_cfg = tmp.join("mcp_config.json");
+        fs::write(
+            &mcp_cfg,
+            r#"{"mcpServers":{"agy-hyper_core":{},"docs_srv":{}}}"#,
+        )
+        .unwrap();
+        let diag = inspect_context_baseline(&agents_skills, &gemini_skills, &mcp_cfg);
+        assert_eq!(diag.total_skill_files, 130);
+        assert_eq!(diag.duplicate_skill_folders.len(), 65);
+        assert_eq!(diag.mcp_server_count, 2);
+
+        // Dual-stack blackhole classifier
+        let fast_v4 = NetProbeSample {
+            ok: true,
+            http_code: 204,
+            tls_ms: 45,
+            ttfb_ms: 68,
+            total_ms: 70,
+            error: None,
+        };
+        let hung_auto = NetProbeSample {
+            ok: false,
+            http_code: 0,
+            tls_ms: 0,
+            ttfb_ms: 5002,
+            total_ms: 5002,
+            error: Some("Connection timed out".into()),
+        };
+        let (st_bad, msg_bad) = evaluate_dual_stack_probe(&fast_v4, &hung_auto);
+        assert_eq!(st_bad, "warn");
+        assert!(msg_bad.contains("IPv6 blackhole"));
+
+        let healthy_auto = NetProbeSample {
+            ok: true,
+            http_code: 204,
+            tls_ms: 52,
+            ttfb_ms: 75,
+            total_ms: 78,
+            error: None,
+        };
+        let (st_ok, _) = evaluate_dual_stack_probe(&fast_v4, &healthy_auto);
+        assert_eq!(st_ok, "ok");
+
+        let _ = fs::remove_dir_all(&tmp);
     }
 }

@@ -46,19 +46,14 @@ pub fn default_true() -> bool {
     true
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Profile {
     Observe,
     Safe,
+    #[default]
     Balanced,
     Hyper,
-}
-
-impl Default for Profile {
-    fn default() -> Self {
-        Self::Balanced
-    }
 }
 
 impl Profile {
@@ -107,6 +102,8 @@ pub struct HyperConfig {
     pub enable_ui_pill: bool,
     #[serde(default = "default_true")]
     pub enable_watchdog_notify: bool,
+    #[serde(default = "default_true")]
+    pub enable_update_check: bool,
     #[serde(default = "default_currency")]
     pub display_currency: String,
     #[serde(default = "default_fx_rates")]
@@ -140,6 +137,7 @@ impl Default for HyperConfig {
             max_wal_entries: 100,
             enable_ui_pill: true,
             enable_watchdog_notify: true,
+            enable_update_check: true,
             display_currency: default_currency(),
             fx_rates: default_fx_rates(),
             fx_updated_at_ms: None,
@@ -207,6 +205,7 @@ impl HyperConfig {
             "allow_custom_argv_checks" => self.allow_custom_argv_checks = value,
             "enable_ui_pill" => self.enable_ui_pill = value,
             "enable_watchdog_notify" => self.enable_watchdog_notify = value,
+            "enable_update_check" => self.enable_update_check = value,
             "enable_mcp_read" => self.enable_mcp_read = value,
             "enable_mcp_edit" => self.enable_mcp_edit = value,
             "enable_mcp_check" => self.enable_mcp_check = value,
@@ -424,5 +423,10 @@ mod tests {
         assert!(legacy.enable_mcp_read);
         assert!(legacy.enable_mcp_edit);
         assert!(legacy.enable_mcp_check);
+        assert!(legacy.enable_update_check);
+
+        let mut toggled = legacy;
+        toggled.set_toggle("enable_update_check", false).unwrap();
+        assert!(!toggled.enable_update_check);
     }
 }

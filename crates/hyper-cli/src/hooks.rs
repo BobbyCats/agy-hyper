@@ -6,6 +6,10 @@ use hyper_core::sessions::{discover_active_child_sessions, lookup_session_role};
 use hyper_core::transcript::{
     inspect_transcript_tail, resolve_transcript_path, HealthLevel, TranscriptPulse,
 };
+use hyper_core::update::{
+    load_update_state, now_epoch_ms_u64, spawn_detached_update_check, UpdateState,
+    SESSION_START_UPDATE_TTL_MS,
+};
 use hyper_daemon::client::ensure_and_send;
 use hyper_daemon::protocol::DaemonRequest;
 use serde::{Deserialize, Serialize};
@@ -33,8 +37,22 @@ fn extract_workspace_str(payload: &Value) -> &str {
         .unwrap_or("")
 }
 
-fn is_code_workspace(ws: &Path) -> bool {
-    if !ws.is_dir() {
+pub(crate) fn is_home_or_root_workspace(ws: &Path, home_dir: Option<&Path>) -> bool {
+    let canon = fs::canonicalize(ws).unwrap_or_else(|_| ws.to_path_buf());
+    if canon.parent().is_none() {
+        return true;
+    }
+    if let Some(h) = home_dir {
+        let home_canon = fs::canonicalize(h).unwrap_or_else(|_| h.to_path_buf());
+        if canon == home_canon {
+            return true;
+        }
+    }
+    false
+}
+
+fn is_code_workspace_with_home(ws: &Path, home_dir: Option<&Path>) -> bool {
+    if !ws.is_dir() || is_home_or_root_workspace(ws, home_dir) {
         return false;
     }
     const MARKERS: &[&str] = &[
@@ -58,7 +76,23 @@ fn is_code_workspace(ws: &Path) -> bool {
     MARKERS.iter().any(|m| ws.join(m).exists())
 }
 
+fn is_code_workspace(ws: &Path) -> bool {
+    is_code_workspace_with_home(ws, dirs::home_dir().as_deref())
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
 fn build_session_start_payload(ws_str: &str, cfg: &HyperConfig, attach_watcher: bool) -> Value {
+    let home = dirs::home_dir();
+    build_session_start_payload_with_context(ws_str, cfg, attach_watcher, home.as_deref(), None)
+}
+
+fn build_session_start_payload_with_context(
+    ws_str: &str,
+    cfg: &HyperConfig,
+    attach_watcher: bool,
+    home_dir: Option<&Path>,
+    update_state: Option<&UpdateState>,
+) -> Value {
     let mut summary_parts = vec![format!(
         "[AGY Hyper v{} · profile={}]",
         hyper_core::version(),
@@ -66,30 +100,40 @@ fn build_session_start_payload(ws_str: &str, cfg: &HyperConfig, attach_watcher: 
     )];
 
     let mut code_ws = false;
+    let mut is_broad_ws = false;
     if !ws_str.is_empty() {
         let ws = Path::new(ws_str);
         if ws.is_dir() {
-            if attach_watcher {
-                let _ = ensure_and_send(&DaemonRequest::WatchWorkspace {
-                    workspace: ws_str.to_string(),
-                });
-            }
-            code_ws = is_code_workspace(ws);
-            if let Some((branch, _)) = quick_head(ws) {
-                summary_parts.push(format!("branch={}", branch));
-            }
-            let presets: Vec<String> = discover_presets(ws)
-                .into_iter()
-                .take(8)
-                .map(|p| p.id)
-                .collect();
-            if !presets.is_empty() {
-                summary_parts.push(format!("presets=[{}]", presets.join(",")));
+            is_broad_ws = is_home_or_root_workspace(ws, home_dir);
+            if !is_broad_ws {
+                if attach_watcher {
+                    let _ = ensure_and_send(&DaemonRequest::WatchWorkspace {
+                        workspace: ws_str.to_string(),
+                    });
+                }
+                code_ws = is_code_workspace_with_home(ws, home_dir);
+                if let Some((branch, _)) = quick_head(ws) {
+                    summary_parts.push(format!("branch={}", branch));
+                }
+                let presets: Vec<String> = discover_presets(ws)
+                    .into_iter()
+                    .take(8)
+                    .map(|p| p.id)
+                    .collect();
+                if !presets.is_empty() {
+                    summary_parts.push(format!("presets=[{}]", presets.join(",")));
+                }
             }
         }
     }
 
-    if code_ws {
+    if is_broad_ws {
+        summary_parts.push(
+            "Workspace is $HOME/root: open a specific project directory to enable AGY Hyper code acceleration."
+                .into(),
+        );
+        summary_parts.push("Telemetry and context guard active.".into());
+    } else if code_ws {
         if !cfg.any_mcp_accel_enabled() {
             summary_parts.push(
                 "Zero-intrusion cockpit mode: native tools & inline diff untouched; live telemetry, cache radar, and passive WAL capture active."
@@ -126,6 +170,18 @@ fn build_session_start_payload(ws_str: &str, cfg: &HyperConfig, attach_watcher: 
         summary_parts.push("Cockpit: [Open Hyper Deck](sidecar://agy-hyper/hyper_deck/).".into());
     }
 
+    let current_ver = hyper_core::version();
+    if cfg.enable_update_check {
+        if let Some(st) = update_state.filter(|s| s.is_actionable(current_ver)) {
+            if let Some(latest) = st.latest_version.as_deref() {
+                summary_parts.push(format!(
+                    "Update v{} available (run 'agy-hyper update' or update in Hyper Deck).",
+                    latest.trim_start_matches(['v', 'V'])
+                ));
+            }
+        }
+    }
+
     let sys_text = summary_parts.join(" ");
     json!({
         "injectSteps": [{
@@ -136,16 +192,42 @@ fn build_session_start_payload(ws_str: &str, cfg: &HyperConfig, attach_watcher: 
     })
 }
 
+fn spawn_background_update_check_detached() {
+    if let Ok(exe) = std::env::current_exe() {
+        spawn_detached_update_check(&exe);
+    }
+}
+
 /// Prefix-stable `SessionStart` hook:
 /// - Zero cold `git` subprocess forks (uses pure-Rust `gix::quick_head`)
+/// - Zero synchronous network calls (`update_state.json` read in `<0.1ms`; stale checks spawn detached)
 /// - Discovers workspace check presets and attaches the daemon watcher
 /// - Emits a schema-safe `systemMessage` step without volatile metadata fields
 pub fn run_session_start() -> Result<()> {
     let payload = read_stdin_json();
     let cfg = HyperConfig::load();
     let ws_str = extract_workspace_str(&payload);
-    let out = build_session_start_payload(ws_str, &cfg, true);
+    let current_ver = hyper_core::version();
+    let update_state = load_update_state(current_ver);
+    let home = dirs::home_dir();
+
+    let out = build_session_start_payload_with_context(
+        ws_str,
+        &cfg,
+        true,
+        home.as_deref(),
+        Some(&update_state),
+    );
     println!("{}", serde_json::to_string(&out)?);
+
+    if cfg.enable_update_check && std::env::var_os("AGY_HYPER_NO_UPDATE_CHECK").is_none() {
+        let now_ms = now_epoch_ms_u64();
+        if update_state.checked_at_ms == 0
+            || now_ms.saturating_sub(update_state.checked_at_ms) > SESSION_START_UPDATE_TTL_MS
+        {
+            spawn_background_update_check_detached();
+        }
+    }
     Ok(())
 }
 
@@ -629,10 +711,16 @@ pub fn run_pre_invocation() -> Result<()> {
     Ok(())
 }
 
+fn should_notify_post_tool_use(tool_name: &str, has_error: bool) -> bool {
+    !has_error && matches!(tool_name, "edit_file" | "write_file")
+}
+
 /// Sub-2ms `PostToolUse` hook:
 /// 1. Captures mathematically provable pre-images from built-in `edit_file` / `write_file`
 ///    into the crash-safe BLAKE3 WAL ledger (zero `PreToolUse` permission-gate interference).
-/// 2. Triggers instant workspace revision bump in the Rust daemon on built-in & MCP writes/edits.
+/// 2. Triggers instant workspace revision bump in the Rust daemon strictly on verified native
+///    `edit_file` / `write_file` (`hyper_edit` already notifies in `mcp.rs`, and `run_command`
+///    never thrashes `workspace_rev` / `prewarm_tier2`).
 pub fn run_post_tool_use() -> Result<()> {
     let payload = read_stdin_json();
     let tool_call = payload.get("toolCall");
@@ -641,14 +729,6 @@ pub fn run_post_tool_use() -> Result<()> {
         .and_then(Value::as_str)
         .unwrap_or("");
     let tool_args = tool_call.and_then(|t| t.get("arguments").or_else(|| t.get("args")));
-
-    let is_mcp_edit = tool_name == "call_mcp_tool"
-        && tool_args
-            .and_then(|a| a.get("ToolName").or_else(|| a.get("toolName")))
-            .and_then(Value::as_str)
-            .map(hyper_core::json_util::unquote_json_string)
-            .map(|n| n == "hyper_edit" || n == "hyper_tx")
-            .unwrap_or(false);
 
     let has_error = payload
         .get("error")
@@ -668,6 +748,11 @@ pub fn run_post_tool_use() -> Result<()> {
             .and_then(|r| r.get("isError"))
             .and_then(Value::as_bool)
             .unwrap_or(false);
+
+    if !should_notify_post_tool_use(tool_name, has_error) {
+        println!("{{}}");
+        return Ok(());
+    }
 
     let mut workspace_roots: Vec<PathBuf> = payload
         .get("workspacePaths")
@@ -690,50 +775,44 @@ pub fn run_post_tool_use() -> Result<()> {
     }
 
     // Auto-record verified native `edit_file` / `write_file` snapshots into WAL on success.
-    if !has_error && matches!(tool_name, "edit_file" | "write_file") {
-        if let Some(args) = tool_args {
-            let cfg = HyperConfig::load();
-            let t0 = std::time::Instant::now();
-            if let Ok(Some(manifest)) = hyper_core::tx_edit::record_native_post_edit(
-                &HyperConfig::wal_dir(),
-                cfg.max_wal_entries,
-                &workspace_roots,
-                tool_name,
-                args,
-                cfg.block_secret_files,
-            ) {
-                let rel = manifest
-                    .files
-                    .first()
-                    .map(|f| f.rel_path.clone())
-                    .unwrap_or_else(|| manifest.tx_id.clone());
-                let _ = hyper_daemon::client::send_request(&DaemonRequest::TelemetryEvent {
-                    kind: "wal_capture".into(),
-                    conversation_id: payload
-                        .get("conversationId")
-                        .and_then(Value::as_str)
-                        .map(String::from),
-                    workspace: Some(manifest.workspace_root.clone()),
-                    duration_ms: t0.elapsed().as_millis() as u64,
-                    saved_ms: 0,
-                    turns_saved: 0,
-                    detail: format!("{} ({})", rel, tool_name),
-                    blocked: false,
-                });
-            }
+    let mut notify_ws: Option<String> = None;
+    if let Some(args) = tool_args {
+        let cfg = HyperConfig::load();
+        let t0 = std::time::Instant::now();
+        if let Ok(Some(manifest)) = hyper_core::tx_edit::record_native_post_edit(
+            &HyperConfig::wal_dir(),
+            cfg.max_wal_entries,
+            &workspace_roots,
+            tool_name,
+            args,
+            cfg.block_secret_files,
+        ) {
+            notify_ws = Some(manifest.workspace_root.clone());
+            let rel = manifest
+                .files
+                .first()
+                .map(|f| f.rel_path.clone())
+                .unwrap_or_else(|| manifest.tx_id.clone());
+            let _ = hyper_daemon::client::send_request(&DaemonRequest::TelemetryEvent {
+                kind: "wal_capture".into(),
+                conversation_id: payload
+                    .get("conversationId")
+                    .and_then(Value::as_str)
+                    .map(String::from),
+                workspace: Some(manifest.workspace_root),
+                duration_ms: t0.elapsed().as_millis() as u64,
+                saved_ms: 0,
+                turns_saved: 0,
+                detail: format!("{} ({})", rel, tool_name),
+                blocked: false,
+            });
         }
     }
 
-    if matches!(
-        tool_name,
-        "edit_file" | "write_file" | "run_command" | "mcp_agy-hyper_hyper_edit"
-    ) || is_mcp_edit
-    {
-        if let Some(ws) = workspace_roots.first() {
-            let _ = hyper_daemon::client::send_request(&DaemonRequest::NotifyChange {
-                workspace: ws.display().to_string(),
-            });
-        }
+    if let Some(ws_str) = notify_ws.or_else(|| workspace_roots.first().map(|w| w.display().to_string())) {
+        let _ = hyper_daemon::client::send_request(&DaemonRequest::NotifyChange {
+            workspace: ws_str,
+        });
     }
     println!("{{}}");
     Ok(())
@@ -954,5 +1033,90 @@ mod tests {
         assert!(watchdog.contains("research #bbbbbbbb"));
         assert!(watchdog.contains("silent 145s"));
         assert_eq!(child_alerts_signature(&alerts), "aaaaaaaa:loop6,bbbbbbbb:stalled");
+    }
+
+    #[test]
+    fn home_and_root_workspace_guards_reject_stray_markers_and_emit_hint() {
+        let tmp = std::env::temp_dir().join(format!(
+            "agy-hyper-home-guard-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&tmp);
+        let fake_home = tmp.join("fake-home");
+        fs::create_dir_all(fake_home.join("src")).unwrap();
+        fs::write(fake_home.join("package.json"), "{}").unwrap();
+        fs::write(fake_home.join("Cargo.toml"), "[package]\n").unwrap();
+
+        assert!(!is_code_workspace_with_home(&fake_home, Some(&fake_home)));
+        #[cfg(unix)]
+        assert!(!is_code_workspace_with_home(Path::new("/"), Some(&fake_home)));
+
+        let sub_proj = fake_home.join("projects/app");
+        fs::create_dir_all(&sub_proj).unwrap();
+        fs::write(sub_proj.join("Cargo.toml"), "[package]\n").unwrap();
+        assert!(is_code_workspace_with_home(&sub_proj, Some(&fake_home)));
+
+        let cfg = HyperConfig::default();
+        let home_payload = build_session_start_payload_with_context(
+            &fake_home.display().to_string(),
+            &cfg,
+            false,
+            Some(&fake_home),
+            None,
+        );
+        let msg = home_payload["injectSteps"][0]["systemMessage"]["systemMessage"]
+            .as_str()
+            .unwrap();
+        assert!(msg.contains(
+            "Workspace is $HOME/root: open a specific project directory to enable AGY Hyper code acceleration."
+        ));
+        assert!(!msg.contains("hyper_pack"));
+
+        let actionable_update = UpdateState {
+            checked_at_ms: 1_700_000_000_000,
+            current_version: hyper_core::version().into(),
+            latest_version: Some("99.0.0".into()),
+            update_available: true,
+            release_url: Some("https://github.com/BobbyCats/agy-hyper/releases/tag/v99.0.0".into()),
+            published_at: None,
+            dismissed_version: None,
+            last_error: None,
+        };
+        let with_update = build_session_start_payload_with_context(
+            &sub_proj.display().to_string(),
+            &cfg,
+            false,
+            Some(&fake_home),
+            Some(&actionable_update),
+        );
+        let msg_upd = with_update["injectSteps"][0]["systemMessage"]["systemMessage"]
+            .as_str()
+            .unwrap();
+        assert!(msg_upd.contains(
+            "Update v99.0.0 available (run 'agy-hyper update' or update in Hyper Deck)."
+        ));
+
+        let mut dismissed_update = actionable_update;
+        dismissed_update.dismissed_version = Some("99.0.0".into());
+        let with_dismissed = build_session_start_payload_with_context(
+            &sub_proj.display().to_string(),
+            &cfg,
+            false,
+            Some(&fake_home),
+            Some(&dismissed_update),
+        );
+        let msg_dis = with_dismissed["injectSteps"][0]["systemMessage"]["systemMessage"]
+            .as_str()
+            .unwrap();
+        assert!(!msg_dis.contains("Update v99.0.0 available"));
+
+        assert!(should_notify_post_tool_use("edit_file", false));
+        assert!(should_notify_post_tool_use("write_file", false));
+        assert!(!should_notify_post_tool_use("edit_file", true));
+        assert!(!should_notify_post_tool_use("run_command", false));
+        assert!(!should_notify_post_tool_use("call_mcp_tool", false));
+        assert!(!should_notify_post_tool_use("mcp_agy-hyper_hyper_edit", false));
+
+        let _ = fs::remove_dir_all(&tmp);
     }
 }

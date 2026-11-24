@@ -24,7 +24,8 @@
         <div class="brand-copy">
           <div class="brand-title-row">
             <span class="brand-name" data-i18n="app.title">AGY Hyper</span>
-            <span id="version-pill" class="mono-tag">v0.4.4</span>
+            <span id="version-pill" class="mono-tag">v0.5.0</span>
+            <button id="update-pill" type="button" class="update-pill hidden" aria-expanded="false"></button>
           </div>
           <div class="brand-sub">
             <span id="daemon-dot" class="pulse-dot"></span>
@@ -62,6 +63,19 @@
       </select>
       <span id="health-chip" class="status-pill ok" data-i18n="pulse.healthy">Healthy</span>
     </div>
+
+    <!-- Verified Release Update Strip (toggled by #update-pill) -->
+    <section id="update-banner" class="update-banner hidden" aria-label="Release update">
+      <div class="update-banner-copy">
+        <span class="update-banner-dot" aria-hidden="true"></span>
+        <span id="update-banner-text" class="update-banner-text"></span>
+      </div>
+      <div class="update-banner-actions">
+        <button id="btn-update-now" type="button" class="btn-accent btn-xs" data-i18n="update.btn_now">Update Now</button>
+        <a id="btn-update-notes" class="btn-ghost btn-xs update-notes-link" href="https://github.com/BobbyCats/agy-hyper/releases/latest" target="_blank" rel="noopener noreferrer" data-i18n="update.btn_notes">Release Notes</a>
+        <button id="btn-update-dismiss" type="button" class="btn-ghost btn-xs" data-i18n="update.btn_dismiss">Dismiss</button>
+      </div>
+    </section>
 
     <!-- Linked Subagent Tree Strip -->
     <section id="subagent-strip" class="subagent-panel hidden" aria-label="Subagents">
@@ -229,6 +243,7 @@
               <span><i class="sw sw-llm"></i><span data-i18n="waterfall.llm">LLM</span></span>
               <span><i class="sw sw-hyper"></i><span data-i18n="waterfall.hyper">Hyper</span></span>
               <span><i class="sw sw-std"></i><span data-i18n="waterfall.std">Tool</span></span>
+              <span><i class="sw sw-retry"></i><span data-i18n="waterfall.retry_short">Retry/EOF</span></span>
             </div>
           </div>
 
@@ -470,6 +485,16 @@
             </div>
             <input id="tog-watchdog-notify" type="checkbox" data-toggle="enable_watchdog_notify">
           </label>
+          <div class="toggle-row toggle-row-split">
+            <label for="tog-update-check" class="toggle-row-copy">
+              <strong data-i18n="engine.tog_update_title">Release Update Radar</strong>
+              <small data-i18n="engine.tog_update_desc">Non-blocking 6h GitHub tag check (zero API rate-limit, SHA-256 verified manual apply)</small>
+            </label>
+            <div class="toggle-row-controls">
+              <button id="btn-check-update" type="button" class="btn-ghost btn-xs" data-i18n="engine.btn_check_update">Check for updates</button>
+              <input id="tog-update-check" type="checkbox" data-toggle="enable_update_check">
+            </div>
+          </div>
         </div>
 
         <div class="hairline"></div>

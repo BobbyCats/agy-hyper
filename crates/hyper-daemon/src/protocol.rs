@@ -3,6 +3,7 @@ use hyper_core::config::HyperConfig;
 use hyper_core::context_pack::ContextPackRequest;
 use hyper_core::sessions::SessionSummary;
 use hyper_core::transcript::{HealthLevel, TranscriptPulse};
+use hyper_core::update::UpdateState;
 use hyper_core::usage::{ModelTtlEstimate, SessionUsageSummary};
 use hyper_core::wal::{RollbackResult, WalManifest};
 use serde::{Deserialize, Serialize};
@@ -295,6 +296,8 @@ pub struct CockpitSnapshot {
     pub model_ttl_estimates: Vec<ModelTtlEstimate>,
     pub transactions: Vec<WalManifest>,
     pub recent_events: Vec<AuditEvent>,
+    #[serde(default)]
+    pub update_state: Option<UpdateState>,
 }
 
 /// Ultra-lightweight lock-free payload for Antigravity CLI `statusLine` / `title` (`<2ms`).

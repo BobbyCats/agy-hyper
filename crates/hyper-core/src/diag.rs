@@ -348,7 +348,7 @@ pub fn distill_output(
             }
             if included_indices.insert(idx) {
                 let (clean, _) = truncate_utf8_bytes(line, 260);
-                if used_bytes + clean.len() + 1 <= head_budget {
+                if used_bytes + clean.len() < head_budget {
                     used_bytes += clean.len() + 1;
                     selected.push(clean.to_string());
                 }
@@ -357,7 +357,7 @@ pub fn distill_output(
                 if let Some(next_line) = combined_lines.get(idx + ctx) {
                     if included_indices.insert(idx + ctx) {
                         let (clean, _) = truncate_utf8_bytes(next_line, 260);
-                        if used_bytes + clean.len() + 1 <= head_budget {
+                        if used_bytes + clean.len() < head_budget {
                             used_bytes += clean.len() + 1;
                             selected.push(clean.to_string());
                         }
@@ -368,10 +368,10 @@ pub fn distill_output(
 
         // Preserve authoritative failing test summaries before tail/stderr
         for (_, l) in failed_summary_lines.iter().take(6) {
-            if !selected.iter().any(|s| s == l) {
-                if !push_capped(&mut selected, &mut used_bytes, l) {
-                    break;
-                }
+            if !selected.iter().any(|s| s == l)
+                && !push_capped(&mut selected, &mut used_bytes, l)
+            {
+                break;
             }
         }
 
@@ -379,10 +379,10 @@ pub fn distill_output(
         if !tail_lines.is_empty() {
             push_capped(&mut selected, &mut used_bytes, "--- tail / stderr ---");
             for l in tail_lines {
-                if !selected.iter().any(|s| s == l) {
-                    if !push_capped(&mut selected, &mut used_bytes, l) {
-                        break;
-                    }
+                if !selected.iter().any(|s| s == l)
+                    && !push_capped(&mut selected, &mut used_bytes, l)
+                {
+                    break;
                 }
             }
         }
