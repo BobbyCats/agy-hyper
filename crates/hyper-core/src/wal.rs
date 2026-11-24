@@ -147,6 +147,8 @@ pub(crate) fn atomic_restore_bytes(target: &Path, data: &[u8], mode: Option<u32>
         use std::os::unix::fs::PermissionsExt;
         let _ = fs::set_permissions(&tmp, fs::Permissions::from_mode(m));
     }
+    #[cfg(not(unix))]
+    let _ = mode;
     fs::rename(&tmp, target)?;
     Ok(())
 }

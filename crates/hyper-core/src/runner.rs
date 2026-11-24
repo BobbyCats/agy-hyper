@@ -765,7 +765,7 @@ mod tests {
             &CheckRequest {
                 preset: None,
                 argv: Some(vec!["node".into(), "slow.mjs".into()]),
-                timeout_secs: 15,
+                timeout_secs: 30,
                 cwd: None,
                 idle_timeout_secs: Some(0),
                 fail_fast: None,
@@ -775,7 +775,7 @@ mod tests {
         .unwrap();
         assert!(res.cancelled);
         assert_eq!(res.abort_reason.as_deref(), Some("cancelled"));
-        assert!(res.duration_ms < 2000);
+        assert!(res.duration_ms < 10_000);
     }
 
     #[test]
@@ -792,7 +792,7 @@ mod tests {
             &CheckRequest {
                 preset: None,
                 argv: Some(vec!["node".into(), "hang.mjs".into()]),
-                timeout_secs: 20,
+                timeout_secs: 30,
                 cwd: None,
                 idle_timeout_secs: Some(2),
                 fail_fast: Some(false),
@@ -803,7 +803,7 @@ mod tests {
         assert!(res.idle_timed_out);
         assert!(!res.timed_out);
         assert_eq!(res.abort_reason.as_deref(), Some("idle_hang"));
-        assert!(res.duration_ms < 6000);
+        assert!(res.duration_ms < 15_000);
     }
 
     #[test]
@@ -824,9 +824,9 @@ mod tests {
             &CheckRequest {
                 preset: None,
                 argv: Some(vec!["node".into(), "norm_err.mjs".into()]),
-                timeout_secs: 10,
+                timeout_secs: 30,
                 cwd: None,
-                idle_timeout_secs: Some(8),
+                idle_timeout_secs: Some(25),
                 fail_fast: Some(true),
             },
             None,

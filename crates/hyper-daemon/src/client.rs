@@ -1,4 +1,5 @@
 use crate::protocol::{DaemonRequest, DaemonResponse};
+#[cfg(unix)]
 use crate::server::socket_path;
 use anyhow::{anyhow, Result};
 use std::io::{BufRead, BufReader, Write};
