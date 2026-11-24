@@ -92,8 +92,9 @@ git clone https://github.com/BobbyCats/agy-hyper.git && cd agy-hyper && ./instal
 常用终端命令：
 
 ```bash
-agy-hyper audit --png audit.png   # 10 秒本机烧额度诊断 + 纯 Rust 直出 2x 高清 PNG（1920x1200，可直接发推晒图）
-agy-hyper audit --svg audit.svg   # 导出可分享深浅色矢量 SVG 体检卡
+agy-hyper audit --share           # 10 秒本机烧额度诊断 + 脱敏 2x 健康体检卡 PNG（零路径 / 零 UUID）
+agy-hyper audit --png audit.png   # 完整版 2x 高清 PNG 诊断卡（1920x1200，纯 Rust 直出）
+agy-hyper audit --svg audit.svg   # 导出深浅色矢量 SVG 诊断卡
 agy-hyper doctor                  # 检查 Tree-sitter 语法、gix、守护进程延迟与安全边界
 agy-hyper tx diff <tx_id>         # 撤回前先在终端审阅 WAL 快照的行级红绿 Diff
 agy-hyper bench --cache-ttl       # 查看各模型族实测 Prompt 缓存衰减曲线与 TTL 拐点
@@ -103,9 +104,11 @@ agy-hyper ui                      # 在浏览器独立打开 AGY Hyper Deck (127
 
 ---
 
-## 本机烧钱诊断战报卡（`agy-hyper audit`）
+## 本机烧钱诊断、切模型/子代理缓存分析与脱敏分享卡（`agy-hyper audit`）
 
-运行 `agy-hyper audit --days 14 --png audit-card.png`（或 `--svg audit-card.svg`），100% 本地离线扫描你自己的 Antigravity 历史日志（零云端上传、零外部浏览器/ImageMagick 依赖），直接揪出各模型真实缓存掉崖时间、未命中输入成本、首次改代码前上下文膨胀与地毯式预读次数，一键生成可直接发 X / 微信 / Slack 的 2x 高清 PNG 或矢量 SVG 诊断卡：
+运行 `agy-hyper audit --days 14 --png audit-card.png`（或 `--svg audit-card.svg`），100% 本地离线扫描你自己的 Antigravity 历史日志（零云端上传、零外部浏览器/ImageMagick 依赖），定位各模型真实缓存掉崖时间、未命中输入成本、首次改代码前上下文膨胀、地毯式预读次数，以及 **切模型 / 主控→子代理缓存分裂损耗**（统计跨模型切换与父子代理交接时的缓存命中骤降与未命中 Token 惩罚）。
+
+如需对外分享体检结果又不暴露隐私，运行 `agy-hyper audit --share`（默认生成 `1920x1080` 2x `agy-hyper-share-card.png`，也可指定 `--share-svg badge.svg` / `--share-png badge.png`）：输出带明确健康评级（`BLEEDING` / `WATCH` / `HEALTHY`）与核心指标（`Cache Hit %`、`First-Edit Blind Read P50`、`Split/Switch Cache Drop`、`Top Quota Drain`）的脱敏卡片，并在代码层**强制零泄露脱敏**（剥离全部本机路径、用户名、仓库/工作区名、会话 UUID 与提示词片段）。
 
 <div align="center">
   <picture>
@@ -122,8 +125,8 @@ agy-hyper ui                      # 在浏览器独立打开 AGY Hyper Deck (127
 通过官方 `SIDECAR_UI_ENTRYPOINT_AUX_PANE` 协议原生嵌入右侧边栏，100% 本地离线内置 **Apache ECharts 6** 与 **i18next**（`English / 简体中文 / 日本語`，零外网 CDN），自动同步宿主明暗主题。
 
 - **分层零侵入架构**：支持先用 **纯观测（Observe）** 模式（只开侧边栏驾驶舱、烧钱诊断与被动 WAL 快照，完全不碰原生工具与 Diff 卡片），或切到 **安全稳健（Safe）**（开启打包读与同步校验，同时保留原生 `edit_file` 行内 Diff），也可以一键解锁 **均衡 / 狂暴** 全量 Rust MCP 加速，并在 **引擎** 页独立开关读/写/校验三个工具层。
-- **简洁模式**面向日常使用：展示上下文水位、单轮 P50、本步与会话累计缓存命中、**子代理树状态条**（高亮运行中红线、静默 `>=90s` 的 `STALLED` 卡死以及连续报错的 `连崩 ×N` 子代理，并支持**一键救援**复制恢复指令）、**本会话/整树等价估值缎带**（支持一键切货币）、**分模型自适应缓存保鲜条**（实测/默认 TTL 徽章与连续失败熔断预警 + **一键复制止损指令**）、四档分层模式切换，以及 **WAL 行级 Unified Diff 内联审阅 + 一键撤回**。
-- **极客模式**展开五大深度视图：**耗时瀑布**（LLM / Hyper / 普通工具严格拆分）、**上下文轨迹**（双轴堆叠面积曲线 + **上下文 X-Ray 透视条**，拆分读文件/命令输出/Hyper 工具/思考回复并标注首次改动水位与地毯读次数）、**用量账本**（`24H / 7D / 30D / 90D` 增量统计 + 8 种货币 + 手动 **同步汇率** + **本机烧钱诊断与 TTL 断崖** 及一键导出 **2x PNG / SVG** 战报卡）、**引擎与缓存**（AST/打包命中 + 细粒度 MCP 开关）、**回滚与审计**。
+- **简洁模式**面向日常使用：展示上下文水位、单轮 P50、本步与会话累计缓存命中、**子代理树状态条**（高亮运行中红线、静默 `>=90s` 的 `STALLED` 卡死、连续报错的 `连崩 ×N` 子代理并支持**一键救援**复制恢复指令，以及主控→子代理切换缓存掉率徽章）、**本会话/整树等价估值缎带**（支持一键切货币）、**分模型自适应缓存保鲜条**（实测/默认 TTL 徽章与连续失败熔断预警 + **一键复制止损指令**）、四档分层模式切换，以及 **WAL 行级 Unified Diff 内联审阅 + 一键撤回**。
+- **极客模式**展开五大深度视图：**耗时瀑布**（LLM / Hyper / 普通工具严格拆分）、**上下文轨迹**（双轴堆叠面积曲线 + **上下文 X-Ray 透视条** + 当前会话**切模型与子代理缓存损耗**明细）、**用量账本**（`24H / 7D / 30D / 90D` 增量统计 + 8 种货币 + 手动 **同步汇率** + **本机烧钱诊断与 TTL 断崖**，内置健康评级、**切模型/子代理缓存诊断**与一键**脱敏分享体检卡** PNG/SVG 导出及内联预览）、**引擎与缓存**（AST/打包命中 + 细粒度 MCP 开关）、**回滚与审计**。
 
 <div align="center">
 <table>
@@ -246,7 +249,7 @@ Apple Silicon 实机 Release（LTO 优化）通过 `./bench/run-bench.sh` 实测
 agy-hyper doctor                                # 全链路 Tree-sitter、gix、守护进程与安全体检
 agy-hyper daemon start|stop|status              # 管理本地共享 Rust 守护进程
 agy-hyper ui [--port 47821]                     # 在浏览器独立打开 AGY Hyper Deck
-agy-hyper audit [--days 14] [--sessions 80] [--png card.png] [--svg card.svg] [--theme dark|light] [--json]
+agy-hyper audit [--days 14] [--sessions 80] [--share [card.png]] [--share-png card.png] [--share-svg card.svg] [--png card.png] [--svg card.svg] [--theme dark|light] [--json]
 agy-hyper usage [--window 24h|7d|30d|90d] [--currency CNY] [--json]
 agy-hyper bench [--sessions 10] [--svg waterfall.svg] [--cache-ttl] [--json]
 agy-hyper statusline [--format compact|rich|json] [--title] [--no-color]

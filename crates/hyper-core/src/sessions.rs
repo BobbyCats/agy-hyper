@@ -378,17 +378,33 @@ pub fn discover_all_active_subagents(max_age_secs: u64) -> Vec<ActiveChildSessio
 }
 
 pub fn discover_session_summaries(limit: usize) -> Vec<SessionSummary> {
-    let Some(home) = dirs::home_dir() else {
-        return Vec::new();
+    let custom_brain = std::env::var("AGY_HYPER_BRAIN_DIR")
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .map(PathBuf::from);
+    let db_index = if custom_brain.is_some() {
+        HashMap::new()
+    } else {
+        load_antigravity_title_index()
     };
-    let db_index = load_antigravity_title_index();
     let now_ms = std::time::SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_millis() as u64)
         .unwrap_or(0);
     let mut found: Vec<(std::time::SystemTime, u64, PathBuf)> = Vec::new();
-    for product in ["antigravity", "antigravity-ide", "antigravity-cli"] {
-        let brain = home.join(".gemini").join(product).join("brain");
+    let brain_dirs: Vec<PathBuf> = if let Some(cb) = custom_brain {
+        vec![cb]
+    } else {
+        let Some(home) = dirs::home_dir() else {
+            return Vec::new();
+        };
+        ["antigravity", "antigravity-ide", "antigravity-cli"]
+            .into_iter()
+            .map(|product| home.join(".gemini").join(product).join("brain"))
+            .collect()
+    };
+    for brain in brain_dirs {
         let Ok(entries) = fs::read_dir(&brain) else {
             continue;
         };
@@ -436,7 +452,7 @@ pub fn discover_session_summaries(limit: usize) -> Vec<SessionSummary> {
                 let raw_t = if !dbm.title.is_empty() {
                     dbm.title.clone()
                 } else {
-                    sniff_session_header(&p, size_bytes).1
+                    sniff_session_header(&p, size_bytes).2
                 };
                 let fallback_title = if dbm.is_subagent && raw_t.is_empty() {
                     if !dbm.agent_name.is_empty() {
@@ -461,10 +477,10 @@ pub fn discover_session_summaries(limit: usize) -> Vec<SessionSummary> {
                     fallback_title,
                 )
             } else {
-                let (heur_sub, sniffed) = sniff_session_header(&p, size_bytes);
+                let (heur_sub, sniff_parent, sniffed) = sniff_session_header(&p, size_bytes);
                 (
                     heur_sub,
-                    None,
+                    sniff_parent,
                     u32::from(heur_sub),
                     String::new(),
                     recently_written,
@@ -551,13 +567,15 @@ pub fn collect_descendant_sessions(root_id: &str, sessions: &[SessionSummary]) -
     out
 }
 
-fn sniff_session_header(path: &Path, size_bytes: u64) -> (bool, String) {
+fn sniff_session_header(path: &Path, size_bytes: u64) -> (bool, Option<String>, String) {
     let Ok(file) = File::open(path) else {
-        return (false, String::new());
+        return (false, None, String::new());
     };
     let mut user_inputs = 0usize;
     let mut first_preview = String::new();
     let mut looks_delegated = false;
+    let mut explicit_is_subagent: Option<bool> = None;
+    let mut explicit_parent: Option<String> = None;
 
     for line in BufReader::new(file).lines().take(24).map_while(Result::ok) {
         let trimmed = line.trim();
@@ -567,7 +585,31 @@ fn sniff_session_header(path: &Path, size_bytes: u64) -> (bool, String) {
         let Ok(v) = serde_json::from_str::<Value>(trimmed) else {
             continue;
         };
-        if v.get("type").and_then(Value::as_str) == Some("USER_INPUT") {
+        if let Some(flag) = v.get("is_subagent").and_then(Value::as_bool) {
+            explicit_is_subagent = Some(flag);
+            if flag {
+                looks_delegated = true;
+            }
+        }
+        if explicit_parent.is_none() {
+            if let Some(pid) = v
+                .get("parent_conversation_id")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+            {
+                explicit_parent = Some(pid.to_string());
+                looks_delegated = true;
+            }
+        }
+        let kind = v.get("type").and_then(Value::as_str).unwrap_or("");
+        if kind == "SYSTEM_MESSAGE" {
+            let content = v.get("content").and_then(Value::as_str).unwrap_or("");
+            if content.contains("<swarm_worker>") || content.contains("Your assignment (recorded on the board") {
+                looks_delegated = true;
+            }
+        }
+        if kind == "USER_INPUT" {
             user_inputs += 1;
             let content = v.get("content").and_then(Value::as_str).unwrap_or("").trim();
             if first_preview.is_empty() && !content.is_empty() {
@@ -589,7 +631,11 @@ fn sniff_session_header(path: &Path, size_bytes: u64) -> (bool, String) {
             }
         }
     }
-    (looks_delegated || (user_inputs <= 1 && size_bytes < 12_000), first_preview)
+    let is_sub = match explicit_is_subagent {
+        Some(flag) => flag,
+        None => looks_delegated || (user_inputs <= 1 && size_bytes < 12_000),
+    };
+    (is_sub, explicit_parent, first_preview)
 }
 
 pub fn discover_transcripts(limit: usize) -> Vec<PathBuf> {

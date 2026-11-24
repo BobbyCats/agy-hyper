@@ -4,7 +4,10 @@ use crate::state::{
 };
 use anyhow::{Context, Result};
 use fs2::FileExt;
-use hyper_core::audit::build_audit_report;
+use hyper_core::audit::{
+    assert_share_card_clean, build_audit_report, encode_base64, render_share_card_png,
+    render_share_card_svg, AuditShareCardPayload, SHARE_PNG_PAD, SHARE_SVG_H, SHARE_SVG_W,
+};
 use hyper_core::config::HyperConfig;
 use hyper_core::sessions::discover_all_active_subagents;
 use hyper_core::transcript::inspect_transcript_tail;
@@ -314,6 +317,44 @@ fn handle_line(
             let report = build_audit_report(days, max_sessions, &cfg, tz_offset_mins);
             return DaemonResponse::ok(report);
         }
+        DaemonRequest::AuditShareCard {
+            days,
+            max_sessions,
+            tz_offset_mins,
+            theme,
+            include_png,
+        } => {
+            let cfg = match state.lock() {
+                Ok(g) => g.usage_parts().0,
+                Err(_) => return DaemonResponse::err("daemon state lock poisoned"),
+            };
+            let report = build_audit_report(days, max_sessions, &cfg, tz_offset_mins);
+            let dark = !theme.trim().eq_ignore_ascii_case("light");
+            let svg = render_share_card_svg(&report, dark);
+            if let Err(e) = assert_share_card_clean(&svg) {
+                return DaemonResponse::err(e.to_string());
+            }
+            let png_base64 = if include_png {
+                match render_share_card_png(&report, dark) {
+                    Ok(bytes) => Some(encode_base64(&bytes)),
+                    Err(e) => return DaemonResponse::err(e.to_string()),
+                }
+            } else {
+                None
+            };
+            let payload = AuditShareCardPayload {
+                svg,
+                png_base64,
+                svg_width: SHARE_SVG_W,
+                svg_height: SHARE_SVG_H,
+                png_width: (SHARE_SVG_W + 2 * SHARE_PNG_PAD) * 2,
+                png_height: (SHARE_SVG_H + 2 * SHARE_PNG_PAD) * 2,
+                theme: if dark { "dark" } else { "light" }.to_string(),
+                verdict: report.verdict,
+                redacted: true,
+            };
+            return DaemonResponse::ok(payload);
+        }
         _ => {}
     }
 
@@ -405,7 +446,8 @@ fn handle_line(
         | DaemonRequest::UsageSummary { .. }
         | DaemonRequest::RollbackTx { .. }
         | DaemonRequest::InspectTxDiff { .. }
-        | DaemonRequest::AuditReport { .. } => unreachable!(),
+        | DaemonRequest::AuditReport { .. }
+        | DaemonRequest::AuditShareCard { .. } => unreachable!(),
     }
 }
 
@@ -666,5 +708,27 @@ mod tests {
         assert!(!body.contains('"'));
         assert!(!body.contains('\n'));
         assert!(!body.contains('\\'));
+    }
+
+    #[test]
+    fn parses_audit_share_card_request_defaults() {
+        let req: DaemonRequest =
+            serde_json::from_str(r#"{"op":"audit_share_card"}"#).expect("valid rpc request");
+        match req {
+            DaemonRequest::AuditShareCard {
+                days,
+                max_sessions,
+                tz_offset_mins,
+                theme,
+                include_png,
+            } => {
+                assert_eq!(days, 14);
+                assert_eq!(max_sessions, 80);
+                assert_eq!(tz_offset_mins, 0);
+                assert_eq!(theme, "dark");
+                assert!(!include_png);
+            }
+            _ => panic!("expected AuditShareCard variant"),
+        }
     }
 }

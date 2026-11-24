@@ -298,6 +298,13 @@ pub struct SyncOutcome {
 }
 
 pub fn default_brain_dirs() -> Vec<PathBuf> {
+    if let Ok(custom) = std::env::var("AGY_HYPER_BRAIN_DIR") {
+        let trimmed = custom.trim();
+        if !trimmed.is_empty() {
+            let p = PathBuf::from(trimmed);
+            return if p.is_dir() { vec![p] } else { Vec::new() };
+        }
+    }
     let Some(home) = dirs::home_dir() else {
         return Vec::new();
     };

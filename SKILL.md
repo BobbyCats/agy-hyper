@@ -62,7 +62,10 @@ agy-hyper daemon status
 agy-hyper daemon start
 agy-hyper daemon stop
 
-# Local burn audit & shareable 2x Retina PNG / SVG diagnostic card
+# Local burn audit, split-cache diagnostics & anonymized Health Badge card (zero paths/repos/UUIDs)
+agy-hyper audit --days 14 --share
+agy-hyper audit --days 14 --share-png share-card.png --theme dark
+agy-hyper audit --days 14 --share-svg share-card.svg --theme light
 agy-hyper audit --days 14 --png audit-card.png
 agy-hyper audit --days 14 --svg audit-card.svg
 

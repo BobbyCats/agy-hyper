@@ -1,6 +1,6 @@
 use crate::json_util::unquote_json_string;
 use crate::transcript::parse_iso8601_epoch_ms;
-use crate::usage::{normalize_model_key, TokenBucket};
+use crate::usage::{model_ttl_family, normalize_model_key, TokenBucket, UNATTRIBUTED_MODEL};
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -89,6 +89,42 @@ impl ContextBreakdown {
     }
 }
 
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ModelSwitchEvent {
+    pub step_index: u64,
+    pub from_model: String,
+    pub to_model: String,
+    pub from_raw_model: String,
+    pub to_raw_model: String,
+    pub same_family: bool,
+    pub prev_cache_hit_ratio: f64,
+    pub post_cache_hit_ratio: f64,
+    pub cache_drop_ratio: f64,
+    pub uncached_input_tokens: u64,
+    pub prompt_tokens: u64,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SessionSplitStats {
+    pub primary_model: Option<String>,
+    pub distinct_models: Vec<String>,
+    pub model_switch_count: usize,
+    pub cross_family_switch_count: usize,
+    pub switch_uncached_input_tokens: u64,
+    pub avg_switch_pre_hit_ratio: f64,
+    pub avg_switch_post_hit_ratio: f64,
+    pub avg_switch_cache_drop: f64,
+    pub first_turn_input_tokens: u64,
+    pub first_turn_cache_read_tokens: u64,
+    pub steady_input_tokens: u64,
+    pub steady_cache_read_tokens: u64,
+    pub steady_turns: usize,
+    pub delegation_tool_calls: usize,
+    pub model_switches: Vec<ModelSwitchEvent>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionBenchmark {
     pub conversation_id: String,
@@ -124,6 +160,8 @@ pub struct SessionBenchmark {
     pub max_parallel_reads: usize,
     #[serde(default)]
     pub blanket_read_turns: usize,
+    #[serde(default)]
+    pub split_stats: SessionSplitStats,
     pub turns: Vec<TurnWaterfall>,
 }
 
@@ -182,6 +220,7 @@ pub fn analyze_transcript(path: &Path) -> Result<SessionBenchmark> {
         is_compact_marker: bool,
         has_edit_tool: bool,
         read_file_count: usize,
+        delegation_tool_count: usize,
     }
 
     let mut steps: Vec<RawStep> = Vec::new();
@@ -241,6 +280,7 @@ pub fn analyze_transcript(path: &Path) -> Result<SessionBenchmark> {
         let mut tool_args_bytes = 0u64;
         let mut has_edit_tool = false;
         let mut read_file_count = 0usize;
+        let mut delegation_tool_count = 0usize;
         if let Some(arr) = v.get("tool_calls").and_then(Value::as_array) {
             for tc in arr {
                 let raw_name = tc
@@ -289,6 +329,12 @@ pub fn analyze_transcript(path: &Path) -> Result<SessionBenchmark> {
                     ) {
                         has_edit_tool = true;
                     }
+                    if matches!(
+                        eff_name.as_str(),
+                        "invoke_subagent" | "swarm" | "run_workflow" | "delegate"
+                    ) {
+                        delegation_tool_count += 1;
+                    }
                     let cat = if is_hyper {
                         ToolCat::HyperTool
                     } else if eff_name == "read_file" {
@@ -322,6 +368,7 @@ pub fn analyze_transcript(path: &Path) -> Result<SessionBenchmark> {
             is_compact_marker,
             has_edit_tool,
             read_file_count,
+            delegation_tool_count,
         });
     }
 
@@ -342,6 +389,10 @@ pub fn analyze_transcript(path: &Path) -> Result<SessionBenchmark> {
     let mut first_edit_context_tokens: Option<u64> = None;
     let mut max_parallel_reads = 0usize;
     let mut blanket_read_turns = 0usize;
+    let mut split_stats = SessionSplitStats::default();
+    let mut prev_model: Option<String> = None;
+    let mut prev_hit_ratio: Option<f64> = None;
+    let mut first_turn_recorded = false;
 
     const MAX_VALID_SPAN_MS: i64 = 180_000;
 
@@ -402,9 +453,70 @@ pub fn analyze_transcript(path: &Path) -> Result<SessionBenchmark> {
             }
         }
         if cur_total > 0 {
+            let cur_hit = planner.cache_read_tokens as f64 / cur_total as f64;
+            if !first_turn_recorded {
+                split_stats.first_turn_input_tokens = planner.input_tokens;
+                split_stats.first_turn_cache_read_tokens = planner.cache_read_tokens;
+            }
+            let mut is_switch_turn = false;
+            if planner.model != UNATTRIBUTED_MODEL {
+                if !split_stats
+                    .distinct_models
+                    .iter()
+                    .any(|m| m.eq_ignore_ascii_case(&planner.model))
+                {
+                    split_stats.distinct_models.push(planner.model.clone());
+                }
+                if let Some(ref pm) = prev_model {
+                    if !pm.eq_ignore_ascii_case(&planner.model) {
+                        is_switch_turn = true;
+                        let from_fam = model_ttl_family(Some(pm));
+                        let to_fam = model_ttl_family(Some(&planner.model));
+                        let same_family = from_fam == to_fam;
+                        let prev_hit = prev_hit_ratio.unwrap_or(0.0);
+                        let drop = (prev_hit - cur_hit).max(0.0);
+                        split_stats.model_switch_count += 1;
+                        if !same_family {
+                            split_stats.cross_family_switch_count += 1;
+                        }
+                        split_stats.switch_uncached_input_tokens = split_stats
+                            .switch_uncached_input_tokens
+                            .saturating_add(planner.input_tokens);
+                        split_stats.model_switches.push(ModelSwitchEvent {
+                            step_index: planner.step_index,
+                            from_model: from_fam,
+                            to_model: to_fam,
+                            from_raw_model: pm.clone(),
+                            to_raw_model: planner.model.clone(),
+                            same_family,
+                            prev_cache_hit_ratio: round4(prev_hit),
+                            post_cache_hit_ratio: round4(cur_hit),
+                            cache_drop_ratio: round4(drop),
+                            uncached_input_tokens: planner.input_tokens,
+                            prompt_tokens: cur_total,
+                        });
+                    }
+                }
+                prev_model = Some(planner.model.clone());
+            }
+            if first_turn_recorded && !is_switch_turn {
+                split_stats.steady_input_tokens = split_stats
+                    .steady_input_tokens
+                    .saturating_add(planner.input_tokens);
+                split_stats.steady_cache_read_tokens = split_stats
+                    .steady_cache_read_tokens
+                    .saturating_add(planner.cache_read_tokens);
+                split_stats.steady_turns += 1;
+            }
+            first_turn_recorded = true;
+            prev_hit_ratio = Some(cur_hit);
             prev_planner_ms = Some(planner.ts_ms);
             prev_planner_total = cur_total;
         }
+
+        split_stats.delegation_tool_calls = split_stats
+            .delegation_tool_calls
+            .saturating_add(planner.delegation_tool_count);
 
         total_input += planner.input_tokens;
         total_cache += planner.cache_read_tokens;
@@ -552,6 +664,33 @@ pub fn analyze_transcript(path: &Path) -> Result<SessionBenchmark> {
 
     context_breakdown.finalize();
 
+    split_stats.primary_model = model_usage
+        .iter()
+        .filter(|(m, _)| m.as_str() != UNATTRIBUTED_MODEL)
+        .max_by_key(|(_, b)| (b.turns, b.total_tokens()))
+        .map(|(m, _)| m.clone());
+    if !split_stats.model_switches.is_empty() {
+        let n = split_stats.model_switches.len() as f64;
+        let pre_sum: f64 = split_stats
+            .model_switches
+            .iter()
+            .map(|e| e.prev_cache_hit_ratio)
+            .sum();
+        let post_sum: f64 = split_stats
+            .model_switches
+            .iter()
+            .map(|e| e.post_cache_hit_ratio)
+            .sum();
+        let drop_sum: f64 = split_stats
+            .model_switches
+            .iter()
+            .map(|e| e.cache_drop_ratio)
+            .sum();
+        split_stats.avg_switch_pre_hit_ratio = round4(pre_sum / n);
+        split_stats.avg_switch_post_hit_ratio = round4(post_sum / n);
+        split_stats.avg_switch_cache_drop = round4(drop_sum / n);
+    }
+
     Ok(SessionBenchmark {
         conversation_id: conv_id,
         transcript_path: path.display().to_string(),
@@ -578,6 +717,7 @@ pub fn analyze_transcript(path: &Path) -> Result<SessionBenchmark> {
         first_edit_context_tokens,
         max_parallel_reads,
         blanket_read_turns,
+        split_stats,
         turns,
     })
 }
@@ -722,6 +862,10 @@ fn extract_completed_at_ms(content: &str) -> Option<i64> {
     None
 }
 
+fn round4(v: f64) -> f64 {
+    (v * 10_000.0).round() / 10_000.0
+}
+
 fn percentile(vals: &mut [u64], p: f64) -> u64 {
     if vals.is_empty() {
         return 0;
@@ -830,5 +974,67 @@ mod tests {
             "cmd-output-12345678901234567890".len() as u64
         );
         assert!(!b.context_breakdown.categories.is_empty());
+    }
+
+    #[test]
+    fn tracks_model_switch_cache_drop_and_delegation_calls() {
+        let dir = tempdir().unwrap();
+        let p = dir.path().join("transcript.jsonl");
+        let data = concat!(
+            "{\"step_index\":1,\"type\":\"PLANNER_RESPONSE\",\"created_at\":\"2026-11-20T10:00:00Z\",\"model\":\"gemini-4-neon-xhigh\",\"input_tokens\":25000,\"cache_read_tokens\":0,\"output_tokens\":200,\"tool_calls\":[{\"name\":\"read_file\"}]}\n",
+            "{\"step_index\":2,\"type\":\"GENERIC\",\"created_at\":\"2026-11-20T10:00:02Z\",\"content\":\"Created At: 2026-11-20T10:00:02Z\\nCompleted At: 2026-11-20T10:00:03Z\\nOK\"}\n",
+            "{\"step_index\":3,\"type\":\"PLANNER_RESPONSE\",\"created_at\":\"2026-11-20T10:00:05Z\",\"model\":\"gemini-4-neon-xhigh\",\"input_tokens\":2000,\"cache_read_tokens\":98000,\"output_tokens\":150,\"tool_calls\":[{\"name\":\"invoke_subagent\"}]}\n",
+            "{\"step_index\":4,\"type\":\"GENERIC\",\"created_at\":\"2026-11-20T10:00:07Z\",\"content\":\"Created At: 2026-11-20T10:00:07Z\\nCompleted At: 2026-11-20T10:00:08Z\\nOK\"}\n",
+            "{\"step_index\":5,\"type\":\"PLANNER_RESPONSE\",\"created_at\":\"2026-11-20T10:00:12Z\",\"model\":\"gemini-4-carbon-medium\",\"input_tokens\":105000,\"cache_read_tokens\":0,\"output_tokens\":180,\"tool_calls\":[{\"name\":\"edit_file\"}]}\n",
+            "{\"step_index\":6,\"type\":\"GENERIC\",\"created_at\":\"2026-11-20T10:00:14Z\",\"content\":\"Created At: 2026-11-20T10:00:14Z\\nCompleted At: 2026-11-20T10:00:15Z\\nOK\"}\n"
+        );
+        fs::write(&p, data).unwrap();
+        let b = analyze_transcript(&p).unwrap();
+        assert_eq!(b.split_stats.primary_model.as_deref(), Some("gemini-4-neon-xhigh"));
+        assert_eq!(b.split_stats.distinct_models.len(), 2);
+        assert_eq!(b.split_stats.model_switch_count, 1);
+        assert_eq!(b.split_stats.cross_family_switch_count, 1);
+        assert_eq!(b.split_stats.switch_uncached_input_tokens, 105_000);
+        assert!((b.split_stats.avg_switch_pre_hit_ratio - 0.98).abs() < 1e-4);
+        assert!((b.split_stats.avg_switch_post_hit_ratio - 0.0).abs() < 1e-4);
+        assert!((b.split_stats.avg_switch_cache_drop - 0.98).abs() < 1e-4);
+        assert_eq!(b.split_stats.first_turn_input_tokens, 25_000);
+        assert_eq!(b.split_stats.first_turn_cache_read_tokens, 0);
+        assert_eq!(b.split_stats.steady_turns, 1);
+        assert_eq!(b.split_stats.steady_cache_read_tokens, 98_000);
+        assert_eq!(b.split_stats.delegation_tool_calls, 1);
+        assert_eq!(b.split_stats.model_switches.len(), 1);
+        assert_eq!(b.split_stats.model_switches[0].from_model, "gemini-4-neon");
+        assert_eq!(b.split_stats.model_switches[0].to_model, "gemini-4-carbon");
+        assert!(!b.split_stats.model_switches[0].same_family);
+    }
+
+    #[test]
+    fn deserializes_legacy_session_benchmark_without_split_stats() {
+        let legacy = serde_json::json!({
+            "conversation_id": "legacy-conv",
+            "transcript_path": "/tmp/legacy.jsonl",
+            "total_turns": 1,
+            "valid_turns": 1,
+            "dropped_idle_gap_turns": 0,
+            "total_wall_ms": 1000,
+            "total_llm_ms": 800,
+            "total_tool_ms": 200,
+            "median_turn_ms": 1000,
+            "p90_turn_ms": 1000,
+            "median_llm_ms": 800,
+            "effective_tps": 50.0,
+            "total_input_tokens": 1000,
+            "total_cache_read_tokens": 9000,
+            "total_output_tokens": 40,
+            "cache_hit_ratio": 0.9,
+            "hyper_tool_calls": 0,
+            "total_tool_calls": 1,
+            "turns": []
+        });
+        let parsed: SessionBenchmark = serde_json::from_value(legacy).unwrap();
+        assert_eq!(parsed.split_stats.model_switch_count, 0);
+        assert!(parsed.split_stats.model_switches.is_empty());
+        assert_eq!(parsed.split_stats.primary_model, None);
     }
 }

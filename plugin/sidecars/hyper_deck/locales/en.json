@@ -74,7 +74,9 @@
     "row_tooltip_error_loop": "Active crash/retry loop ({{streak}} consecutive errors{{err}}) · window {{ctx}}{{ckpt}} · cum {{cum}} ({{turns}} turns)",
     "row_tooltip_stalled": "Active but silent for {{idle}} (possible hang) · window {{ctx}} · cum {{cum}} ({{turns}} turns)",
     "row_tooltip_done": "Finished · final window {{ctx}} · cum {{cum}} ({{turns}} turns) · cache {{cache}}%",
-    "row_tooltip_done_peak": "Finished (peaked above redline) · final window {{ctx}} · cum {{cum}} ({{turns}} turns) · cache {{cache}}%"
+    "row_tooltip_done_peak": "Finished (peaked above redline) · final window {{ctx}} · cum {{cum}} ({{turns}} turns) · cache {{cache}}%",
+    "split_drop_badge": "-{{pct}}% split",
+    "split_drop_tip": "Orchestrator {{orch}}% → Executor {{exec}}% (cold start {{cold}}%) · {{penalty}} uncached penalty"
   },
   "pulse": {
     "heading": "Prompt Cache Warmth",
@@ -170,7 +172,13 @@
     "cat_hyper_tools": "Hyper tools",
     "cat_other_tools": "Other tools",
     "cat_thinking_text": "Thinking & text",
-    "cat_user_system": "User & system"
+    "cat_user_system": "User & system",
+    "split_heading": "Split-Session & Model-Switch Cache",
+    "split_drop_pill": "-{{pct}}% drop",
+    "split_uncached_pill": "+{{tokens}} uncached",
+    "split_orch_exec_row": "Orchestrator → Executor ({{count}} handoffs)",
+    "split_orch_exec_val": "{{orch}}% → {{exec}}% (cold {{cold}}%)",
+    "split_step_label": "Step #{{step}} · {{from}} → {{to}}"
   },
   "engine": {
     "heading": "Rust Daemon & In-Memory Cache",
@@ -249,6 +257,29 @@
     "toast_audit_err": "Export failed: {{err}}",
     "audit_first_edit": "1st Edit P50: {{ctx}}",
     "audit_blanket": "{{count}} blanket reads",
-    "audit_uncached": "Uncached: {{val}}"
+    "audit_uncached": "Uncached: {{val}}",
+    "audit_top_drain": "Top drain: {{model}} ({{pct}}%)",
+    "verdict_bleeding": "BLEEDING",
+    "verdict_watch": "WATCH",
+    "verdict_healthy": "HEALTHY",
+    "split_heading": "Split-Cache & Model-Switch",
+    "split_none": "No model/subagent splits detected",
+    "split_count_badge": "{{count}} splits",
+    "split_drop_badge": "-{{pct}}% drop",
+    "split_kpi_drop": "Cache Drop",
+    "split_kpi_penalty": "Uncached Cost",
+    "split_kpi_orch_exec": "Orch / Exec",
+    "split_kpi_switches": "Model Switches",
+    "split_kind_switch": "SWITCH",
+    "split_kind_subagent": "SUBAGENT",
+    "share_card_title": "Anonymized Share Card",
+    "share_export_png": "Export Share PNG",
+    "share_export_svg": "SVG",
+    "share_preview": "Preview",
+    "share_preview_hide": "Hide",
+    "share_preview_loading": "Rendering redacted card…",
+    "share_privacy_note": "100% local & redacted — strips paths, repo names, usernames, and session UUIDs.",
+    "toast_share_png_ok": "Exported redacted 2x PNG share card (zero paths/UUIDs)",
+    "toast_share_svg_ok": "Exported redacted SVG share card (zero paths/UUIDs)"
   }
 }

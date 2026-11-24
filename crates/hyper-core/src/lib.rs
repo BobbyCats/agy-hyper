@@ -11,6 +11,7 @@ pub mod native_capture;
 pub mod runner;
 pub mod search;
 pub mod sessions;
+pub mod share_card;
 pub mod transcript;
 pub mod tx_edit;
 pub mod usage;

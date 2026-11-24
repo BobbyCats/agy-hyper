@@ -74,7 +74,9 @@
     "row_tooltip_error_loop": "稼働中ですが連続エラー循環中（{{streak}} 回連続{{err}}）· 単窓 {{ctx}}{{ckpt}} · 累計 {{cum}}（{{turns}} ターン）",
     "row_tooltip_stalled": "稼働中ですが {{idle}} 間無応答（ハング疑い）· 単窓 {{ctx}} · 累計 {{cum}}（{{turns}} ターン）",
     "row_tooltip_done": "完了 · 最終単窓 {{ctx}} · 累計 {{cum}}（{{turns}} ターン）· キャッシュ {{cache}}%",
-    "row_tooltip_done_peak": "完了（ピーク上限超過）· 最終単窓 {{ctx}} · 累計 {{cum}}（{{turns}} ターン）· キャッシュ {{cache}}%"
+    "row_tooltip_done_peak": "完了（ピーク上限超過）· 最終単窓 {{ctx}} · 累計 {{cum}}（{{turns}} ターン）· キャッシュ {{cache}}%",
+    "split_drop_badge": "切替 -{{pct}}%",
+    "split_drop_tip": "親 {{orch}}% → サブ {{exec}}%（初回 {{cold}}%）· 未キャッシュ損失 {{penalty}}"
   },
   "pulse": {
     "heading": "プロンプトキャッシュ保温ウィンドウ",
@@ -170,7 +172,13 @@
     "cat_hyper_tools": "Hyper ツール",
     "cat_other_tools": "その他ツール",
     "cat_thinking_text": "思考・応答",
-    "cat_user_system": "入力・システム"
+    "cat_user_system": "入力・システム",
+    "split_heading": "モデル切替・サブエージェントキャッシュ診断",
+    "split_drop_pill": "-{{pct}}% 低下",
+    "split_uncached_pill": "未キャッシュ +{{tokens}}",
+    "split_orch_exec_row": "親 → サブエージェント（{{count}} 回引継）",
+    "split_orch_exec_val": "{{orch}}% → {{exec}}%（初回 {{cold}}%）",
+    "split_step_label": "Step #{{step}} · {{from}} → {{to}}"
   },
   "engine": {
     "heading": "Rust デーモンとメモリキャッシュ",
@@ -249,6 +257,29 @@
     "toast_audit_err": "出力失敗: {{err}}",
     "audit_first_edit": "初回編集 P50: {{ctx}}",
     "audit_blanket": "一括読込 {{count}}回",
-    "audit_uncached": "未キャッシュ: {{val}}"
+    "audit_uncached": "未キャッシュ: {{val}}",
+    "audit_top_drain": "最大消費: {{model}} ({{pct}}%)",
+    "verdict_bleeding": "高損失",
+    "verdict_watch": "要注意",
+    "verdict_healthy": "良好",
+    "split_heading": "モデル切替・分割キャッシュ診断",
+    "split_none": "モデル切替・サブエージェント分割は未検出",
+    "split_count_badge": "{{count}} 回切替",
+    "split_drop_badge": "-{{pct}}% 低下",
+    "split_kpi_drop": "ヒット低下",
+    "split_kpi_penalty": "未キャッシュ損",
+    "split_kpi_orch_exec": "親 / サブ",
+    "split_kpi_switches": "モデル切替",
+    "split_kind_switch": "切替",
+    "split_kind_subagent": "サブ",
+    "share_card_title": "匿名化シェアカード",
+    "share_export_png": "匿名 PNG 出力",
+    "share_export_svg": "SVG",
+    "share_preview": "プレビュー",
+    "share_preview_hide": "閉じる",
+    "share_preview_loading": "匿名カードを生成中…",
+    "share_privacy_note": "100% ローカル匿名化 — パス・リポジトリ名・ユーザー名・セッション UUID を完全除去。",
+    "toast_share_png_ok": "匿名化 2x PNG シェアカードを出力しました（パス・UUID 除去済）",
+    "toast_share_svg_ok": "匿名化 SVG シェアカードを出力しました（パス・UUID 除去済）"
   }
 }

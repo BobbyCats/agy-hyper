@@ -610,6 +610,20 @@ pub fn resolve_transcript_path(
         }
     }
     if let Some(conv) = conversation_id.and_then(crate::config::sanitize_id) {
+        if let Ok(custom) = std::env::var("AGY_HYPER_BRAIN_DIR") {
+            let trimmed = custom.trim();
+            if !trimmed.is_empty() {
+                let candidate = PathBuf::from(trimmed)
+                    .join(conv)
+                    .join(".system_generated")
+                    .join("logs")
+                    .join("transcript.jsonl");
+                if candidate.exists() {
+                    return Some(candidate);
+                }
+                return None;
+            }
+        }
         let home = dirs::home_dir()?;
         for product in ["antigravity", "antigravity-ide", "antigravity-cli"] {
             let candidate = home

@@ -74,7 +74,9 @@
     "row_tooltip_error_loop": "运行中陷入连续报错循环（连崩 {{streak}} 次{{err}}）· 单窗 {{ctx}}{{ckpt}} · 累计 {{cum}}（{{turns}} 轮）",
     "row_tooltip_stalled": "标记运行中但已静默 {{idle}}（疑似卡死）· 单窗 {{ctx}} · 累计 {{cum}}（{{turns}} 轮）",
     "row_tooltip_done": "已结束 · 末轮单窗 {{ctx}} · 累计 {{cum}}（{{turns}} 轮）· 缓存 {{cache}}%",
-    "row_tooltip_done_peak": "已结束（历史峰值超红线）· 末轮单窗 {{ctx}} · 累计 {{cum}}（{{turns}} 轮）· 缓存 {{cache}}%"
+    "row_tooltip_done_peak": "已结束（历史峰值超红线）· 末轮单窗 {{ctx}} · 累计 {{cum}}（{{turns}} 轮）· 缓存 {{cache}}%",
+    "split_drop_badge": "切换 -{{pct}}%",
+    "split_drop_tip": "主控 {{orch}}% → 子代理 {{exec}}%（冷启动 {{cold}}%）· 未命中惩罚 {{penalty}}"
   },
   "pulse": {
     "heading": "Prompt 缓存保鲜窗口",
@@ -170,7 +172,13 @@
     "cat_hyper_tools": "Hyper 工具",
     "cat_other_tools": "其他工具",
     "cat_thinking_text": "思考与回复",
-    "cat_user_system": "用户输入/系统"
+    "cat_user_system": "用户输入/系统",
+    "split_heading": "切模型与子代理缓存损耗",
+    "split_drop_pill": "命中 -{{pct}}%",
+    "split_uncached_pill": "未命中 +{{tokens}}",
+    "split_orch_exec_row": "主控 → 子代理（{{count}} 次交接）",
+    "split_orch_exec_val": "{{orch}}% → {{exec}}%（首轮 {{cold}}%）",
+    "split_step_label": "第 {{step}} 步 · {{from}} → {{to}}"
   },
   "engine": {
     "heading": "Rust 守护进程与内存索引",
@@ -249,6 +257,29 @@
     "toast_audit_err": "导出失败：{{err}}",
     "audit_first_edit": "首改前 P50：{{ctx}}",
     "audit_blanket": "{{count}} 次地毯读",
-    "audit_uncached": "未命中消耗：{{val}}"
+    "audit_uncached": "未命中消耗：{{val}}",
+    "audit_top_drain": "头号消耗：{{model}} ({{pct}}%)",
+    "verdict_bleeding": "严重漏水",
+    "verdict_watch": "需留意",
+    "verdict_healthy": "健康",
+    "split_heading": "切模型 / 子代理缓存损耗",
+    "split_none": "未检测到切模型或子代理缓存分裂",
+    "split_count_badge": "{{count}} 次切换",
+    "split_drop_badge": "命中 -{{pct}}%",
+    "split_kpi_drop": "切换掉率",
+    "split_kpi_penalty": "未命中开销",
+    "split_kpi_orch_exec": "主控 / 子代理",
+    "split_kpi_switches": "切模型次数",
+    "split_kind_switch": "切模型",
+    "split_kind_subagent": "子代理",
+    "share_card_title": "脱敏分享体检卡",
+    "share_export_png": "导出脱敏 PNG",
+    "share_export_svg": "SVG",
+    "share_preview": "预览",
+    "share_preview_hide": "收起",
+    "share_preview_loading": "正在本地生成脱敏卡片…",
+    "share_privacy_note": "100% 本地脱敏生成 — 自动剥离本机路径、仓库名、用户名与会话 UUID。",
+    "toast_share_png_ok": "已导出脱敏 2x PNG 分享卡（零路径 / 零 UUID）",
+    "toast_share_svg_ok": "已导出脱敏 SVG 分享卡（零路径 / 零 UUID）"
   }
 }

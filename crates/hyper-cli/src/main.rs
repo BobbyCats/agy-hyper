@@ -5,7 +5,10 @@ mod statusline;
 use anyhow::{anyhow, Result};
 use clap::{Parser, Subcommand};
 use hyper_core::ast::outline_source;
-use hyper_core::audit::{build_audit_report, render_audit_png, render_audit_svg, BurnAuditReport};
+use hyper_core::audit::{
+    assert_share_card_clean, build_audit_report, render_audit_png, render_audit_svg,
+    render_share_card_png, render_share_card_svg, BurnAuditReport,
+};
 use hyper_core::bench::{aggregate_sessions, render_waterfall_svg};
 use hyper_core::config::{HyperConfig, Profile};
 use hyper_core::git::quick_head;
@@ -68,7 +71,7 @@ enum Commands {
         #[arg(long)]
         json: bool,
     },
-    /// Run a local multi-session burn audit (cache TTL cliffs, pre-edit bloat, cost & PNG/SVG card)
+    /// Run a local multi-session burn audit (cache TTL cliffs, split-cache, pre-edit bloat & PNG/SVG card)
     Audit {
         /// Lookback window in days (1..90)
         #[arg(long, default_value_t = 14)]
@@ -82,7 +85,16 @@ enum Commands {
         /// Export a shareable SVG diagnostic report card
         #[arg(long)]
         svg: Option<PathBuf>,
-        /// Card theme for --png / --svg: dark | light
+        /// Export an anonymized Health Badge share card (defaults to agy-hyper-share-card.png; .svg writes SVG)
+        #[arg(long, num_args = 0..=1, default_missing_value = "agy-hyper-share-card.png")]
+        share: Option<PathBuf>,
+        /// Export an anonymized Health Badge SVG card (920x500, zero paths/UUIDs/prompts)
+        #[arg(long)]
+        share_svg: Option<PathBuf>,
+        /// Export an anonymized Health Badge 2x Retina PNG card (1920x1080, pure Rust)
+        #[arg(long)]
+        share_png: Option<PathBuf>,
+        /// Card theme for --png / --svg / --share*: dark | light
         #[arg(long, default_value = "dark")]
         theme: String,
         /// Local timezone offset in minutes
@@ -243,10 +255,24 @@ fn main() -> Result<()> {
             sessions,
             png,
             svg,
+            share,
+            share_svg,
+            share_png,
             theme,
             tz_offset_mins,
             json,
-        } => handle_audit(days, sessions, png, svg, &theme, tz_offset_mins, json),
+        } => handle_audit(
+            days,
+            sessions,
+            png,
+            svg,
+            share,
+            share_svg,
+            share_png,
+            &theme,
+            tz_offset_mins,
+            json,
+        ),
         Commands::Statusline {
             format,
             title,
@@ -811,35 +837,49 @@ fn handle_bench_cache_ttl(as_json: bool) -> Result<()> {
     Ok(())
 }
 
+fn write_output_file(path: &Path, bytes: &[u8]) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        if !parent.as_os_str().is_empty() {
+            fs::create_dir_all(parent)?;
+        }
+    }
+    fs::write(path, bytes)?;
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
 fn handle_audit(
     days: u32,
     sessions: usize,
     png: Option<PathBuf>,
     svg: Option<PathBuf>,
+    share: Option<PathBuf>,
+    share_svg: Option<PathBuf>,
+    share_png: Option<PathBuf>,
     theme: &str,
     tz_offset_mins: i32,
     as_json: bool,
 ) -> Result<()> {
     let cfg = HyperConfig::load();
-    let report: BurnAuditReport = match send_request(&DaemonRequest::AuditReport {
-        days,
-        max_sessions: sessions,
-        tz_offset_mins,
-    }) {
-        Ok(DaemonResponse::Ok { data }) => serde_json::from_value(data)
-            .unwrap_or_else(|_| build_audit_report(days, sessions, &cfg, tz_offset_mins)),
-        _ => build_audit_report(days, sessions, &cfg, tz_offset_mins),
+    let bypass_daemon = std::env::var_os("AGY_HYPER_BRAIN_DIR").is_some();
+    let report: BurnAuditReport = if bypass_daemon {
+        build_audit_report(days, sessions, &cfg, tz_offset_mins)
+    } else {
+        match send_request(&DaemonRequest::AuditReport {
+            days,
+            max_sessions: sessions,
+            tz_offset_mins,
+        }) {
+            Ok(DaemonResponse::Ok { data }) => serde_json::from_value(data)
+                .unwrap_or_else(|_| build_audit_report(days, sessions, &cfg, tz_offset_mins)),
+            _ => build_audit_report(days, sessions, &cfg, tz_offset_mins),
+        }
     };
 
     let dark = !theme.trim().eq_ignore_ascii_case("light");
     if let Some(png_path) = png {
         let png_bytes = render_audit_png(&report, dark)?;
-        if let Some(parent) = png_path.parent() {
-            if !parent.as_os_str().is_empty() {
-                fs::create_dir_all(parent)?;
-            }
-        }
-        fs::write(&png_path, png_bytes)?;
+        write_output_file(&png_path, &png_bytes)?;
         if !as_json {
             println!(
                 "Exported shareable 2x PNG audit card -> {} (1920x1200)",
@@ -850,14 +890,59 @@ fn handle_audit(
 
     if let Some(svg_path) = svg {
         let svg_xml = render_audit_svg(&report, dark);
-        if let Some(parent) = svg_path.parent() {
-            if !parent.as_os_str().is_empty() {
-                fs::create_dir_all(parent)?;
-            }
-        }
-        fs::write(&svg_path, svg_xml)?;
+        write_output_file(&svg_path, svg_xml.as_bytes())?;
         if !as_json {
             println!("Exported shareable SVG audit card -> {}", svg_path.display());
+        }
+    }
+
+    if let Some(share_path) = share {
+        let is_svg = share_path
+            .extension()
+            .and_then(|s| s.to_str())
+            .is_some_and(|ext| ext.eq_ignore_ascii_case("svg"));
+        if is_svg {
+            let svg_xml = render_share_card_svg(&report, dark);
+            assert_share_card_clean(&svg_xml)?;
+            write_output_file(&share_path, svg_xml.as_bytes())?;
+            if !as_json {
+                println!(
+                    "Exported anonymized Health Badge SVG -> {} (920x500 · 0 paths/UUIDs)",
+                    share_path.display()
+                );
+            }
+        } else {
+            let png_bytes = render_share_card_png(&report, dark)?;
+            write_output_file(&share_path, &png_bytes)?;
+            if !as_json {
+                println!(
+                    "Exported anonymized Health Badge PNG -> {} (1920x1080 · 0 paths/UUIDs)",
+                    share_path.display()
+                );
+            }
+        }
+    }
+
+    if let Some(svg_path) = share_svg {
+        let svg_xml = render_share_card_svg(&report, dark);
+        assert_share_card_clean(&svg_xml)?;
+        write_output_file(&svg_path, svg_xml.as_bytes())?;
+        if !as_json {
+            println!(
+                "Exported anonymized Health Badge SVG -> {} (920x500 · 0 paths/UUIDs)",
+                svg_path.display()
+            );
+        }
+    }
+
+    if let Some(png_path) = share_png {
+        let png_bytes = render_share_card_png(&report, dark)?;
+        write_output_file(&png_path, &png_bytes)?;
+        if !as_json {
+            println!(
+                "Exported anonymized Health Badge PNG -> {} (1920x1080 · 0 paths/UUIDs)",
+                png_path.display()
+            );
         }
     }
 
@@ -866,8 +951,14 @@ fn handle_audit(
         return Ok(());
     }
 
-    println!("\n⚡ AGY HYPER · LOCAL TELEMETRY BURN AUDIT ({}d)", report.window_days);
+    println!(
+        "\n⚡ AGY HYPER · LOCAL TELEMETRY BURN AUDIT ({}d) · [{}]",
+        report.window_days, report.verdict
+    );
     println!("─────────────────────────────────────────────────────────────────");
+    if !report.verdict_reason.is_empty() {
+        println!("  Verdict           : {} — {}", report.verdict, report.verdict_reason);
+    }
     println!(
         "  Sessions / Turns  : {} sessions ({} coding) · {} valid turns",
         report.sessions_analyzed, report.coding_sessions, report.total_turns
@@ -895,6 +986,47 @@ fn handle_audit(
             report.blanket_read_turns,
             report.sessions_with_blanket_reads
         );
+    }
+    let sc = &report.split_cache;
+    if sc.total_transitions > 0 {
+        println!("\n  Split-Session / Model-Switch Cache Diagnostics:");
+        println!(
+            "    Orchestrator  : {:>3} sess · {:>4} turns · Cache {:>5.1}%",
+            sc.orchestrator_sessions,
+            sc.orchestrator_turns,
+            sc.orchestrator_cache_hit_ratio * 100.0
+        );
+        if sc.executor_sessions > 0 {
+            println!(
+                "    Subagent Exec : {:>3} sess · {:>4} turns · Spawn {:>5.1}% -> Steady {:>5.1}% ({} cross-model)",
+                sc.executor_sessions,
+                sc.executor_turns,
+                sc.executor_cold_start_hit_ratio * 100.0,
+                sc.executor_steady_hit_ratio * 100.0,
+                sc.executor_cross_model_handoffs
+            );
+        }
+        if sc.model_switch_count > 0 {
+            println!(
+                "    Model Switches: {} in {} sess ({} cross-family) · {:.1}% -> {:.1}% (-{:.1}pp)",
+                sc.model_switch_count,
+                sc.model_switch_sessions,
+                sc.cross_family_switch_count,
+                sc.model_switch_pre_hit_ratio * 100.0,
+                sc.model_switch_post_hit_ratio * 100.0,
+                sc.model_switch_drop_pct
+            );
+        }
+        println!(
+            "    Transition Tax: -{:.1}pp avg drop · {:.1}k uncached penalty (~{:.2} {})",
+            sc.headline_cache_drop_pct,
+            sc.uncached_penalty_tokens as f64 / 1000.0,
+            sc.est_uncached_penalty,
+            report.currency
+        );
+    } else {
+        println!("\n  Split-Session / Model-Switch Cache Diagnostics:");
+        println!("    No model switches or subagent splits detected in window.");
     }
     if !report.model_ttl_cliffs.is_empty() {
         println!("\n  Empirical Model Cache TTL Cliffs:");
@@ -961,4 +1093,47 @@ fn handle_ui(port: u16) -> Result<()> {
         return Err(anyhow!("Hyper Deck exited with {}", status));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_audit_share_flags_with_and_without_explicit_path() {
+        let cli1 = Cli::try_parse_from(["agy-hyper", "audit", "--share", "--theme", "light", "--json"]).unwrap();
+        match cli1.command {
+            Commands::Audit { share, theme, json, .. } => {
+                assert_eq!(share, Some(PathBuf::from("agy-hyper-share-card.png")));
+                assert_eq!(theme, "light");
+                assert!(json);
+            }
+            _ => panic!("expected Audit command"),
+        }
+
+        let cli2 = Cli::try_parse_from([
+            "agy-hyper",
+            "audit",
+            "--share",
+            "custom-badge.svg",
+            "--share-svg",
+            "badge.svg",
+            "--share-png",
+            "badge.png",
+        ])
+        .unwrap();
+        match cli2.command {
+            Commands::Audit {
+                share,
+                share_svg,
+                share_png,
+                ..
+            } => {
+                assert_eq!(share, Some(PathBuf::from("custom-badge.svg")));
+                assert_eq!(share_svg, Some(PathBuf::from("badge.svg")));
+                assert_eq!(share_png, Some(PathBuf::from("badge.png")));
+            }
+            _ => panic!("expected Audit command"),
+        }
+    }
 }

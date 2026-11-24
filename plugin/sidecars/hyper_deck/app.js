@@ -15,6 +15,7 @@
     selectedConvId: '',
     usageWindow: localStorage.getItem('agy-hyper-uwin') || '7d',
     usageMetric: localStorage.getItem('agy-hyper-umetric') || 'cost',
+    sharePreviewOpen: false,
   };
   let pollInFlight = false;
   let pollSeq = 0;
@@ -23,6 +24,8 @@
   let lastUsageFetchMs = 0;
   let auditInFlight = false;
   let lastAuditFetchMs = 0;
+  let sharePreviewSeq = 0;
+  let sharePreviewObjectUrl = '';
 
   function selectSession(convId) {
     state.selectedConvId = convId || '';
@@ -97,6 +100,158 @@
     a.click();
     a.remove();
     setTimeout(() => URL.revokeObjectURL(url), 1500);
+  }
+
+  function base64ToBlob(b64, mime) {
+    const bin = atob(b64);
+    const bytes = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+    return new Blob([bytes], { type: mime });
+  }
+
+  async function renderSvgToPngBlob(svgText, cardW, cardH, outW, outH, theme) {
+    const svgBlob = new Blob([svgText], { type: 'image/svg+xml;charset=utf-8' });
+    const svgUrl = URL.createObjectURL(svgBlob);
+    try {
+      const img = await new Promise((resolve, reject) => {
+        const el = new Image();
+        el.onload = () => resolve(el);
+        el.onerror = () => reject(new Error('failed to decode SVG for PNG export'));
+        el.src = svgUrl;
+      });
+      const canvas = document.createElement('canvas');
+      canvas.width = outW;
+      canvas.height = outH;
+      const ctx = canvas.getContext('2d');
+      if (!ctx) throw new Error('canvas 2d context unavailable');
+      ctx.fillStyle = theme === 'dark' ? '#060911' : '#E2E8F0';
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+      const scale = Math.min(outW / cardW, outH / cardH);
+      const drawW = Math.round(cardW * scale);
+      const drawH = Math.round(cardH * scale);
+      const dx = Math.round((outW - drawW) / 2);
+      const dy = Math.round((outH - drawH) / 2);
+      ctx.drawImage(img, dx, dy, drawW, drawH);
+      return await new Promise((resolve, reject) => {
+        canvas.toBlob((b) => (b ? resolve(b) : reject(new Error('PNG encoding failed'))), 'image/png');
+      });
+    } finally {
+      URL.revokeObjectURL(svgUrl);
+    }
+  }
+
+  async function fetchShareCardPayload(includePng = false) {
+    const days = state.usageWindow === '24h' ? 1 : state.usageWindow === '7d' ? 7 : state.usageWindow === '30d' ? 30 : 90;
+    const tz = -new Date().getTimezoneOffset();
+    const theme = isDark() ? 'dark' : 'light';
+    const url = `/api/audit/share-card?days=${days}&theme=${theme}&tzOffsetMins=${tz}&includePng=${includePng ? '1' : '0'}`;
+    const data = await apiFetch(url, { method: 'GET' }).then((r) => r.json());
+    if (!data?.ok || !data?.svg || !String(data.svg).trim().startsWith('<svg')) {
+      throw new Error(data?.error || 'share card unavailable');
+    }
+    return { days, theme, data };
+  }
+
+  function syncSharePreviewButton() {
+    const btn = $('btn-preview-share-card');
+    if (btn) {
+      btn.textContent = state.sharePreviewOpen ? t('usage.share_preview_hide') : t('usage.share_preview');
+    }
+  }
+
+  async function refreshSharePreview() {
+    if (!state.sharePreviewOpen) return;
+    const box = $('share-card-preview-box');
+    const loading = $('share-card-preview-loading');
+    const img = $('share-card-preview-img');
+    if (!box || !loading || !img) return;
+    const seq = ++sharePreviewSeq;
+    box.classList.remove('hidden');
+    loading.classList.remove('hidden');
+    img.classList.add('hidden');
+    try {
+      const { data } = await fetchShareCardPayload(false);
+      if (seq !== sharePreviewSeq || !state.sharePreviewOpen) return;
+      if (sharePreviewObjectUrl) {
+        URL.revokeObjectURL(sharePreviewObjectUrl);
+        sharePreviewObjectUrl = '';
+      }
+      const blob = new Blob([data.svg], { type: 'image/svg+xml;charset=utf-8' });
+      sharePreviewObjectUrl = URL.createObjectURL(blob);
+      img.src = sharePreviewObjectUrl;
+      loading.classList.add('hidden');
+      img.classList.remove('hidden');
+    } catch (e) {
+      if (seq !== sharePreviewSeq) return;
+      loading.classList.add('hidden');
+      box.classList.add('hidden');
+      state.sharePreviewOpen = false;
+      syncSharePreviewButton();
+      showToast(t('usage.toast_audit_err', { err: String(e?.message || e) }));
+    }
+  }
+
+  function toggleSharePreview() {
+    const box = $('share-card-preview-box');
+    state.sharePreviewOpen = !state.sharePreviewOpen;
+    syncSharePreviewButton();
+    if (!state.sharePreviewOpen) {
+      sharePreviewSeq++;
+      if (box) box.classList.add('hidden');
+      if (sharePreviewObjectUrl) {
+        URL.revokeObjectURL(sharePreviewObjectUrl);
+        sharePreviewObjectUrl = '';
+      }
+      return;
+    }
+    refreshSharePreview();
+  }
+
+  async function exportShareCardPng() {
+    const btn = $('btn-export-share-png');
+    if (!btn || btn.disabled) return;
+    btn.disabled = true;
+    const prev = btn.textContent;
+    btn.textContent = t('usage.exporting_card');
+    try {
+      const { days, theme, data } = await fetchShareCardPayload(true);
+      const pngBlob = data.png_base64
+        ? base64ToBlob(data.png_base64, 'image/png')
+        : await renderSvgToPngBlob(
+            data.svg,
+            data.svg_width || 920,
+            data.svg_height || 500,
+            data.png_width || 1920,
+            data.png_height || 1080,
+            theme
+          );
+      triggerBlobDownload(pngBlob, `agy-hyper-share-card-${days}d-${theme}.png`);
+      showToast(t('usage.toast_share_png_ok'));
+    } catch (e) {
+      showToast(t('usage.toast_audit_err', { err: String(e?.message || e) }));
+    } finally {
+      btn.disabled = false;
+      btn.textContent = prev;
+    }
+  }
+
+  async function exportShareCardSvg() {
+    const btn = $('btn-export-share-svg');
+    if (!btn || btn.disabled) return;
+    btn.disabled = true;
+    const prev = btn.textContent;
+    btn.textContent = t('usage.exporting_card');
+    try {
+      const { days, theme, data } = await fetchShareCardPayload(false);
+      const blob = new Blob([data.svg], { type: 'image/svg+xml;charset=utf-8' });
+      triggerBlobDownload(blob, `agy-hyper-share-card-${days}d-${theme}.svg`);
+      showToast(t('usage.toast_share_svg_ok'));
+    } catch (e) {
+      showToast(t('usage.toast_audit_err', { err: String(e?.message || e) }));
+    } finally {
+      btn.disabled = false;
+      btn.textContent = prev;
+    }
   }
 
   async function exportAuditSvg() {
@@ -412,7 +567,10 @@
     }
   }
 
-  initThemeSync(render);
+  initThemeSync(() => {
+    render();
+    if (state.sharePreviewOpen) refreshSharePreview();
+  });
 
   document.querySelectorAll('.lang-btn[data-lang]').forEach((btn) => {
     btn.addEventListener('click', async () => {
@@ -421,6 +579,7 @@
       localStorage.setItem('agy-hyper-lang', btn.dataset.lang);
       applyStaticTranslations();
       syncLangButtons();
+      syncSharePreviewButton();
       render();
     });
   });
@@ -466,6 +625,18 @@
     exportAuditSvg();
   });
 
+  $('btn-export-share-png')?.addEventListener('click', () => {
+    exportShareCardPng();
+  });
+
+  $('btn-export-share-svg')?.addEventListener('click', () => {
+    exportShareCardSvg();
+  });
+
+  $('btn-preview-share-card')?.addEventListener('click', () => {
+    toggleSharePreview();
+  });
+
   document.querySelectorAll('.win-btn[data-uwin]').forEach((btn) => {
     btn.addEventListener('click', () => {
       state.usageWindow = btn.dataset.uwin;
@@ -474,6 +645,7 @@
       lastAuditFetchMs = 0;
       pollUsage(false);
       pollAudit(true);
+      if (state.sharePreviewOpen) refreshSharePreview();
     });
   });
 

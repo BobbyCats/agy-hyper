@@ -1,6 +1,6 @@
 use crate::protocol::{
-    AuditEvent, CockpitSnapshot, DrillOutput, EngineStatus, HandleStored, PrewarmedCheck,
-    SessionTreeSummary, StatuslinePulseResponse, SubagentSnapshot,
+    AuditEvent, CockpitSnapshot, DrillOutput, EngineStatus, HandleStored, LiveSplitCacheSummary,
+    PrewarmedCheck, SessionTreeSummary, StatuslinePulseResponse, SubagentSnapshot,
 };
 use hyper_core::bench::{analyze_transcript, SessionBenchmark};
 use hyper_core::config::{truncate_utf8_bytes, HyperConfig, Profile};
@@ -935,6 +935,38 @@ pub fn build_cockpit_snapshot(
         let mut combined_hyper = root_bench.as_ref().map(|b| b.hyper_tool_calls).unwrap_or(0);
         let mut combined_tools = root_bench.as_ref().map(|b| b.total_tool_calls).unwrap_or(0);
 
+        let root_in = combined_input;
+        let root_cr = combined_cache;
+        let root_primary_fam = root_bench
+            .as_ref()
+            .and_then(|b| b.split_stats.primary_model.as_deref())
+            .map(|m| model_ttl_family(Some(m)))
+            .filter(|f| f != hyper_core::usage::UNATTRIBUTED_MODEL);
+        let mut tree_switch_count = root_bench
+            .as_ref()
+            .map(|b| b.split_stats.model_switch_count)
+            .unwrap_or(0);
+        let mut tree_switch_uncached = root_bench
+            .as_ref()
+            .map(|b| b.split_stats.switch_uncached_input_tokens)
+            .unwrap_or(0);
+        let mut tree_switch_drop_sum: f64 = root_bench
+            .as_ref()
+            .map(|b| {
+                b.split_stats
+                    .model_switches
+                    .iter()
+                    .map(|e| e.cache_drop_ratio)
+                    .sum()
+            })
+            .unwrap_or(0.0);
+        let mut exec_in = 0u64;
+        let mut exec_cr = 0u64;
+        let mut exec_cold_in = 0u64;
+        let mut exec_cold_cr = 0u64;
+        let mut exec_handoffs = 0usize;
+        let mut cross_model_subagents = 0usize;
+
         let descendants = collect_descendant_sessions(&root_id, &all_sessions);
         let mut subagents = Vec::with_capacity(descendants.len());
         let mut active_subagents = 0usize;
@@ -957,6 +989,30 @@ pub fn build_cockpit_snapshot(
                         .entry(model.clone())
                         .or_default()
                         .add_assign(bucket);
+                }
+                tree_switch_count += cb.split_stats.model_switch_count;
+                tree_switch_uncached = tree_switch_uncached
+                    .saturating_add(cb.split_stats.switch_uncached_input_tokens);
+                tree_switch_drop_sum += cb
+                    .split_stats
+                    .model_switches
+                    .iter()
+                    .map(|e| e.cache_drop_ratio)
+                    .sum::<f64>();
+                let cf_in = cb.split_stats.first_turn_input_tokens;
+                let cf_cr = cb.split_stats.first_turn_cache_read_tokens;
+                if cf_in + cf_cr > 0 {
+                    exec_handoffs += 1;
+                    exec_cold_in = exec_cold_in.saturating_add(cf_in);
+                    exec_cold_cr = exec_cold_cr.saturating_add(cf_cr);
+                }
+                if let (Some(rf), Some(cm)) =
+                    (root_primary_fam.as_deref(), cb.split_stats.primary_model.as_deref())
+                {
+                    let cf = model_ttl_family(Some(cm));
+                    if cf != hyper_core::usage::UNATTRIBUTED_MODEL && cf != rf {
+                        cross_model_subagents += 1;
+                    }
                 }
             }
 
@@ -1013,6 +1069,8 @@ pub fn build_cockpit_snapshot(
             combined_cache += c_cache;
             combined_hyper += c_hyper;
             combined_tools += c_tools;
+            exec_in = exec_in.saturating_add(c_in);
+            exec_cr = exec_cr.saturating_add(c_cache);
 
             subagents.push(SubagentSnapshot {
                 conversation_id: child.conversation_id,
@@ -1053,6 +1111,58 @@ pub fn build_cockpit_snapshot(
             0.0
         };
 
+        let total_transitions = tree_switch_count + exec_handoffs;
+        let split_cache = if total_transitions > 0 || !subagents.is_empty() {
+            let orch_denom = root_in.saturating_add(root_cr);
+            let orch_hit = if orch_denom > 0 {
+                root_cr as f64 / orch_denom as f64
+            } else {
+                0.0
+            };
+            let exec_denom = exec_in.saturating_add(exec_cr);
+            let exec_hit = if exec_denom > 0 {
+                exec_cr as f64 / exec_denom as f64
+            } else {
+                0.0
+            };
+            let cold_denom = exec_cold_in.saturating_add(exec_cold_cr);
+            let cold_hit = if cold_denom > 0 {
+                exec_cold_cr as f64 / cold_denom as f64
+            } else {
+                0.0
+            };
+            let baseline = if orch_denom > 0 { orch_hit } else { exec_hit };
+            let sub_drop_pct = if exec_handoffs > 0 {
+                ((baseline - cold_hit).max(0.0) * 1000.0).round() / 10.0
+            } else {
+                0.0
+            };
+            let sw_drop_pct = if tree_switch_count > 0 {
+                ((tree_switch_drop_sum / tree_switch_count as f64) * 1000.0).round() / 10.0
+            } else {
+                0.0
+            };
+            let cache_drop_pct = if total_transitions > 0 {
+                let weighted = sw_drop_pct * tree_switch_count as f64
+                    + sub_drop_pct * exec_handoffs as f64;
+                ((weighted / total_transitions as f64) * 10.0).round() / 10.0
+            } else {
+                0.0
+            };
+            Some(LiveSplitCacheSummary {
+                orchestrator_cache_hit_ratio: (orch_hit * 10_000.0).round() / 10_000.0,
+                executor_cache_hit_ratio: (exec_hit * 10_000.0).round() / 10_000.0,
+                executor_cold_start_hit_ratio: (cold_hit * 10_000.0).round() / 10_000.0,
+                model_switch_count: tree_switch_count,
+                subagent_handoffs: exec_handoffs,
+                cross_model_subagents,
+                cache_drop_pct,
+                uncached_penalty_tokens: tree_switch_uncached.saturating_add(exec_cold_in),
+            })
+        } else {
+            None
+        };
+
         SessionTreeSummary {
             root_conversation_id: root_id,
             selected_is_subagent,
@@ -1067,6 +1177,7 @@ pub fn build_cockpit_snapshot(
             combined_hyper_calls: combined_hyper,
             combined_total_tools: combined_tools,
             combined_cache_hit_ratio,
+            split_cache,
             subagents,
         }
     });

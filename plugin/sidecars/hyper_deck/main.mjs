@@ -315,10 +315,15 @@ async function getAuditReport(days = 14, maxSessions = 80, tzOffsetMins = 0) {
   return await runCliJson(['audit', '--days', String(d), '--sessions', String(s), '--tz-offset-mins', String(tz), '--json']);
 }
 
-async function getAuditSvg(days = 14, theme = 'dark', tzOffsetMins = 0) {
+async function getAuditSvg(days = 14, theme = 'dark', tzOffsetMins = 0, share = false) {
   const d = Number.isFinite(Number(days)) ? Math.max(1, Math.min(90, Math.trunc(Number(days)))) : 14;
   const th = String(theme || 'dark').toLowerCase() === 'light' ? 'light' : 'dark';
   const tz = Number.isFinite(Number(tzOffsetMins)) ? Math.trunc(Number(tzOffsetMins)) : 0;
+  if (share) {
+    const card = await getAuditShareCard(d, th, tz, false);
+    if (card?.ok && card.svg) return card.svg;
+    throw new Error(card?.error || 'share card SVG unavailable');
+  }
   const tmpSvg = join(tmpdir(), `agy-hyper-audit-${process.pid}-${Date.now()}.svg`);
   try {
     await new Promise((resolve, reject) => {
@@ -338,6 +343,100 @@ async function getAuditSvg(days = 14, theme = 'dark', tzOffsetMins = 0) {
       if (existsSync(tmpSvg)) unlinkSync(tmpSvg);
     } catch {
       // ignore
+    }
+  }
+}
+
+async function getAuditShareCard(days = 14, theme = 'dark', tzOffsetMins = 0, includePng = false) {
+  const d = Number.isFinite(Number(days)) ? Math.max(1, Math.min(90, Math.trunc(Number(days)))) : 14;
+  const th = String(theme || 'dark').toLowerCase() === 'light' ? 'light' : 'dark';
+  const tz = Number.isFinite(Number(tzOffsetMins)) ? Math.trunc(Number(tzOffsetMins)) : 0;
+  const wantPng = Boolean(includePng);
+
+  try {
+    const resp = await callDaemon(
+      {
+        op: 'audit_share_card',
+        days: d,
+        max_sessions: 80,
+        tz_offset_mins: tz,
+        theme: th,
+        include_png: wantPng,
+      },
+      12000
+    );
+    if (resp?.status === 'ok' && resp.data?.svg) {
+      return { ok: true, ...resp.data };
+    }
+  } catch {
+    // fall back to CLI share-card export
+  }
+
+  const stamp = `${process.pid}-${Date.now()}`;
+  const tmpSvg = join(tmpdir(), `agy-hyper-share-${stamp}.svg`);
+  const tmpPng = join(tmpdir(), `agy-hyper-share-${stamp}.png`);
+  try {
+    const args = [
+      'audit',
+      '--days',
+      String(d),
+      '--sessions',
+      '80',
+      '--theme',
+      th,
+      '--tz-offset-mins',
+      String(tz),
+      '--share-svg',
+      tmpSvg,
+      '--json',
+    ];
+    if (wantPng) {
+      args.push('--share-png', tmpPng);
+    }
+    const stdout = await new Promise((resolve, reject) => {
+      execFile(
+        resolveHyperBin(),
+        args,
+        { timeout: 15000, maxBuffer: 6 * 1024 * 1024 },
+        (err, out, stderr) => {
+          if (err) reject(new Error(stderr || err.message));
+          else resolve(out || '');
+        }
+      );
+    });
+    let verdict = 'HEALTHY';
+    try {
+      const parsed = JSON.parse(stdout);
+      if (parsed?.verdict) verdict = String(parsed.verdict);
+    } catch {
+      // ignore non-json stdout
+    }
+    const svg = existsSync(tmpSvg) ? readFileSync(tmpSvg, 'utf8') : '';
+    if (!svg.trim().startsWith('<svg')) {
+      return { ok: false, error: 'share card SVG generation failed' };
+    }
+    const pngBase64 = wantPng && existsSync(tmpPng) ? readFileSync(tmpPng).toString('base64') : null;
+    return {
+      ok: true,
+      svg,
+      png_base64: pngBase64,
+      svg_width: 920,
+      svg_height: 500,
+      png_width: 1920,
+      png_height: 1080,
+      theme: th,
+      verdict,
+      redacted: true,
+    };
+  } catch (err) {
+    return { ok: false, error: String(err?.message || err) };
+  } finally {
+    for (const p of [tmpSvg, tmpPng]) {
+      try {
+        if (existsSync(p)) unlinkSync(p);
+      } catch {
+        // ignore
+      }
     }
   }
 }
@@ -572,11 +671,28 @@ async function startSidecarNative() {
 
   app.api('/api/audit/svg', async (data) => {
     try {
-      const svg = await getAuditSvg(data?.days ?? 14, data?.theme || 'dark', data?.tzOffsetMins ?? 0);
+      const share = data?.share === '1' || data?.share === 'true' || data?.share === true;
+      const svg = await getAuditSvg(data?.days ?? 14, data?.theme || 'dark', data?.tzOffsetMins ?? 0, share);
       return new Response(svg, {
         contentType: 'image/svg+xml; charset=utf-8',
         headers: NO_CACHE_HEADERS,
       });
+    } catch (e) {
+      return { ok: false, error: String(e?.message || e) };
+    }
+  }, 'GET');
+
+  app.api('/api/audit/share-card', async (data) => {
+    try {
+      const wantPng = data?.includePng === '1' || data?.includePng === 'true' || data?.includePng === true || data?.format === 'png';
+      const card = await getAuditShareCard(data?.days ?? 14, data?.theme || 'dark', data?.tzOffsetMins ?? 0, wantPng);
+      if (data?.format === 'svg' && card?.ok && card.svg) {
+        return new Response(card.svg, {
+          contentType: 'image/svg+xml; charset=utf-8',
+          headers: NO_CACHE_HEADERS,
+        });
+      }
+      return card;
     } catch (e) {
       return { ok: false, error: String(e?.message || e) };
     }
@@ -701,14 +817,32 @@ function startStandaloneHttp() {
         );
       }
       if (pathname === '/api/audit/svg' && req.method === 'GET') {
+        const share = url.searchParams.get('share') === '1' || url.searchParams.get('share') === 'true';
         const svg = await getAuditSvg(
           url.searchParams.get('days') || '14',
           url.searchParams.get('theme') || 'dark',
-          url.searchParams.get('tzOffsetMins') || '0'
+          url.searchParams.get('tzOffsetMins') || '0',
+          share
         );
         res.writeHead(200, { 'Content-Type': 'image/svg+xml; charset=utf-8', ...NO_CACHE_HEADERS });
         res.end(svg);
         return;
+      }
+      if (pathname === '/api/audit/share-card' && req.method === 'GET') {
+        const fmt = url.searchParams.get('format') || 'json';
+        const wantPng = url.searchParams.get('includePng') === '1' || url.searchParams.get('includePng') === 'true' || fmt === 'png';
+        const card = await getAuditShareCard(
+          url.searchParams.get('days') || '14',
+          url.searchParams.get('theme') || 'dark',
+          url.searchParams.get('tzOffsetMins') || '0',
+          wantPng
+        );
+        if (fmt === 'svg' && card?.ok && card.svg) {
+          res.writeHead(200, { 'Content-Type': 'image/svg+xml; charset=utf-8', ...NO_CACHE_HEADERS });
+          res.end(card.svg);
+          return;
+        }
+        return sendJson(card?.ok ? 200 : 500, card);
       }
       if (pathname === '/api/usage' && req.method === 'GET') {
         const rep = await getUsageSummary(

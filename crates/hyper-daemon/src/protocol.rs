@@ -121,6 +121,18 @@ pub enum DaemonRequest {
         #[serde(default)]
         tz_offset_mins: i32,
     },
+    AuditShareCard {
+        #[serde(default = "default_audit_days")]
+        days: u32,
+        #[serde(default = "default_audit_sessions")]
+        max_sessions: usize,
+        #[serde(default)]
+        tz_offset_mins: i32,
+        #[serde(default = "default_card_theme")]
+        theme: String,
+        #[serde(default)]
+        include_png: bool,
+    },
     Shutdown,
 }
 
@@ -130,6 +142,10 @@ fn default_audit_days() -> u32 {
 
 fn default_audit_sessions() -> usize {
     80
+}
+
+fn default_card_theme() -> String {
+    "dark".to_string()
 }
 
 fn default_drill_limit() -> usize {
@@ -228,6 +244,19 @@ pub struct SubagentSnapshot {
     pub total_tool_calls: usize,
 }
 
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct LiveSplitCacheSummary {
+    pub orchestrator_cache_hit_ratio: f64,
+    pub executor_cache_hit_ratio: f64,
+    pub executor_cold_start_hit_ratio: f64,
+    pub model_switch_count: usize,
+    pub subagent_handoffs: usize,
+    pub cross_model_subagents: usize,
+    pub cache_drop_pct: f64,
+    pub uncached_penalty_tokens: u64,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionTreeSummary {
     pub root_conversation_id: String,
@@ -246,6 +275,8 @@ pub struct SessionTreeSummary {
     pub combined_hyper_calls: usize,
     pub combined_total_tools: usize,
     pub combined_cache_hit_ratio: f64,
+    #[serde(default)]
+    pub split_cache: Option<LiveSplitCacheSummary>,
     pub subagents: Vec<SubagentSnapshot>,
 }
 

@@ -24,7 +24,7 @@
         <div class="brand-copy">
           <div class="brand-title-row">
             <span class="brand-name" data-i18n="app.title">AGY Hyper</span>
-            <span id="version-pill" class="mono-tag">v0.4.0</span>
+            <span id="version-pill" class="mono-tag">v0.4.4</span>
           </div>
           <div class="brand-sub">
             <span id="daemon-dot" class="pulse-dot"></span>
@@ -72,6 +72,7 @@
           <span id="subagent-loop-pill" class="status-pill err hidden"></span>
           <span id="subagent-stalled-pill" class="status-pill warn hidden"></span>
           <span id="subagent-red-pill" class="status-pill err hidden"></span>
+          <span id="subagent-split-pill" class="status-pill warn hidden"></span>
         </div>
         <button id="btn-back-parent" type="button" class="btn-ghost btn-xs hidden" data-i18n="subagents.back_parent">← Parent</button>
       </div>
@@ -261,6 +262,13 @@
           <div id="ctx-xray-bar" class="xray-bar" role="img" aria-label="Context composition"></div>
           <div id="ctx-xray-legend" class="xray-legend"></div>
         </div>
+        <div id="ctx-split-block" class="xray-block hidden">
+          <div class="xray-head">
+            <h3 class="sub-title" data-i18n="context_pro.split_heading">Split-Session &amp; Model-Switch Cache</h3>
+            <div id="ctx-split-pills" class="xray-pills"></div>
+          </div>
+          <div id="ctx-split-list" class="split-trans-list"></div>
+        </div>
       </section>
 
       <!-- Pro Tab 3: Incremental Usage & API-Equivalent Value Ledger -->
@@ -326,8 +334,11 @@
 
         <div id="usage-audit-block" class="audit-card-block hidden">
           <div class="hairline"></div>
-          <div class="subhead-row">
-            <h3 class="sub-title" data-i18n="usage.audit_heading">Local Burn Audit &amp; TTL Cliffs</h3>
+          <div class="subhead-row audit-head-row">
+            <div class="audit-title-group">
+              <h3 class="sub-title" data-i18n="usage.audit_heading">Local Burn Audit &amp; TTL Cliffs</h3>
+              <span id="audit-verdict-pill" class="status-pill ok hidden">HEALTHY</span>
+            </div>
             <div class="audit-export-group">
               <button id="btn-export-audit-png" type="button" class="btn-ghost btn-xs" data-i18n="usage.export_png">Export PNG</button>
               <button id="btn-export-audit" type="button" class="btn-ghost btn-xs" data-i18n="usage.export_svg">SVG</button>
@@ -335,7 +346,44 @@
           </div>
           <div id="audit-kpi-pills" class="xray-pills"></div>
           <div id="audit-ttl-chips" class="audit-ttl-chips"></div>
+
+          <div id="audit-split-card" class="split-diag-card">
+            <div class="split-diag-head">
+              <span class="split-diag-title" data-i18n="usage.split_heading">Split-Cache &amp; Model-Switch</span>
+              <div id="audit-split-badges" class="xray-pills"></div>
+            </div>
+            <div id="audit-split-empty" class="split-diag-empty hidden" data-i18n="usage.split_none">No model/subagent splits detected</div>
+            <div id="audit-split-body" class="split-diag-body hidden">
+              <div id="audit-split-kpis" class="split-kpi-row"></div>
+              <div id="audit-split-list" class="split-trans-list"></div>
+            </div>
+          </div>
+
           <div id="audit-findings-list" class="audit-findings-list"></div>
+
+          <div class="share-card-bar">
+            <div class="share-card-top">
+              <div class="share-card-label">
+                <svg class="inline-ico" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                  <rect x="3" y="11" width="18" height="11" rx="2" ry="2"/>
+                  <path d="M7 11V7a5 5 0 0 1 10 0v4"/>
+                </svg>
+                <span data-i18n="usage.share_card_title">Anonymized Share Card</span>
+              </div>
+              <div class="audit-export-group">
+                <button id="btn-export-share-png" type="button" class="btn-accent btn-xs" data-i18n="usage.share_export_png">Export Share PNG</button>
+                <button id="btn-export-share-svg" type="button" class="btn-ghost btn-xs" data-i18n="usage.share_export_svg">SVG</button>
+                <button id="btn-preview-share-card" type="button" class="btn-ghost btn-xs" data-i18n="usage.share_preview">Preview</button>
+              </div>
+            </div>
+            <p class="share-privacy-note" data-i18n="usage.share_privacy_note">
+              100% local &amp; redacted — strips paths, repo names, usernames, and session UUIDs.
+            </p>
+            <div id="share-card-preview-box" class="share-preview-box hidden">
+              <div id="share-card-preview-loading" class="empty-state hidden" data-i18n="usage.share_preview_loading">Rendering redacted card…</div>
+              <img id="share-card-preview-img" class="share-preview-img hidden" alt="Anonymized AGY Hyper Audit Share Card"/>
+            </div>
+          </div>
         </div>
 
         <p class="usage-footnote" data-i18n="usage.footnote">

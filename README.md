@@ -92,7 +92,8 @@ Paste this prompt into **Antigravity (App or CLI), Claude Code, Codex, or Cursor
 Terminal essentials:
 
 ```bash
-agy-hyper audit --png audit.png   # 10s local burn audit + shareable 2x Retina PNG (1920x1200, pure Rust)
+agy-hyper audit --share           # 10s local burn audit + anonymized 2x Health Badge PNG (zero paths/UUIDs)
+agy-hyper audit --png audit.png   # full 2x Retina diagnostic PNG (1920x1200, pure Rust)
 agy-hyper audit --svg audit.svg   # vector dark/light SVG diagnostic card
 agy-hyper doctor                  # verify Tree-sitter grammars, gix, daemon RTT & security posture
 agy-hyper tx diff <tx_id>         # inspect line-level unified diff for any WAL snapshot before undo
@@ -103,9 +104,11 @@ agy-hyper ui                      # launch AGY Hyper Deck standalone at http://1
 
 ---
 
-## Local Burn Audit Card (`agy-hyper audit`)
+## Local Burn Audit, Split-Cache Diagnostics & Anonymized Share Card (`agy-hyper audit`)
 
-Run `agy-hyper audit --days 14 --png audit-card.png` (or `--svg audit-card.svg`) to audit your own Antigravity transcripts 100% locally (zero cloud uploads, zero external Chrome/ImageMagick deps). It surfaces empirical per-model cache TTL cliffs, uncached input spend, pre-edit context bloat, blanket-read turns, and an unadjusted local cohort view in a crisp shareable 2x Retina PNG or vector SVG card:
+Run `agy-hyper audit --days 14 --png audit-card.png` (or `--svg audit-card.svg`) to audit your Antigravity transcripts 100% locally (zero cloud uploads, zero external Chrome/ImageMagick deps). It measures empirical per-model cache TTL cliffs, uncached input spend, pre-edit context bloat, blanket-read turns, and **Split-Session / Orchestrator-Executor & Model-Switch cache drops** (quantifying cache-hit drop and uncached token penalties across intra-session model switches and parent-to-subagent handoffs).
+
+Need a clean Health Badge you can share without leaking local context? Run `agy-hyper audit --share` (writes `agy-hyper-share-card.png` at `1920x1080`, or pass `--share-svg badge.svg` / `--share-png badge.png`): it stamps an objective severity verdict (`BLEEDING` / `WATCH` / `HEALTHY`) alongside `Cache Hit %`, `First-Edit Blind Read P50`, `Split/Switch Cache Drop`, and `Top Quota Drain` while **enforcing hard code-level redaction** (zero filesystem paths, zero usernames, zero repo/workspace names, zero conversation UUIDs, zero prompt snippets).
 
 <div align="center">
   <picture>
@@ -122,8 +125,8 @@ Run `agy-hyper audit --days 14 --png audit-card.png` (or `--svg audit-card.svg`)
 Docked directly in Antigravity's auxiliary pane via `SIDECAR_UI_ENTRYPOINT_AUX_PANE`, powered 100% offline by **Apache ECharts 6** and **i18next** (`English / 简体中文 / 日本語`, zero CDN). Luminance-synced with your host Light/Dark theme.
 
 - **Layered Zero-Intrusion Design**: start in **Observe** mode (read-only cockpit + burn audit + passive WAL capture; native tools & diff cards untouched), switch to **Safe** (bundled reads & preset checks while keeping native `edit_file` inline diffs), or unlock **Balanced / Hyper** full Rust MCP acceleration — plus granular per-tool toggles (`MCP Read`, `MCP Edit`, `MCP Check`) under **Engine**.
-- **Simple Mode** keeps daily essentials front and center: context level, Turn P50, step vs. session cache hit rate, linked subagent tree strip (highlighting active redlines, `STALLED` subagents silent `>=90s`, and `LOOP ×N` crash-looping subagents with 1-click **Rescue** prompt copy), session/tree usage ribbon with quick currency switch, **auto-calibrated per-model cache warmth bar** (empirical vs. default TTL badge & loop-guard alerts with 1-click **Copy Pivot**), 4-mode layered profile switch, and **inline WAL Unified Diff preview + 1-click Undo**.
-- **Pro Mode** opens five deep telemetry tabs: **Waterfall** (disjoint LLM vs. Hyper vs. Standard spans), **Context** (dual-axis cached/uncached curve + **Context X-Ray** composition bar with first-edit token load and blanket-read count), **Usage** (`24H / 7D / 30D / 90D` incremental ledger across 8 currencies, manual **Sync FX**, plus **Local Burn Audit & TTL Cliffs** with 1-click **Export PNG** & **SVG** card download), **Engine** (AST/pack cache hits & granular MCP layer switches), and **WAL & Audit**.
+- **Simple Mode** keeps daily essentials front and center: context level, Turn P50, step vs. session cache hit rate, linked subagent tree strip (highlighting active redlines, `STALLED` subagents silent `>=90s`, `LOOP ×N` crash-looping subagents with 1-click **Rescue** prompt copy, and orchestrator→executor split-cache drop badges), session/tree usage ribbon with quick currency switch, **auto-calibrated per-model cache warmth bar** (empirical vs. default TTL badge & loop-guard alerts with 1-click **Copy Pivot**), 4-mode layered profile switch, and **inline WAL Unified Diff preview + 1-click Undo**.
+- **Pro Mode** opens five deep telemetry tabs: **Waterfall** (disjoint LLM vs. Hyper vs. Standard spans), **Context** (dual-axis cached/uncached curve + **Context X-Ray** composition bar + live **Split-Session & Model-Switch Cache** breakdown), **Usage** (`24H / 7D / 30D / 90D` incremental ledger across 8 currencies, manual **Sync FX**, plus **Local Burn Audit & TTL Cliffs** with severity verdict, **Split-Cache & Model-Switch** diagnostics, and 1-click **Anonymized Share Card** PNG/SVG export & inline preview), **Engine** (AST/pack cache hits & granular MCP layer switches), and **WAL & Audit**.
 
 <div align="center">
 <table>
@@ -246,7 +249,7 @@ Reproduce on your own repository:
 agy-hyper doctor                                # Tree-sitter, gix, daemon RTT & security self-check
 agy-hyper daemon start|stop|status              # Manage the shared local Rust daemon
 agy-hyper ui [--port 47821]                     # Launch AGY Hyper Deck standalone in browser
-agy-hyper audit [--days 14] [--sessions 80] [--png card.png] [--svg card.svg] [--theme dark|light] [--json]
+agy-hyper audit [--days 14] [--sessions 80] [--share [card.png]] [--share-png card.png] [--share-svg card.svg] [--png card.png] [--svg card.svg] [--theme dark|light] [--json]
 agy-hyper usage [--window 24h|7d|30d|90d] [--currency CNY] [--json]
 agy-hyper bench [--sessions 10] [--svg waterfall.svg] [--cache-ttl] [--json]
 agy-hyper statusline [--format compact|rich|json] [--title] [--no-color]

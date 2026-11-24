@@ -133,6 +133,76 @@
       .join('');
   }
 
+  function renderContextSplit(bench, tree) {
+    const box = $('ctx-split-block');
+    if (!box) return;
+    const ss = bench?.split_stats || null;
+    const tsc = tree?.split_cache || null;
+    const switches = ss?.model_switches || [];
+    const hasSwitches = (ss?.model_switch_count || 0) > 0 || switches.length > 0;
+    const hasHandoffs = (tsc?.subagent_handoffs || 0) > 0;
+    if (!hasSwitches && !hasHandoffs) {
+      box.classList.add('hidden');
+      return;
+    }
+    box.classList.remove('hidden');
+
+    const switchDropPct = Math.round((ss?.avg_switch_cache_drop || 0) * 100);
+    const treeDropPct = Math.round(tsc?.cache_drop_pct || 0);
+    const dropPct = Math.max(switchDropPct, treeDropPct);
+    const uncachedTok = Math.max(
+      Number(ss?.switch_uncached_input_tokens || 0),
+      Number(tsc?.uncached_penalty_tokens || 0)
+    );
+    const pills = [];
+    if (dropPct > 0) {
+      const cls = dropPct >= 35 ? 'err' : dropPct >= 15 ? 'warn' : 'ok';
+      pills.push(`<span class="status-pill ${cls}">${escapeHtml(t('context_pro.split_drop_pill', { pct: dropPct }))}</span>`);
+    }
+    if (uncachedTok > 0) {
+      pills.push(`<span class="mono-tag">${escapeHtml(t('context_pro.split_uncached_pill', { tokens: fmtTokens(uncachedTok) }))}</span>`);
+    }
+    $('ctx-split-pills').innerHTML = pills.join('');
+
+    const rows = [];
+    if (hasHandoffs) {
+      const orch = Math.round((tsc.orchestrator_cache_hit_ratio || 0) * 100);
+      const exec = Math.round((tsc.executor_cache_hit_ratio || 0) * 100);
+      const cold = Math.round((tsc.executor_cold_start_hit_ratio || 0) * 100);
+      const label = t('context_pro.split_orch_exec_row', { count: tsc.subagent_handoffs });
+      const val = t('context_pro.split_orch_exec_val', { orch, exec, cold });
+      rows.push(`
+        <div class="split-trans-row">
+          <span class="split-trans-main">
+            <span class="split-trans-kind subagent">${escapeHtml(t('usage.split_kind_subagent'))}</span>
+            <span class="split-trans-route" title="${escapeHtml(label)}">${escapeHtml(label)}</span>
+          </span>
+          <span class="split-trans-meta">${escapeHtml(val)}</span>
+        </div>`);
+    }
+    for (const sw of [...switches].slice(-3).reverse()) {
+      const pre = Math.round((sw.prev_cache_hit_ratio || 0) * 100);
+      const post = Math.round((sw.post_cache_hit_ratio || 0) * 100);
+      const swDrop = Math.round((sw.cache_drop_ratio || 0) * 100);
+      const dCls = swDrop >= 35 ? 'err' : swDrop >= 15 ? 'warn' : 'ok';
+      const route = t('context_pro.split_step_label', {
+        step: sw.step_index ?? 0,
+        from: sw.from_model || '?',
+        to: sw.to_model || '?',
+      });
+      const uncached = fmtTokens(sw.uncached_input_tokens || 0);
+      rows.push(`
+        <div class="split-trans-row">
+          <span class="split-trans-main">
+            <span class="split-trans-kind switch">${escapeHtml(t('usage.split_kind_switch'))}</span>
+            <span class="split-trans-route" title="${escapeHtml(route)}">${escapeHtml(route)}</span>
+          </span>
+          <span class="split-trans-meta">${pre}%→${post}% <strong class="${dCls}">(-${swDrop}pp)</strong> · ${escapeHtml(uncached)}</span>
+        </div>`);
+    }
+    $('ctx-split-list').innerHTML = rows.join('');
+  }
+
   function renderToolsBars(eng) {
     const container = $('tools-bars');
     const entries = Object.entries(eng?.tool_counts || {})
@@ -349,6 +419,25 @@
       redPill.classList.remove('hidden');
     } else {
       redPill.classList.add('hidden');
+    }
+
+    const splitPill = $('subagent-split-pill');
+    if (splitPill) {
+      const tsc = tree.split_cache;
+      const dropPct = Math.round(tsc?.cache_drop_pct || 0);
+      if (tsc && (tsc.subagent_handoffs > 0 || tsc.model_switch_count > 0) && dropPct >= 10) {
+        splitPill.className = `status-pill ${dropPct >= 35 ? 'err' : 'warn'}`;
+        splitPill.textContent = t('subagents.split_drop_badge', { pct: dropPct });
+        splitPill.title = t('subagents.split_drop_tip', {
+          orch: Math.round((tsc.orchestrator_cache_hit_ratio || 0) * 100),
+          exec: Math.round((tsc.executor_cache_hit_ratio || 0) * 100),
+          cold: Math.round((tsc.executor_cold_start_hit_ratio || 0) * 100),
+          penalty: fmtTokens(tsc.uncached_penalty_tokens || 0),
+        });
+        splitPill.classList.remove('hidden');
+      } else {
+        splitPill.classList.add('hidden');
+      }
     }
 
     $('btn-back-parent').classList.toggle('hidden', !tree.selected_is_subagent);
@@ -611,6 +700,21 @@
     }
     block.classList.remove('hidden');
 
+    const verdictEl = $('audit-verdict-pill');
+    if (verdictEl) {
+      const v = String(audit.verdict || '').toUpperCase();
+      if (v === 'BLEEDING' || v === 'WATCH' || v === 'HEALTHY') {
+        const cls = v === 'BLEEDING' ? 'err' : v === 'WATCH' ? 'warn' : 'ok';
+        const lblKey = v === 'BLEEDING' ? 'usage.verdict_bleeding' : v === 'WATCH' ? 'usage.verdict_watch' : 'usage.verdict_healthy';
+        verdictEl.className = `status-pill ${cls}`;
+        verdictEl.textContent = t(lblKey);
+        verdictEl.title = audit.verdict_reason || '';
+        verdictEl.classList.remove('hidden');
+      } else {
+        verdictEl.classList.add('hidden');
+      }
+    }
+
     const pills = [];
     if (audit.first_edit_p50_tokens > 0) {
       pills.push(
@@ -629,6 +733,16 @@
         )}</span>`
       );
     }
+    if (audit.top_quota_drain?.model_family) {
+      pills.push(
+        `<span class="mono-tag">${escapeHtml(
+          t('usage.audit_top_drain', {
+            model: audit.top_quota_drain.model_family,
+            pct: Math.round(audit.top_quota_drain.share_pct || 0),
+          })
+        )}</span>`
+      );
+    }
     $('audit-kpi-pills').innerHTML = pills.join('');
 
     const cliffs = audit.model_ttl_cliffs || [];
@@ -640,6 +754,78 @@
         return `<span class="audit-ttl-chip ${cls}" title="n=${m.total_samples}">${escapeHtml(m.model_family)} · ${m.effective_ttl_secs}s (${tag})</span>`;
       })
       .join('');
+
+    const splitBadges = $('audit-split-badges');
+    const splitEmpty = $('audit-split-empty');
+    const splitBody = $('audit-split-body');
+    const splitKpis = $('audit-split-kpis');
+    const splitList = $('audit-split-list');
+    if (splitBadges && splitEmpty && splitBody && splitKpis && splitList) {
+      const sc = audit.split_cache || null;
+      const totalTransitions = Number(sc?.total_transitions || 0);
+      if (!sc || totalTransitions === 0) {
+        splitBadges.innerHTML = '';
+        splitEmpty.classList.remove('hidden');
+        splitBody.classList.add('hidden');
+        splitKpis.innerHTML = '';
+        splitList.innerHTML = '';
+      } else {
+        splitEmpty.classList.add('hidden');
+        splitBody.classList.remove('hidden');
+        const dropPct = Math.round(sc.headline_cache_drop_pct || 0);
+        const dropCls = dropPct >= 35 ? 'err' : dropPct >= 15 ? 'warn' : 'ok';
+        const ccy = audit.currency || 'USD';
+        splitBadges.innerHTML = [
+          `<span class="status-pill ${dropCls}">${escapeHtml(t('usage.split_drop_badge', { pct: dropPct }))}</span>`,
+          `<span class="mono-tag">${escapeHtml(t('usage.split_count_badge', { count: totalTransitions }))}</span>`,
+        ].join('');
+
+        const penTok = fmtTokens(sc.uncached_penalty_tokens || 0);
+        const penCost = (sc.est_uncached_penalty || 0) > 0 ? ` · ${fmtCurrency(sc.est_uncached_penalty, ccy)}` : '';
+        const hasExec = (sc.executor_turns || 0) > 0;
+        const thirdLabel = hasExec ? t('usage.split_kpi_orch_exec') : t('usage.split_kpi_switches');
+        const thirdVal = hasExec
+          ? `${Math.round((sc.orchestrator_cache_hit_ratio || 0) * 100)}% / ${Math.round((sc.executor_cache_hit_ratio || 0) * 100)}%`
+          : `${sc.model_switch_count || 0}×`;
+        splitKpis.innerHTML = `
+          <div class="split-kpi-cell">
+            <span>${escapeHtml(t('usage.split_kpi_drop'))}</span>
+            <strong class="${dropCls}">-${dropPct}%</strong>
+          </div>
+          <div class="split-kpi-cell">
+            <span>${escapeHtml(t('usage.split_kpi_penalty'))}</span>
+            <strong title="${escapeHtml(penTok + penCost)}">${escapeHtml(penTok + penCost)}</strong>
+          </div>
+          <div class="split-kpi-cell">
+            <span>${escapeHtml(thirdLabel)}</span>
+            <strong>${escapeHtml(thirdVal)}</strong>
+          </div>`;
+
+        const transitions = (sc.top_transitions || []).slice(0, 3);
+        splitList.innerHTML = transitions
+          .map((tr) => {
+            const isSub = tr.kind === 'subagent_handoff';
+            const kindLbl = isSub ? t('usage.split_kind_subagent') : t('usage.split_kind_switch');
+            const kindCls = isSub ? 'subagent' : 'switch';
+            const cnt = tr.transitions > 1 ? ` ×${tr.transitions}` : '';
+            const route = `${tr.from_model || '?'} → ${tr.to_model || '?'}${cnt}`;
+            const pre = Math.round((tr.pre_cache_hit_ratio || 0) * 100);
+            const post = Math.round((tr.post_cache_hit_ratio || 0) * 100);
+            const trDrop = Math.round(tr.cache_drop_pct || 0);
+            const trDropCls = trDrop >= 35 ? 'err' : trDrop >= 15 ? 'warn' : 'ok';
+            const uncached = fmtTokens(tr.uncached_input_tokens || 0);
+            return `
+              <div class="split-trans-row">
+                <span class="split-trans-main">
+                  <span class="split-trans-kind ${kindCls}">${escapeHtml(kindLbl)}</span>
+                  <span class="split-trans-route" title="${escapeHtml(route)}">${escapeHtml(route)}</span>
+                </span>
+                <span class="split-trans-meta">${pre}%→${post}% <strong class="${trDropCls}">(-${trDrop}pp)</strong> · ${escapeHtml(uncached)}</span>
+              </div>`;
+          })
+          .join('');
+      }
+    }
 
     const findings = audit.findings || [];
     $('audit-findings-list').innerHTML = findings
@@ -662,7 +848,7 @@
     const tree = snap.session_tree || null;
     const activeConvId = pulse?.conversation_id || bench?.conversation_id || '';
 
-    $('version-pill').textContent = `v${eng.version || snap.version || '0.4.0'}`;
+    $('version-pill').textContent = `v${eng.version || snap.version || '0.4.4'}`;
     const isUds = snap.transport === 'uds-daemon';
     $('daemon-dot').classList.toggle('warn', !isUds);
     $('daemon-label').textContent = isUds
@@ -828,6 +1014,7 @@
 
     renderWarmthMeter(snap);
     renderContextXray(bench);
+    renderContextSplit(bench, tree);
     try {
       if (state.mode === 'simple') renderHeroChart(snap, state.heroTab);
       if (state.mode === 'pro' && state.proTab === 'waterfall') renderWaterfallChart(bench);
