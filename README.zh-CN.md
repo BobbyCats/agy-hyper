@@ -107,7 +107,7 @@ agy-hyper ui                      # 在浏览器独立打开 AGY Hyper Deck (127
 
 ## 本机烧钱诊断、切模型/子代理缓存分析与脱敏分享卡（`agy-hyper audit`）
 
-运行 `agy-hyper audit --days 14 --png audit-card.png`（或 `--svg audit-card.svg`），100% 本地离线扫描你自己的 Antigravity 历史日志（零云端上传、零外部浏览器/ImageMagick 依赖）。**v0.5.0** 支持精准定位各模型真实缓存掉崖时间、未命中输入成本、校准后的**首改前净探索膨胀（`pre_edit_delta_p50_tokens`）**（将真实地毯式盲读与首轮全局 Skill/MCP 固定底座剥离，拒绝误报）、**上游流中断 / `EOF` 重试空转损耗**，以及 **切模型 / 主控→子代理缓存分裂损耗**（统计跨模型切换与父子代理交接时的缓存命中骤降与未命中 Token 惩罚）。
+运行 `agy-hyper audit --days 14 --png audit-card.png`（或 `--svg audit-card.svg`），100% 本地离线扫描你自己的 Antigravity 历史日志（零云端上传、零外部浏览器/ImageMagick 依赖）。**v0.5.1** 支持精准定位各模型真实缓存掉崖时间、未命中输入成本、校准后的**首改前净探索膨胀（`pre_edit_delta_p50_tokens`）**（将真实地毯式盲读与首轮全局 Skill/MCP 固定底座剥离，拒绝误报）、**上游流中断 / `EOF` 重试空转损耗**，以及 **切模型 / 主控→子代理缓存分裂损耗**（统计跨模型切换与父子代理交接时的缓存命中骤降与未命中 Token 惩罚）。
 
 如需对外分享体检结果又不暴露隐私，运行 `agy-hyper audit --share`（默认生成 `1920x1080` 2x `agy-hyper-share-card.png`，也可指定 `--share-svg badge.svg` / `--share-png badge.png`）：输出带明确健康评级（`BLEEDING` / `WATCH` / `HEALTHY`）与核心指标（`Cache Hit %`、`First-Edit Blind Read P50`、`Split/Switch Cache Drop`、`Top Quota Drain`）的脱敏卡片，并在代码层**强制零泄露脱敏**（剥离全部本机路径、用户名、仓库/工作区名、会话 UUID 与提示词片段）。
 
@@ -125,8 +125,8 @@ agy-hyper ui                      # 在浏览器独立打开 AGY Hyper Deck (127
 
 通过官方 `SIDECAR_UI_ENTRYPOINT_AUX_PANE` 协议原生嵌入右侧边栏，100% 本地离线内置 **Apache ECharts 6** 与 **i18next**（`English / 简体中文 / 日本語`，零外网 CDN），自动同步宿主明暗主题。
 
-- **分层零侵入架构与无感更新雷达（`v0.5.0`）**：支持先用 **纯观测（Observe）** 模式（只开侧边栏驾驶舱、烧钱诊断与被动 WAL 快照，完全不碰原生工具与 Diff 卡片），或切到 **安全稳健（Safe）**（开启打包读与同步校验，同时保留原生 `edit_file` 行内 Diff），也可以一键解锁 **均衡 / 狂暴** 全量 Rust MCP 加速，并在 **引擎** 页独立开关读/写/校验与更新雷达。新版本发布时，通过 GitHub `Location` 重定向头低频检查（零 REST API 60次/小时限流消耗、零 Hook 网络阻塞），在顶部点亮 `↑ vX.Y.Z` 徽章，支持一键 `SHA256SUMS` 校验升级并无缝重载侧边栏。
-- **简洁模式**面向日常使用：展示上下文水位、单轮 P50（含 **推理 / 本地工具 / 流重试·EOF 三段式耗时柱**）、本步与会话累计缓存命中、**子代理树状态条**（高亮运行中红线、静默 `>=90s` 的 `STALLED` 卡死、连续报错的 `连崩 ×N` 子代理并支持**一键救援**复制恢复指令，以及主控→子代理切换缓存掉率徽章）、**本会话/整树等价估值缎带**（支持一键切货币）、**分模型自适应缓存保鲜条**（实测/默认 TTL 徽章与连续失败熔断预警 + **一键复制止损指令**）、四档分层模式切换，以及 **WAL 行级 Unified Diff 内联审阅 + 一键撤回**。
+- **分层零侵入架构与无感更新雷达（`v0.5.1`）**：支持先用 **纯观测（Observe）** 模式（只开侧边栏驾驶舱、烧钱诊断与被动 WAL 快照，完全不碰原生工具与 Diff 卡片），或切到 **安全稳健（Safe）**（开启打包读与同步校验，同时保留原生 `edit_file` 行内 Diff），也可以一键解锁 **均衡 / 狂暴** 全量 Rust MCP 加速，并在 **引擎** 页独立开关读/写/校验与更新雷达。新版本发布时，通过 GitHub `Location` 重定向头低频检查（零 REST API 60次/小时限流消耗、零 Hook 网络阻塞），在顶部点亮 `↑ vX.Y.Z` 徽章，支持一键 `SHA256SUMS` 校验升级并无缝重载侧边栏。
+- **简洁模式**面向日常使用：展示上下文水位、单轮 P50（含 **推理 / 本地工具 / 流重试·EOF 三段式耗时柱**）、本步与会话累计缓存命中、**子代理与 `run_workflow` 机群树状态条**（自动收拢同步与后台完成的 `wf:*` 编排子节点而不刷屏顶层会话列表、拆分**主控 vs 机群**等价估值、点亮**共享工作区并发写冲突**告警徽章、高亮静默 `>=90s` 的 `STALLED` 卡死与 `连崩 ×N` 子代理并支持**一键救援**，以及主控→子代理切换缓存掉率徽章）、**本会话/整树等价估值缎带**（支持一键切货币）、**分模型自适应缓存保鲜条**（实测/默认 TTL 徽章与连续失败熔断预警 + **一键复制止损指令**）、四档分层模式切换，以及 **WAL 行级 Unified Diff 内联审阅 + 一键撤回**。
 - **极客模式**展开五大深度视图：**耗时瀑布**（`模型推理` / `本地工具` / `流重试·EOF` 三段拆解，一眼看清慢在模型、工具还是网络断流重试）、**上下文轨迹**（双轴堆叠面积曲线 + **上下文 X-Ray 透视条**与首改净增徽章 + 当前会话**切模型与子代理缓存损耗**明细）、**用量账本**（`24H / 7D / 30D / 90D` 增量统计 + 8 种货币 + 手动 **同步汇率** + **本机烧钱诊断与 TTL 断崖**，内置校准评级、流断连重试胶囊、**切模型/子代理缓存诊断**与一键**脱敏分享体检卡** PNG/SVG 导出及内联预览）、**引擎与缓存**（AST/打包/Singleflight 预热命中 + 手动检查更新 + 细粒度 MCP 开关）、**回滚与审计**。
 
 <div align="center">
@@ -181,9 +181,9 @@ agy-hyper ui                      # 在浏览器独立打开 AGY Hyper Deck (127
 <br/>
 
 1. **单回合语义与符号体切片打包（`hyper_pack`）**：一次并行扫描完成内置 `ripgrep`、7 种 Tree-sitter 语法解析（Rust / TypeScript / TSX / JavaScript / Python / Go / JSON）、1-hop 导入图与 `gix` 热点排序。传入 `symbols=[...]`（或聚焦 `<=2` 个文件）时自动内联完整 AST 符号函数体切片（单符号最高约 2.4KB，附精确 `L<start>-<end>` 行号标注），让 Agent 下一轮直接 `hyper_edit` 而无需追加 `read_file`。输出严格压在 `<= 8.5KB` 内，配合归一化查询缓存键与 `(mtime_ns, byte_len, HEAD)` 细粒度保鲜校验，守护进程热命中仅约 `14ms`。
-2. **三阶段原子 WAL（`hyper_edit`）**：排他 `flock` 加 BLAKE3 ETag 乐观锁，先 `fsync` 写入修改前预像，再经同目录临时文件原子 `rename`。遇到磁盘满（`ENOSPC`）直接清理临时文件并中止，绝不破坏源文件。改完立刻做 `<1ms` 语法校验；精准收敛的 `PostToolUse`（仅匹配 `edit_file|write_file`）将原生改文件预像自动入账支持一键撤回，且只读 `run_command` 绝不空刷工作区版本号。
+2. **三阶段原子 WAL 与共享工作区并发写看门狗（`hyper_edit`）**：排他 `flock` 加 BLAKE3 ETag 乐观锁，先 `fsync` 写入修改前预像，再经同目录临时文件原子 `rename`。遇到磁盘满（`ENOSPC`）直接清理临时文件并中止，绝不破坏源文件。改完立刻做 `<1ms` 语法校验；同时在 `hyper_edit` 与精准收敛的 `PostToolUse`（仅匹配 `edit_file|write_file`）中记录会话 `writer_id`（只读 `run_command` 绝不空刷工作区版本号），一旦检测到多个并行 `/swarm` 或 `run_workflow` 子代理在共享工作区并发覆写同一文件，立即触发 `PreInvocation` `[AGY Hyper Write-Race Guard]` 护栏并点亮驾驶舱冲突徽章。
 3. **编译期零信任沙箱、Singleflight 合并预热与防卡死看门狗**：只读 `gix` 在编译阶段去掉写引用与网络代码，全程零 `git` 子进程。`realpath` 牢笼拦截 `../`、软链接逃逸、`$HOME`/`/` 根目录误扫及悬空目录软链，密钥盾默认封禁 `.env` / `*.pem` / `*.key` / `id_rsa`（放行 `.env.example`）。`hyper_check` 固定 `shell: false`，Tier-2 `250ms` 后台预热引入无锁 `Condvar` Singleflight 合并（当前 revision 预热运行中收到 `hyper_check` 直接复用同一轮构建，彻底消除双份 `cargo check` 抢锁），并为测试与脚本提供静默/崩溃双看门狗及进程组整树清理。
-4. **无锁遥测、三段式 `EOF` 瀑布、冲突体检医生与零阻塞更新雷达**：驾驶舱轮询（内置 `brain/` 目录指纹 4 秒热缓存）、CLI `StatuslinePulse`、回滚及增量账本（`usage_ledger.json` v2，180 天滚动保留，8 种货币换算）均在全局锁外执行。日志扫描将上游流中断/`EOF` 重试退避（支持最长 `600s` 重试风暴归因）从模型推理与本地工具耗时中精准剥离，校准首改前净增膨胀，并驱动升级版 `agy-hyper doctor [--net]`（扫描其他插件 Hook/规则冲突、统计全局 `SKILL.md`/MCP 基线负载、按需双栈探测 IPv4 vs 默认栈 TLS/TTFB 以揪出 IPv6 黑洞）。`SessionStart` 仅以 `<0.1ms` 本地读取 `update_state.json`，绝不在 Hook 内同步联网。
+4. **无锁遥测、机群/工作流归树、三段式 `EOF` 瀑布与零阻塞更新雷达**：驾驶舱轮询（内置 `brain/` 目录指纹 4 秒热缓存，自动将同步与异步 `run_workflow` 编排子节点挂载回父会话树并拆分主控/机群成本）、CLI `StatuslinePulse`、回滚及增量账本（`usage_ledger.json` v2，180 天滚动保留，8 种货币换算）均在全局锁外执行。日志扫描将上游流中断/`EOF` 重试退避（支持最长 `600s` 重试风暴归因）从模型推理与本地工具耗时中精准剥离，校准首改前净增膨胀，并驱动升级版 `agy-hyper doctor [--net]`（扫描其他插件 Hook/规则冲突、识别 `.git` 仓库边界下的真实活跃 `SKILL.md` 负载与同源软链别名、按需双栈探测 IPv4 vs 默认栈 TLS/TTFB 以揪出 IPv6 黑洞）。`SessionStart` 仅以 `<0.1ms` 本地读取 `update_state.json`，绝不在 Hook 内同步联网。
 
 ---
 
@@ -222,7 +222,7 @@ Apple Silicon 实机 Release（LTO 优化）通过 `./bench/run-bench.sh` 实测
 | `hyper_search` + `gix` 只读 Git（单次调用） | **20 ms** | 对比基线 `git status && git log && grep -rn` 耗时 **43 ms**（**2.2x 提速**） |
 | `hyper_pack`（冷启单遍 ripgrep + AST + 切片 + `gix` + 1-hop） | **58 ms** | 零外部 `rg` 与 `git` 二进制依赖 |
 | `agy-hyper statusline`（守护进程热脉冲 + CLI stdin） | **4.2 ms** | 含进程冷启、无锁 UDS 通信与渲染（任何异常保证 `exit 0`） |
-| Rust 单元与安全混沌测试全集（`82/82`） | **2.1 s** | 覆盖磁盘满 staging、悬空软链、4 语言 1-hop、AST 符号体切片、WAL 回滚、Singleflight 合并预热、静默/崩溃看门狗、多生态语义诊断分类、流 `EOF` 瀑布与首改净增校准、子代理连崩看门狗与 1-shot 桌面告警、实测 TTL 迁移、上下文 X-Ray、循环熔断、CLI 状态栏、纯 Rust 2x PNG/脱敏战报直出、无感更新雷达与 MCP `PLUGIN_ROOT`/`$HOME` 防呆 |
+| Rust 单元与安全混沌测试全集（`84/84`） | **2.1 s** | 覆盖磁盘满 staging、悬空软链、4 语言 1-hop、AST 符号体切片、WAL 回滚与共享工作区并发写冲突检测、Singleflight 合并预热、静默/崩溃看门狗、多生态语义诊断分类、流 `EOF` 瀑布与首改净增校准、`run_workflow` 机群树挂载、子代理连崩看门狗与 1-shot 桌面告警、实测 TTL 迁移、上下文 X-Ray、循环熔断、CLI 状态栏、纯 Rust 2x PNG/脱敏战报直出、无感更新雷达与 MCP `PLUGIN_ROOT`/`$HOME` 防呆 |
 
 ### 端到端受控配对 A/B 实测（`agy` CLI）
 

@@ -61,7 +61,18 @@ pub struct WalManifest {
     pub rolled_back: bool,
     #[serde(default = "default_tx_source")]
     pub source: String,
+    #[serde(default)]
+    pub writer_id: Option<String>,
     pub files: Vec<WalFileRecord>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WriteCollisionAlert {
+    pub workspace_root: String,
+    pub kind: String, // "same_file_race" | "shared_workspace_writers"
+    pub rel_paths: Vec<String>,
+    pub writer_count: usize,
+    pub latest_ts_ms: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -405,6 +416,94 @@ pub fn inspect_transaction_diff(
     })
 }
 
+pub fn detect_write_collisions(
+    txs: &[WalManifest],
+    now_ms_val: u64,
+    window_ms: u64,
+) -> Vec<WriteCollisionAlert> {
+    use std::collections::{BTreeMap, BTreeSet};
+
+    #[derive(Default)]
+    struct WsActivity {
+        latest_ts_ms: u64,
+        recent_writers: BTreeSet<String>,
+        recent_files: BTreeSet<String>,
+        file_writers: BTreeMap<String, BTreeSet<String>>,
+    }
+
+    let shared_ws_window = window_ms.min(180_000);
+    let mut by_ws: BTreeMap<String, WsActivity> = BTreeMap::new();
+
+    for m in txs {
+        if m.rolled_back || m.workspace_root.trim().is_empty() {
+            continue;
+        }
+        let Some(writer) = m
+            .writer_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        else {
+            continue;
+        };
+        let age_ms = now_ms_val.saturating_sub(m.timestamp_ms);
+        if age_ms > window_ms {
+            continue;
+        }
+        let entry = by_ws.entry(m.workspace_root.clone()).or_default();
+        entry.latest_ts_ms = entry.latest_ts_ms.max(m.timestamp_ms);
+        for f in &m.files {
+            if f.rel_path.trim().is_empty() {
+                continue;
+            }
+            entry
+                .file_writers
+                .entry(f.rel_path.clone())
+                .or_default()
+                .insert(writer.to_string());
+            if age_ms <= shared_ws_window {
+                entry.recent_files.insert(f.rel_path.clone());
+            }
+        }
+        if age_ms <= shared_ws_window {
+            entry.recent_writers.insert(writer.to_string());
+        }
+    }
+
+    let mut alerts = Vec::new();
+    for (ws, act) in by_ws {
+        let mut raced_files = Vec::new();
+        let mut race_writers = BTreeSet::new();
+        for (rel, writers) in &act.file_writers {
+            if writers.len() >= 2 {
+                raced_files.push(rel.clone());
+                for w in writers {
+                    race_writers.insert(w.clone());
+                }
+            }
+        }
+        if !raced_files.is_empty() {
+            alerts.push(WriteCollisionAlert {
+                workspace_root: ws,
+                kind: "same_file_race".into(),
+                rel_paths: raced_files.into_iter().take(6).collect(),
+                writer_count: race_writers.len(),
+                latest_ts_ms: act.latest_ts_ms,
+            });
+        } else if act.recent_writers.len() >= 2 {
+            alerts.push(WriteCollisionAlert {
+                workspace_root: ws,
+                kind: "shared_workspace_writers".into(),
+                rel_paths: act.recent_files.into_iter().take(6).collect(),
+                writer_count: act.recent_writers.len(),
+                latest_ts_ms: act.latest_ts_ms,
+            });
+        }
+    }
+    alerts.sort_by_key(|b| std::cmp::Reverse(b.latest_ts_ms));
+    alerts
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -432,6 +531,7 @@ mod tests {
             workspace_root: ws.path().display().to_string(),
             rolled_back: false,
             source: "hyper_edit".into(),
+            writer_id: None,
             files: vec![WalFileRecord {
                 abs_path: live.display().to_string(),
                 rel_path: "app.rs".into(),
@@ -457,5 +557,55 @@ mod tests {
         assert_eq!(diff.files[0].lines_removed, 1);
         assert!(diff.files[0].unified_diff.contains("-    println!(\"v1\");"));
         assert!(diff.files[0].unified_diff.contains("+    println!(\"v2\");"));
+    }
+
+    #[test]
+    fn detects_same_file_races_and_shared_workspace_writers() {
+        let mk_tx = |id: &str, ts: u64, writer: Option<&str>, rel: &str, rolled_back: bool| WalManifest {
+            tx_id: id.into(),
+            timestamp_ms: ts,
+            workspace_root: "/repo/demo".into(),
+            rolled_back,
+            source: "edit_file".into(),
+            writer_id: writer.map(String::from),
+            files: vec![WalFileRecord {
+                abs_path: format!("/repo/demo/{}", rel),
+                rel_path: rel.into(),
+                existed_before: true,
+                etag_before: Some("a".into()),
+                etag_after: "b".into(),
+                backup_blob: None,
+                post_blob: None,
+                lines_added: 1,
+                lines_removed: 0,
+                mode_before: None,
+            }],
+        };
+
+        let clean = vec![
+            mk_tx("tx1", 100_000, Some("conv-a"), "src/lib.rs", false),
+            mk_tx("tx2", 110_000, Some("conv-a"), "src/main.rs", false),
+        ];
+        assert!(detect_write_collisions(&clean, 120_000, 300_000).is_empty());
+
+        let shared = vec![
+            mk_tx("tx1", 100_000, Some("conv-a"), "src/lib.rs", false),
+            mk_tx("tx2", 120_000, Some("conv-b"), "src/main.rs", false),
+        ];
+        let alerts_shared = detect_write_collisions(&shared, 130_000, 300_000);
+        assert_eq!(alerts_shared.len(), 1);
+        assert_eq!(alerts_shared[0].kind, "shared_workspace_writers");
+        assert_eq!(alerts_shared[0].writer_count, 2);
+
+        let race = vec![
+            mk_tx("tx1", 100_000, Some("conv-a"), "src/state.rs", false),
+            mk_tx("tx2", 115_000, Some("conv-b"), "src/state.rs", false),
+            mk_tx("tx3", 118_000, Some("conv-c"), "src/state.rs", true),
+        ];
+        let alerts_race = detect_write_collisions(&race, 125_000, 300_000);
+        assert_eq!(alerts_race.len(), 1);
+        assert_eq!(alerts_race[0].kind, "same_file_race");
+        assert_eq!(alerts_race[0].writer_count, 2);
+        assert_eq!(alerts_race[0].rel_paths, vec!["src/state.rs"]);
     }
 }

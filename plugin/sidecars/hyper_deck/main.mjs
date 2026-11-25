@@ -228,7 +228,7 @@ function readInstalledVersion() {
   } catch {
     // fallback to built-in version
   }
-  return '0.5.0';
+  return '0.5.1';
 }
 
 function parseSemverStrict(raw) {

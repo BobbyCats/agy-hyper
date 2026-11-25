@@ -1240,11 +1240,17 @@ pub fn build_cockpit_snapshot(
             None
         };
 
+        let workflow_node_count = subagents
+            .iter()
+            .filter(|s| s.agent_name.starts_with("wf:"))
+            .count();
+
         SessionTreeSummary {
             root_conversation_id: root_id,
             selected_is_subagent,
             parent_conversation_id,
             subagent_count: subagents.len(),
+            workflow_node_count,
             active_subagents,
             redline_subagents,
             stalled_subagents,
@@ -1254,11 +1260,16 @@ pub fn build_cockpit_snapshot(
             combined_hyper_calls: combined_hyper,
             combined_total_tools: combined_tools,
             combined_cache_hit_ratio,
+            currency: config.display_currency.clone(),
+            root_cost: 0.0,
+            fleet_worker_cost: 0.0,
+            tree_cost: 0.0,
             split_cache,
             subagents,
         }
     });
 
+    let mut session_tree = session_tree;
     let session_usage = benchmark.as_ref().map(|b| {
         let sub_count = session_tree
             .as_ref()
@@ -1271,6 +1282,12 @@ pub fn build_cockpit_snapshot(
         };
         build_session_usage(&config, &b.model_usage, tree_models, sub_count)
     });
+    if let (Some(tree), Some(usage)) = (&mut session_tree, &session_usage) {
+        tree.currency = usage.currency.clone();
+        tree.root_cost = usage.session_cost;
+        tree.tree_cost = usage.tree_cost;
+        tree.fleet_worker_cost = (usage.tree_cost - usage.session_cost).max(0.0);
+    }
 
     let recent_sessions = all_sessions
         .into_iter()
@@ -1278,6 +1295,8 @@ pub fn build_cockpit_snapshot(
         .take(8)
         .collect();
     let transactions = list_transactions(&HyperConfig::wal_dir(), 25);
+    let write_collisions =
+        hyper_core::wal::detect_write_collisions(&transactions, now_ms(), 600_000);
     let update_state = Some(load_update_state(&engine.version));
 
     CockpitSnapshot {
@@ -1290,6 +1309,7 @@ pub fn build_cockpit_snapshot(
         session_usage,
         model_ttl_estimates,
         transactions,
+        write_collisions,
         recent_events,
         update_state,
     }

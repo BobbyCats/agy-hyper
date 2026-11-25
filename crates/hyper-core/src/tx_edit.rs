@@ -11,11 +11,11 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-pub use crate::native_capture::record_native_post_edit;
+pub use crate::native_capture::{record_native_post_edit, record_native_post_edit_with_writer};
 pub use crate::wal::{
-    blake3_etag, default_wal_root, file_etag, inspect_transaction_diff, list_transactions,
-    rollback_transaction, RollbackResult, TxDiffPayload, TxFileDiff, WalFileRecord as WalRecord,
-    WalManifest as TxWalManifest,
+    blake3_etag, default_wal_root, detect_write_collisions, file_etag, inspect_transaction_diff,
+    list_transactions, rollback_transaction, RollbackResult, TxDiffPayload, TxFileDiff,
+    WalFileRecord as WalRecord, WalManifest as TxWalManifest, WriteCollisionAlert,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -119,6 +119,16 @@ pub fn apply_transactional_edits(
     wal_root: &Path,
     max_wal_entries: usize,
 ) -> Result<TxCommitResult> {
+    apply_transactional_edits_with_writer(jail, ops, wal_root, max_wal_entries, None)
+}
+
+pub fn apply_transactional_edits_with_writer(
+    jail: &WorkspaceJail,
+    ops: &[FileEditOp],
+    wal_root: &Path,
+    max_wal_entries: usize,
+    writer_id: Option<&str>,
+) -> Result<TxCommitResult> {
     if ops.is_empty() {
         return Err(anyhow!("no edits provided"));
     }
@@ -126,7 +136,7 @@ pub fn apply_transactional_edits(
         return Err(anyhow!("batch too large (max 64 ops per transaction)"));
     }
     with_wal_lock(wal_root, || {
-        apply_transactional_edits_locked(jail, ops, wal_root, max_wal_entries)
+        apply_transactional_edits_locked(jail, ops, wal_root, max_wal_entries, writer_id)
     })
 }
 
@@ -135,6 +145,7 @@ fn apply_transactional_edits_locked(
     ops: &[FileEditOp],
     wal_root: &Path,
     max_wal_entries: usize,
+    writer_id: Option<&str>,
 ) -> Result<TxCommitResult> {
     let mut ordered_paths: Vec<PathBuf> = Vec::new();
     let mut grouped: HashMap<PathBuf, Vec<&FileEditOp>> = HashMap::new();
@@ -342,6 +353,10 @@ fn apply_transactional_edits_locked(
         workspace_root: jail.root().display().to_string(),
         rolled_back: false,
         source: "hyper_edit".into(),
+        writer_id: writer_id
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(String::from),
         files: wal_records,
     };
     write_and_sync(

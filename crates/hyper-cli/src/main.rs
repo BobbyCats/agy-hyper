@@ -520,8 +520,13 @@ struct DoctorReport {
 struct ContextBaselineDiag {
     agents_skill_count: usize,
     gemini_skill_count: usize,
+    plugin_skill_count: usize,
+    active_skill_count: usize,
+    agents_active_in_cwd: bool,
+    #[cfg_attr(not(test), allow(dead_code))]
     total_skill_files: usize,
     duplicate_skill_folders: Vec<String>,
+    same_target_aliases: Vec<String>,
     mcp_server_count: usize,
 }
 
@@ -747,13 +752,119 @@ fn count_skills_in_root(root: &Path) -> (usize, BTreeSet<String>) {
     (count, folder_names)
 }
 
+fn has_git_boundary_before_home(cwd: &Path, home: Option<&Path>) -> bool {
+    let canon_cwd = fs::canonicalize(cwd).unwrap_or_else(|_| cwd.to_path_buf());
+    let canon_home = home.map(|h| fs::canonicalize(h).unwrap_or_else(|_| h.to_path_buf()));
+    let mut cur: Option<&Path> = Some(canon_cwd.as_path());
+    while let Some(dir) = cur {
+        if canon_home.as_deref() == Some(dir) {
+            return false;
+        }
+        if dir.join(".git").exists() {
+            return true;
+        }
+        cur = dir.parent();
+    }
+    false
+}
+
+fn count_plugin_skills_and_targets(
+    gemini_skills_root: &Path,
+    plugins_root: &Path,
+) -> (usize, Vec<String>) {
+    let mut target_to_labels: std::collections::BTreeMap<PathBuf, Vec<String>> =
+        std::collections::BTreeMap::new();
+    if let Ok(entries) = fs::read_dir(gemini_skills_root) {
+        for ent in entries.flatten() {
+            let p = ent.path();
+            let Some(name) = p.file_name().and_then(|s| s.to_str()) else {
+                continue;
+            };
+            if name.starts_with('.') {
+                continue;
+            }
+            let md = p.join("SKILL.md");
+            if let Ok(canon) = fs::canonicalize(&md) {
+                target_to_labels.entry(canon).or_default().push(name.to_string());
+            }
+        }
+    }
+
+    let mut plugin_skills = 0usize;
+    if let Ok(p_entries) = fs::read_dir(plugins_root) {
+        for pe in p_entries.flatten() {
+            let pdir = pe.path();
+            let Some(pname) = pdir.file_name().and_then(|s| s.to_str()) else {
+                continue;
+            };
+            if pname.starts_with('.') || pname.contains(".bak.") {
+                continue;
+            }
+            let sroot = pdir.join("skills");
+            let Ok(s_entries) = fs::read_dir(&sroot) else {
+                continue;
+            };
+            for se in s_entries.flatten() {
+                let sp = se.path();
+                let Some(sname) = sp.file_name().and_then(|s| s.to_str()) else {
+                    continue;
+                };
+                if sname.starts_with('.') {
+                    continue;
+                }
+                let md = sp.join("SKILL.md");
+                if fs::metadata(&md).is_ok_and(|m| m.is_file()) {
+                    plugin_skills += 1;
+                    if let Ok(canon) = fs::canonicalize(&md) {
+                        target_to_labels
+                            .entry(canon)
+                            .or_default()
+                            .push(format!("{}:{}", pname, sname));
+                    }
+                }
+            }
+        }
+    }
+
+    let mut aliases = Vec::new();
+    for mut labels in target_to_labels.into_values() {
+        if labels.len() > 1 {
+            labels.sort();
+            aliases.push(labels.join(" == "));
+        }
+    }
+    (plugin_skills, aliases)
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
 fn inspect_context_baseline(
     agents_skills_root: &Path,
     gemini_skills_root: &Path,
     mcp_config_path: &Path,
 ) -> ContextBaselineDiag {
+    inspect_context_baseline_with_scope(
+        agents_skills_root,
+        gemini_skills_root,
+        Path::new(""),
+        mcp_config_path,
+        true,
+    )
+}
+
+fn inspect_context_baseline_with_scope(
+    agents_skills_root: &Path,
+    gemini_skills_root: &Path,
+    plugins_root: &Path,
+    mcp_config_path: &Path,
+    agents_active_in_cwd: bool,
+) -> ContextBaselineDiag {
     let (agents_skill_count, agents_folders) = count_skills_in_root(agents_skills_root);
     let (gemini_skill_count, gemini_folders) = count_skills_in_root(gemini_skills_root);
+    let (plugin_skill_count, same_target_aliases) = if plugins_root.as_os_str().is_empty() {
+        count_plugin_skills_and_targets(gemini_skills_root, Path::new("/nonexistent"))
+    } else {
+        count_plugin_skills_and_targets(gemini_skills_root, plugins_root)
+    };
     let duplicate_skill_folders: Vec<String> = agents_folders
         .intersection(&gemini_folders)
         .cloned()
@@ -769,11 +880,22 @@ fn inspect_context_baseline(
         })
         .unwrap_or(0);
 
+    let extra_agents = if agents_active_in_cwd {
+        agents_skill_count.saturating_sub(duplicate_skill_folders.len())
+    } else {
+        0
+    };
+    let active_skill_count = gemini_skill_count + plugin_skill_count + extra_agents;
+
     ContextBaselineDiag {
         agents_skill_count,
         gemini_skill_count,
+        plugin_skill_count,
+        active_skill_count,
+        agents_active_in_cwd,
         total_skill_files: agents_skill_count + gemini_skill_count,
         duplicate_skill_folders,
+        same_target_aliases,
         mcp_server_count,
     }
 }
@@ -1026,56 +1148,57 @@ fn handle_doctor(with_net: bool, as_json: bool) -> Result<()> {
         });
     }
 
-    // 8. Context Baseline Load
-    let ctx_diag = inspect_context_baseline(
+    // 8. Context Baseline Load (distinguishes Antigravity active scope vs cross-CLI ~/.agents mirror)
+    let agents_active_in_cwd = !has_git_boundary_before_home(&cwd, home.as_deref());
+    let ctx_diag = inspect_context_baseline_with_scope(
         &home_base.join(".agents").join("skills"),
         &home_base.join(".gemini").join("config").join("skills"),
+        &plugins_root,
         &home_base
             .join(".gemini")
             .join("config")
             .join("mcp_config.json"),
+        agents_active_in_cwd,
     );
-    let dup_note = if ctx_diag.duplicate_skill_folders.is_empty() {
+    let alias_note = if ctx_diag.same_target_aliases.is_empty() {
         String::new()
     } else {
-        let preview: Vec<&str> = ctx_diag
-            .duplicate_skill_folders
-            .iter()
-            .take(4)
-            .map(String::as_str)
-            .collect();
-        let more = if ctx_diag.duplicate_skill_folders.len() > 4 {
-            format!(", +{} more", ctx_diag.duplicate_skill_folders.len() - 4)
-        } else {
-            String::new()
-        };
         format!(
-            " · {} duplicate skill folder(s) across roots ({}{})",
-            ctx_diag.duplicate_skill_folders.len(),
-            preview.join(", "),
-            more
+            " · duplicate skill target(s): {}",
+            ctx_diag.same_target_aliases.join(", ")
         )
     };
-    let trunc_note = if ctx_diag.total_skill_files > 120 {
-        " [>120 SKILL.md risks context-budget truncation]"
+    let mirror_note = if ctx_diag.agents_skill_count == 0 {
+        String::new()
+    } else if ctx_diag.agents_active_in_cwd {
+        format!(
+            " + {} ~/.agents (no .git boundary before $HOME — {} shared mirror(s))",
+            ctx_diag.agents_skill_count,
+            ctx_diag.duplicate_skill_folders.len()
+        )
+    } else {
+        format!(
+            " · ~/.agents cross-CLI mirror: {} (inactive inside git repo)",
+            ctx_diag.agents_skill_count
+        )
+    };
+    let trunc_note = if ctx_diag.active_skill_count > 150 {
+        " [>150 active skills risks context-budget truncation]"
     } else {
         ""
     };
+    let ctx_warn = ctx_diag.active_skill_count > 150 || !ctx_diag.same_target_aliases.is_empty();
     checks.push(DoctorCheckItem {
         id: "context_baseline".into(),
-        status: if ctx_diag.total_skill_files > 120 {
-            "warn"
-        } else {
-            "ok"
-        }
-        .into(),
+        status: if ctx_warn { "warn" } else { "ok" }.into(),
         label: "Context Baseline".into(),
         detail: format!(
-            "{} SKILL.md ({} ~/.agents + {} ~/.gemini/config){} · {} MCP server(s){}",
-            ctx_diag.total_skill_files,
-            ctx_diag.agents_skill_count,
+            "{} active SKILL.md ({} global + {} plugin){}{} · {} MCP server(s){}",
+            ctx_diag.active_skill_count,
             ctx_diag.gemini_skill_count,
-            dup_note,
+            ctx_diag.plugin_skill_count,
+            mirror_note,
+            alias_note,
             ctx_diag.mcp_server_count,
             trunc_note
         ),

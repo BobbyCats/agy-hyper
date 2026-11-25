@@ -7,7 +7,7 @@ description: Install, verify, configure, inspect usage/telemetry, rollback WAL f
 
 Use this guide when a user asks you to install, upgrade, verify, configure, troubleshoot, or uninstall **AGY Hyper** (`BobbyCats/agy-hyper`).
 
-> **Architecture & Safety Guarantees (`v0.5.0`)**:
+> **Architecture & Safety Guarantees (`v0.5.1`)**:
 > - Uses **100% official Antigravity plugin protocols** (MCP, Hooks, Rules, `SIDECAR_UI_ENTRYPOINT_AUX_PANE`). Does **not** inject into Electron DOM, open CDP debugging ports, or modify `~/.gemini/config/config.json`.
 > - Single ~10MB static Rust binary (`agy-hyper`); zero Rust/Python/`ripgrep`/`git` runtime dependencies required for release installs.
 > - Zero telemetry uploads and zero synchronous hook network calls. `Release Update Radar` uses rate-limit-free GitHub `Location` redirects (`enable_update_check`, or disable with `AGY_HYPER_NO_UPDATE_CHECK=1`) and **never** auto-installs binaries without explicit `agy-hyper update` / **Update Now** (`SHA256SUMS` verified).
@@ -60,7 +60,7 @@ agy-hyper doctor --net   # optional: probe dual-stack (IPv4 vs auto) TLS/TTFB fo
 
 Confirm:
 - Core `[OK]` checks pass (Tree-sitter grammars, read-only `gix`, workspace jail & Secret Shield, daemon UDS RTT `<1ms`).
-- Review any `[WARN]` findings on competing plugin `PreInvocation`/`PostToolUse` hooks or anti-MCP rules in `~/.gemini/config/plugins/*`, high global `SKILL.md` counts (`>120`) or duplicate skills, `$HOME`/`/` root workspaces, or pending release updates.
+- Review any `[WARN]` findings on competing plugin `PreInvocation`/`PostToolUse` hooks or anti-MCP rules in `~/.gemini/config/plugins/*`, active Antigravity `SKILL.md` counts (`>120`, separating `.git`-bounded `~/.agents/skills` cross-CLI mirrors) or canonical same-target skill aliases, `$HOME`/`/` root workspaces, or pending release updates.
 - Switch back to Antigravity and open **AGY Hyper Deck** in the side pane (or launch standalone with `agy-hyper ui`).
 
 ## 4. Common Operations
@@ -69,7 +69,7 @@ Confirm:
 # Release update radar & SHA-256 verified 1-click upgrade
 agy-hyper update --check
 agy-hyper update
-agy-hyper update --dismiss 0.5.0
+agy-hyper update --dismiss 0.5.1
 
 # Daemon lifecycle
 agy-hyper daemon status

@@ -24,7 +24,7 @@
         <div class="brand-copy">
           <div class="brand-title-row">
             <span class="brand-name" data-i18n="app.title">AGY Hyper</span>
-            <span id="version-pill" class="mono-tag">v0.5.0</span>
+            <span id="version-pill" class="mono-tag">v0.5.1</span>
             <button id="update-pill" type="button" class="update-pill hidden" aria-expanded="false"></button>
           </div>
           <div class="brand-sub">
@@ -82,7 +82,9 @@
       <div class="subagent-head">
         <div class="subagent-head-left">
           <span id="subagent-heading" class="sub-title">Subagents</span>
+          <span id="subagent-wf-pill" class="mono-tag hidden"></span>
           <span id="subagent-active-pill" class="status-pill ok hidden"></span>
+          <span id="subagent-collision-pill" class="status-pill err hidden"></span>
           <span id="subagent-loop-pill" class="status-pill err hidden"></span>
           <span id="subagent-stalled-pill" class="status-pill warn hidden"></span>
           <span id="subagent-red-pill" class="status-pill err hidden"></span>
@@ -217,7 +219,10 @@
 
         <div class="subhead-row">
           <h3 class="sub-title" data-i18n="shield.undo_heading">Recent AI File Edits</h3>
-          <span id="tx-count-badge" class="mono-tag">0 tx</span>
+          <div style="display:flex;align-items:center;gap:6px">
+            <span id="tx-collision-badge" class="status-pill err hidden"></span>
+            <span id="tx-count-badge" class="mono-tag">0 tx</span>
+          </div>
         </div>
         <div id="simple-tx-list" class="tx-list"></div>
       </section>

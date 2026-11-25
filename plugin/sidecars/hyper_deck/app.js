@@ -546,7 +546,7 @@
           showToast(t('update.toast_check_err', { err: r.last_error }));
         } else {
           render();
-          showToast(t('update.toast_up_to_date', { version: r.current_version || '0.5.0' }));
+          showToast(t('update.toast_up_to_date', { version: r.current_version || '0.5.1' }));
         }
       } else {
         showToast(t('update.toast_check_err', { err: r?.error || 'error' }));

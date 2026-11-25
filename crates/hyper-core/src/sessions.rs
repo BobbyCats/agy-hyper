@@ -229,7 +229,11 @@ fn load_antigravity_title_index() -> HashMap<String, DbSessionMeta> {
             DbSessionMeta {
                 title: cols[1].trim().to_string(),
                 workspace: extract_workspace_basename(cols[2].trim(), Some(&home)),
-                is_subagent: nesting_depth > 0 || parent_conversation_id.is_some(),
+                // `run_workflow` nodes set `nesting_depth = 0` and `parent_conversation_id = ""`,
+                // while populating `agent_name` (top-level user chats always have `agent_name == ""`).
+                is_subagent: nesting_depth > 0
+                    || parent_conversation_id.is_some()
+                    || !agent_name.is_empty(),
                 parent_conversation_id,
                 nesting_depth,
                 agent_name,
@@ -509,9 +513,12 @@ fn scan_session_summaries(
         }
     }
     found.sort_by_key(|b| std::cmp::Reverse(b.0));
+    // Scan enough candidates so wide 20-50 node `run_workflow` bursts never evict their own
+    // parent root conversation before workflow linkage runs.
+    let scan_cap = clamped_limit.clamp(64, 250);
     let mut summaries: Vec<SessionSummary> = found
         .into_iter()
-        .take(clamped_limit)
+        .take(scan_cap)
         .map(|(mtime, size_bytes, p)| {
             let conv_id = p
                 .parent()
@@ -595,6 +602,7 @@ fn scan_session_summaries(
         .collect();
 
     let mut counts: HashMap<String, usize> = HashMap::new();
+    attach_workflow_children(&mut summaries, brain_dirs, now_ms);
     for s in &summaries {
         if s.is_subagent {
             let root = resolve_root_conversation_id(&s.conversation_id, &summaries);
@@ -607,6 +615,20 @@ fn scan_session_summaries(
         if let Some(&cnt) = counts.get(&s.conversation_id) {
             s.subagent_count = cnt;
         }
+    }
+    if summaries.len() > clamped_limit {
+        // Preserve all linked descendants of kept roots when caller asked for a larger window,
+        // otherwise trim to `clamped_limit` while guaranteeing at least one non-subagent root if present.
+        let has_root_in_head = summaries
+            .iter()
+            .take(clamped_limit)
+            .any(|s| !s.is_subagent);
+        if !has_root_in_head {
+            if let Some(root_pos) = summaries.iter().position(|s| !s.is_subagent) {
+                summaries.swap(clamped_limit - 1, root_pos);
+            }
+        }
+        summaries.truncate(clamped_limit);
     }
     summaries
 }
@@ -661,6 +683,7 @@ fn sniff_session_header(path: &Path, size_bytes: u64) -> (bool, Option<String>, 
     let mut user_inputs = 0usize;
     let mut first_preview = String::new();
     let mut looks_delegated = false;
+    let mut hosts_workflow = false;
     let mut explicit_is_subagent: Option<bool> = None;
     let mut explicit_parent: Option<String> = None;
 
@@ -696,9 +719,18 @@ fn sniff_session_header(path: &Path, size_bytes: u64) -> (bool, Option<String>, 
                 looks_delegated = true;
             }
         }
+        if matches!(kind, "GENERIC" | "SYSTEM_MESSAGE" | "USER_INPUT") {
+            let content = v.get("content").and_then(Value::as_str).unwrap_or("");
+            if content.contains("Workflow \"") && content.contains("- [agent:") {
+                hosts_workflow = true;
+            }
+        }
         if kind == "USER_INPUT" {
             user_inputs += 1;
             let content = v.get("content").and_then(Value::as_str).unwrap_or("").trim();
+            if content.contains("call the finish tool with your result") {
+                looks_delegated = true;
+            }
             if first_preview.is_empty() && !content.is_empty() {
                 let cleaned = content
                     .replace("<CONTEXT_SUMMARY>", "")
@@ -720,6 +752,7 @@ fn sniff_session_header(path: &Path, size_bytes: u64) -> (bool, Option<String>, 
     }
     let is_sub = match explicit_is_subagent {
         Some(flag) => flag,
+        None if hosts_workflow => false,
         None => looks_delegated || (user_inputs <= 1 && size_bytes < 12_000),
     };
     (is_sub, explicit_parent, first_preview)
@@ -738,6 +771,204 @@ pub fn discover_primary_transcript() -> Option<PathBuf> {
         .find(|s| !s.is_subagent)
         .or_else(|| all.first())
         .map(|s| PathBuf::from(&s.transcript_path))
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkflowChildLink {
+    pub child_conversation_id: String,
+    pub agent_type: String,
+    pub role: String,
+}
+
+fn looks_like_uuid(s: &str) -> bool {
+    let bytes = s.as_bytes();
+    bytes.len() == 36
+        && bytes[8] == b'-'
+        && bytes[13] == b'-'
+        && bytes[18] == b'-'
+        && bytes[23] == b'-'
+        && bytes
+            .iter()
+            .enumerate()
+            .all(|(i, b)| matches!(i, 8 | 13 | 18 | 23) || b.is_ascii_hexdigit())
+}
+
+/// Parses `- [agent:<type>] <Role>: <status> (<uuid>)` lines emitted by Antigravity's
+/// `run_workflow` tool steps in parent `transcript.jsonl` files.
+pub fn extract_workflow_children_from_transcript(path: &Path) -> Vec<WorkflowChildLink> {
+    let Ok(file) = File::open(path) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+
+    for raw_line in BufReader::new(file).lines().map_while(Result::ok) {
+        if !raw_line.contains("[agent:") {
+            continue;
+        }
+        let Ok(v) = serde_json::from_str::<Value>(raw_line.trim()) else {
+            continue;
+        };
+        let step_type = v.get("type").and_then(Value::as_str).unwrap_or("");
+        if !matches!(step_type, "GENERIC" | "SYSTEM_MESSAGE" | "USER_INPUT") {
+            continue;
+        }
+        let Some(content) = v.get("content").and_then(Value::as_str) else {
+            continue;
+        };
+        if !content.contains("Workflow \"") {
+            continue;
+        }
+        for line in content.lines() {
+            let trimmed = line.trim();
+            let Some(rest) = trimmed.strip_prefix("- [agent:") else {
+                continue;
+            };
+            let Some((agent_type, after_bracket)) = rest.split_once(']') else {
+                continue;
+            };
+            let after_bracket = after_bracket.trim();
+            let mut cursor = after_bracket;
+            let mut found_uuid: Option<(&str, &str)> = None;
+            while let Some(open_idx) = cursor.find('(') {
+                let candidate_after = &cursor[open_idx + 1..];
+                if candidate_after.len() >= 37 && candidate_after.as_bytes()[36] == b')' {
+                    let cand = &candidate_after[..36];
+                    if looks_like_uuid(cand) {
+                        let prefix_len = after_bracket.len() - cursor.len() + open_idx;
+                        found_uuid = Some((&after_bracket[..prefix_len], cand));
+                        break;
+                    }
+                }
+                cursor = &cursor[open_idx + 1..];
+            }
+            let Some((before_paren, uuid)) = found_uuid else {
+                continue;
+            };
+            if !seen.insert(uuid.to_string()) {
+                continue;
+            }
+            let role = before_paren
+                .rsplit_once(':')
+                .map(|(r, _status)| r.trim())
+                .unwrap_or_else(|| before_paren.trim());
+            out.push(WorkflowChildLink {
+                child_conversation_id: uuid.to_string(),
+                agent_type: agent_type.trim().to_string(),
+                role: role.to_string(),
+            });
+        }
+    }
+    out
+}
+
+fn attach_workflow_children(
+    summaries: &mut Vec<SessionSummary>,
+    brain_dirs: &[PathBuf],
+    now_ms: u64,
+) {
+    let mut index_by_id: HashMap<String, usize> = summaries
+        .iter()
+        .enumerate()
+        .map(|(i, s)| (s.conversation_id.clone(), i))
+        .collect();
+
+    let parent_candidates: Vec<(String, String, String, u32)> = summaries
+        .iter()
+        .filter(|s| !s.is_subagent || s.parent_conversation_id.is_some())
+        .map(|s| {
+            (
+                s.conversation_id.clone(),
+                s.transcript_path.clone(),
+                s.workspace.clone(),
+                s.nesting_depth,
+            )
+        })
+        .collect();
+
+    for (parent_id, parent_tpath, parent_ws, parent_depth) in parent_candidates {
+        let links = extract_workflow_children_from_transcript(Path::new(&parent_tpath));
+        if links.is_empty() {
+            continue;
+        }
+        for link in links {
+            if link.child_conversation_id == parent_id {
+                continue;
+            }
+            let wf_agent = if link.agent_type.is_empty() {
+                "wf:self".to_string()
+            } else {
+                format!("wf:{}", link.agent_type)
+            };
+            let clean_role = if !link.role.is_empty() {
+                sanitize_session_title(&link.role, &parent_ws, &link.child_conversation_id)
+            } else {
+                format!(
+                    "{} #{}",
+                    wf_agent,
+                    &link.child_conversation_id[..link.child_conversation_id.len().min(8)]
+                )
+            };
+
+            if let Some(&idx) = index_by_id.get(&link.child_conversation_id) {
+                let entry = &mut summaries[idx];
+                entry.is_subagent = true;
+                if entry.parent_conversation_id.is_none() {
+                    entry.parent_conversation_id = Some(parent_id.clone());
+                }
+                entry.nesting_depth = entry.nesting_depth.max(parent_depth.saturating_add(1));
+                entry.agent_name = wf_agent;
+                if !link.role.is_empty() {
+                    entry.title = clean_role.clone();
+                    entry.preview = clean_role;
+                }
+                if entry.workspace.is_empty() {
+                    entry.workspace = parent_ws.clone();
+                }
+                continue;
+            }
+
+            let Some(child_tpath) = brain_dirs
+                .iter()
+                .map(|b| {
+                    b.join(&link.child_conversation_id)
+                        .join(".system_generated")
+                        .join("logs")
+                        .join("transcript.jsonl")
+                })
+                .find(|p| p.is_file())
+            else {
+                continue;
+            };
+            let Ok(meta) = fs::metadata(&child_tpath) else {
+                continue;
+            };
+            let mtime_ms = meta
+                .modified()
+                .ok()
+                .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+                .map(|d| d.as_millis() as u64)
+                .unwrap_or(0);
+            let active = now_ms.saturating_sub(mtime_ms) <= 15_000;
+            let next_idx = summaries.len();
+            summaries.push(SessionSummary {
+                conversation_id: link.child_conversation_id.clone(),
+                transcript_path: child_tpath.display().to_string(),
+                mtime_ms,
+                size_bytes: meta.len(),
+                is_subagent: true,
+                parent_conversation_id: Some(parent_id.clone()),
+                nesting_depth: parent_depth.saturating_add(1),
+                agent_name: wf_agent,
+                active,
+                subagent_count: 0,
+                title: clean_role.clone(),
+                preview: clean_role,
+                workspace: parent_ws.clone(),
+            });
+            index_by_id.insert(link.child_conversation_id, next_idx);
+        }
+    }
 }
 
 #[cfg(test)]
@@ -848,5 +1079,60 @@ mod tests {
             HashMap::new()
         });
         assert_eq!(db_loads.load(Ordering::SeqCst), 4);
+    }
+
+    #[test]
+    fn links_run_workflow_nodes_to_parent_and_keeps_them_out_of_top_level_list() {
+        use tempfile::tempdir;
+
+        let dir = tempdir().unwrap();
+        let brain = dir.path().join("brain");
+        let root_id = "00000000-0000-4000-8000-000000000001";
+        let wf1_id = "00000000-0000-4000-8000-000000000002";
+        let wf2_id = "a1b2c3d4-1111-2222-3333-444455556666";
+
+        let root_dir = brain.join(root_id).join(".system_generated").join("logs");
+        fs::create_dir_all(&root_dir).unwrap();
+        let root_log = format!(
+            "{{\"step_index\":1,\"type\":\"USER_INPUT\",\"created_at\":\"2026-11-25T05:00:00Z\",\"content\":\"Audit routes in repo {}\"}}\n\
+             {{\"step_index\":2,\"type\":\"GENERIC\",\"created_at\":\"2026-11-25T05:01:00Z\",\"content\":\"Workflow \\\"Audit\\\" completed.\\nLogs:\\n- [agent:research] Scan routes.rs: done ({}): {{}}\\nOutput:\\nok\"}}\n\
+             {{\"step_index\":3,\"type\":\"SYSTEM_MESSAGE\",\"created_at\":\"2026-11-25T05:01:05Z\",\"content\":\"Task finished with result:\\nWorkflow \\\"Verify\\\" completed.\\nLogs:\\n- [agent:self] Verify routes.rs: done ({}): true\\nOutput:\\nok\"}}\n",
+            "x".repeat(120),
+            wf1_id,
+            wf2_id
+        );
+        fs::write(root_dir.join("transcript.jsonl"), root_log).unwrap();
+
+        for cid in [wf1_id, wf2_id] {
+            let cdir = brain.join(cid).join(".system_generated").join("logs");
+            fs::create_dir_all(&cdir).unwrap();
+            let clog = format!(
+                "{{\"step_index\":0,\"type\":\"USER_INPUT\",\"created_at\":\"2026-11-25T05:00:10Z\",\"content\":\"Audit file.\\n\\nWhen you are done, call the finish tool with your result. {}\"}}\n",
+                "y".repeat(200)
+            );
+            fs::write(cdir.join("transcript.jsonl"), clog).unwrap();
+        }
+
+        // Even with limit=3 (or limit=1 for root discovery), workflow nodes link to root and stay out of top-level
+        let summaries = scan_session_summaries(3, std::slice::from_ref(&brain), &HashMap::new());
+        let top_level: Vec<&SessionSummary> = summaries.iter().filter(|s| !s.is_subagent).collect();
+        assert_eq!(top_level.len(), 1);
+        assert_eq!(top_level[0].conversation_id, root_id);
+        assert_eq!(top_level[0].subagent_count, 2);
+
+        let descendants = collect_descendant_sessions(root_id, &summaries);
+        assert_eq!(descendants.len(), 2);
+        assert!(descendants
+            .iter()
+            .any(|d| d.conversation_id == wf1_id && d.agent_name == "wf:research" && d.title == "Scan routes.rs"));
+        assert!(descendants
+            .iter()
+            .any(|d| d.conversation_id == wf2_id && d.agent_name == "wf:self" && d.title == "Verify routes.rs"));
+
+        // Verify limit=1 still surfaces the non-subagent root even when workflow children have newer mtimes
+        let head_one = scan_session_summaries(1, &[brain], &HashMap::new());
+        assert_eq!(head_one.len(), 1);
+        assert!(!head_one[0].is_subagent);
+        assert_eq!(head_one[0].conversation_id, root_id);
     }
 }

@@ -5,7 +5,7 @@ use hyper_core::git::inspect_repo;
 use hyper_core::jail::WorkspaceJail;
 use hyper_core::runner::{discover_presets, run_check, CheckRequest};
 use hyper_core::search::{batch_search, glob_files, SearchQuery};
-use hyper_core::tx_edit::{apply_transactional_edits, FileEditOp};
+use hyper_core::tx_edit::{apply_transactional_edits_with_writer, FileEditOp};
 use hyper_core::wal::{list_transactions, rollback_transaction};
 use hyper_daemon::client::ensure_and_send;
 use hyper_daemon::protocol::{
@@ -480,17 +480,29 @@ fn handle_edit(workspace: &str, args: Value, cfg: &HyperConfig, started: Instant
     let edits: Vec<FileEditOp> = serde_json::from_value(
         args.get("edits").cloned().ok_or_else(|| anyhow!("missing 'edits' array"))?,
     )?;
-    let tx = match apply_transactional_edits(&jail, &edits, &HyperConfig::wal_dir(), cfg.max_wal_entries) {
+    let writer_tag = std::env::var("AGY_CONVERSATION_ID")
+        .ok()
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| format!("mcp-pid:{}", std::process::id()));
+    let tx = match apply_transactional_edits_with_writer(
+        &jail,
+        &edits,
+        &HyperConfig::wal_dir(),
+        cfg.max_wal_entries,
+        Some(&writer_tag),
+    ) {
         Ok(t) => t,
         Err(e) => {
-            let blocked = e.to_string().contains("jail") || e.to_string().contains("secret");
+            let msg = e.to_string();
+            let is_etag = msg.contains("ETag CAS conflict");
+            let blocked = is_etag || msg.contains("jail") || msg.contains("secret");
             record_telemetry(
-                "hyper_edit",
+                if is_etag { "etag_conflict" } else { "hyper_edit" },
                 Some(jail.root().display().to_string()),
                 started.elapsed().as_millis() as u64,
                 0,
                 0,
-                e.to_string(),
+                msg,
                 blocked,
             );
             return Err(e);

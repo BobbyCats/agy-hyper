@@ -5,7 +5,7 @@ use hyper_core::sessions::SessionSummary;
 use hyper_core::transcript::{HealthLevel, TranscriptPulse};
 use hyper_core::update::UpdateState;
 use hyper_core::usage::{ModelTtlEstimate, SessionUsageSummary};
-use hyper_core::wal::{RollbackResult, WalManifest};
+use hyper_core::wal::{RollbackResult, WalManifest, WriteCollisionAlert};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
 
@@ -265,6 +265,8 @@ pub struct SessionTreeSummary {
     #[serde(default)]
     pub parent_conversation_id: Option<String>,
     pub subagent_count: usize,
+    #[serde(default)]
+    pub workflow_node_count: usize,
     pub active_subagents: usize,
     pub redline_subagents: usize,
     #[serde(default)]
@@ -276,6 +278,14 @@ pub struct SessionTreeSummary {
     pub combined_hyper_calls: usize,
     pub combined_total_tools: usize,
     pub combined_cache_hit_ratio: f64,
+    #[serde(default)]
+    pub currency: String,
+    #[serde(default)]
+    pub root_cost: f64,
+    #[serde(default)]
+    pub fleet_worker_cost: f64,
+    #[serde(default)]
+    pub tree_cost: f64,
     #[serde(default)]
     pub split_cache: Option<LiveSplitCacheSummary>,
     pub subagents: Vec<SubagentSnapshot>,
@@ -295,6 +305,8 @@ pub struct CockpitSnapshot {
     #[serde(default)]
     pub model_ttl_estimates: Vec<ModelTtlEstimate>,
     pub transactions: Vec<WalManifest>,
+    #[serde(default)]
+    pub write_collisions: Vec<WriteCollisionAlert>,
     pub recent_events: Vec<AuditEvent>,
     #[serde(default)]
     pub update_state: Option<UpdateState>,

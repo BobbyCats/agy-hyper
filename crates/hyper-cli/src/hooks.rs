@@ -246,6 +246,8 @@ struct GuardState {
     last_child_alert_step: i64,
     #[serde(default)]
     last_child_alert_sig: String,
+    #[serde(default)]
+    last_collision_sig: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -613,9 +615,23 @@ pub fn run_pre_invocation() -> Result<()> {
         Vec::new()
     };
 
+    let ws_raw = extract_workspace_str(&payload);
+    let collision_alert = if !is_subagent && !ws_raw.is_empty() {
+        let canon_ws = fs::canonicalize(ws_raw)
+            .unwrap_or_else(|_| PathBuf::from(ws_raw))
+            .display()
+            .to_string();
+        let recent_txs = hyper_core::wal::list_transactions(&HyperConfig::wal_dir(), 25);
+        hyper_core::wal::detect_write_collisions(&recent_txs, now_epoch_ms_u64(), 300_000)
+            .into_iter()
+            .find(|c| c.workspace_root == canon_ws && c.kind == "same_file_race")
+    } else {
+        None
+    };
+
     let has_loop_streak = pulse.consecutive_error_streak >= 2;
     let self_alert_eligible = pulse.health != HealthLevel::Green || has_loop_streak;
-    if !self_alert_eligible && child_alerts.is_empty() {
+    if !self_alert_eligible && child_alerts.is_empty() && collision_alert.is_none() {
         println!("{{}}");
         return Ok(());
     }
@@ -636,6 +652,7 @@ pub fn run_pre_invocation() -> Result<()> {
         last_health: prev.last_health,
         last_child_alert_step: prev.last_child_alert_step,
         last_child_alert_sig: prev.last_child_alert_sig.clone(),
+        last_collision_sig: prev.last_collision_sig.clone(),
     };
 
     let mut messages: Vec<String> = Vec::new();
@@ -690,6 +707,18 @@ pub fn run_pre_invocation() -> Result<()> {
                 next_state.last_child_alert_sig = sig;
                 messages.push(msg);
             }
+        }
+    }
+
+    if let Some(col) = collision_alert {
+        let col_sig = format!("{}:{}:{}", col.kind, col.latest_ts_ms, col.rel_paths.join(","));
+        if col_sig != prev.last_collision_sig {
+            next_state.last_collision_sig = col_sig;
+            messages.push(format!(
+                "[AGY Hyper Write-Race Guard] {} distinct writer sessions modified shared workspace file(s) [{}] within 5m. Re-read affected files before editing, pass `expected_etag` in `hyper_edit`, and prefer `workspace=\"share\"` (or `\"branch\"`) when spawning parallel `/swarm` or `run_workflow` writers. Instant WAL rollback is available in [Open Hyper Deck](sidecar://agy-hyper/hyper_deck/).",
+                col.writer_count,
+                col.rel_paths.join(", ")
+            ));
         }
     }
 
@@ -779,13 +808,15 @@ pub fn run_post_tool_use() -> Result<()> {
     if let Some(args) = tool_args {
         let cfg = HyperConfig::load();
         let t0 = std::time::Instant::now();
-        if let Ok(Some(manifest)) = hyper_core::tx_edit::record_native_post_edit(
+        let writer_conv = payload.get("conversationId").and_then(Value::as_str);
+        if let Ok(Some(manifest)) = hyper_core::tx_edit::record_native_post_edit_with_writer(
             &HyperConfig::wal_dir(),
             cfg.max_wal_entries,
             &workspace_roots,
             tool_name,
             args,
             cfg.block_secret_files,
+            writer_conv,
         ) {
             notify_ws = Some(manifest.workspace_root.clone());
             let rel = manifest

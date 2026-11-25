@@ -382,7 +382,7 @@
     }
   }
 
-  function renderSubagentStrip(tree, activeConvId, onSelectSession) {
+  function renderSubagentStrip(tree, activeConvId, onSelectSession, collisions = []) {
     const strip = $('subagent-strip');
     if (!strip) return;
     if (!tree || !tree.subagents?.length) {
@@ -392,6 +392,33 @@
     strip.classList.remove('hidden');
 
     $('subagent-heading').textContent = t('subagents.heading', { count: tree.subagent_count });
+    const wfPill = $('subagent-wf-pill');
+    if (wfPill) {
+      if ((tree.workflow_node_count || 0) > 0) {
+        wfPill.textContent = t('subagents.workflow_badge', { count: tree.workflow_node_count });
+        wfPill.classList.remove('hidden');
+      } else {
+        wfPill.classList.add('hidden');
+      }
+    }
+    const colPill = $('subagent-collision-pill');
+    if (colPill) {
+      const topCol = (collisions || [])[0];
+      if (topCol) {
+        const isRace = topCol.kind === 'same_file_race';
+        colPill.className = `status-pill ${isRace ? 'err' : 'warn'}`;
+        colPill.textContent = isRace
+          ? t('subagents.collision_race_badge', { count: (topCol.rel_paths || []).length || 1 })
+          : t('subagents.collision_shared_badge', { count: topCol.writer_count || 2 });
+        colPill.title = t('subagents.collision_tip', {
+          writers: topCol.writer_count || 2,
+          files: (topCol.rel_paths || []).join(', ') || 'workspace',
+        });
+        colPill.classList.remove('hidden');
+      } else {
+        colPill.classList.add('hidden');
+      }
+    }
     const actPill = $('subagent-active-pill');
     if (tree.active_subagents > 0) {
       actPill.textContent = t('subagents.active_badge', { count: tree.active_subagents });
@@ -451,11 +478,21 @@
     }
 
     $('btn-back-parent').classList.toggle('hidden', !tree.selected_is_subagent);
-    $('subagent-tree-meta').textContent = t('subagents.tree_meta', {
-      turns: tree.combined_turns || 0,
-      tokens: fmtTokens(tree.combined_tokens || 0),
-      cache: Math.round((tree.combined_cache_hit_ratio || 0) * 100),
-    });
+    const treeCcy = tree.currency || 'USD';
+    $('subagent-tree-meta').textContent = (tree.tree_cost || 0) > 0
+      ? t('subagents.tree_meta_cost', {
+          turns: tree.combined_turns || 0,
+          tokens: fmtTokens(tree.combined_tokens || 0),
+          tree_cost: fmtCurrency(tree.tree_cost || 0, treeCcy),
+          root_cost: fmtCurrency(tree.root_cost || 0, treeCcy),
+          fleet_cost: fmtCurrency(tree.fleet_worker_cost || 0, treeCcy),
+          cache: Math.round((tree.combined_cache_hit_ratio || 0) * 100),
+        })
+      : t('subagents.tree_meta', {
+          turns: tree.combined_turns || 0,
+          tokens: fmtTokens(tree.combined_tokens || 0),
+          cache: Math.round((tree.combined_cache_hit_ratio || 0) * 100),
+        });
 
     const list = $('subagent-list');
     list.innerHTML = tree.subagents
@@ -610,6 +647,16 @@
     $('s-usage-label').textContent = hasTree
       ? t('usage.ribbon_tree', { count: u.subagent_count })
       : t('usage.ribbon_session');
+    const openUsageBtn = $('btn-open-usage');
+    if (openUsageBtn) {
+      openUsageBtn.title = hasTree && attrRatio > 0
+        ? t('usage.ribbon_tree_tip', {
+            root: fmtCurrency(u.session_cost || 0, ccy),
+            fleet: fmtCurrency(Math.max(0, (u.tree_cost || 0) - (u.session_cost || 0)), ccy),
+            count: u.subagent_count,
+          })
+        : '';
+    }
     $('s-usage-tokens').textContent = `${fmtTokens(tokens)} tok`;
     $('s-usage-cost').textContent = attrRatio > 0
       ? `≈ ${fmtCurrency(cost, ccy)}`
@@ -943,7 +990,7 @@
     const tree = snap.session_tree || null;
     const activeConvId = pulse?.conversation_id || bench?.conversation_id || '';
 
-    $('version-pill').textContent = `v${eng.version || snap.version || snap.update_state?.current_version || '0.5.0'}`;
+    $('version-pill').textContent = `v${eng.version || snap.version || snap.update_state?.current_version || '0.5.1'}`;
     renderUpdateRadar(snap, state);
     const isUds = snap.transport === 'uds-daemon';
     $('daemon-dot').classList.toggle('warn', !isUds);
@@ -952,7 +999,7 @@
       : t('app.daemon_fallback', { rtt: snap.rpc_rtt_ms ?? 0 });
 
     renderSessionSelect(snap.recent_sessions, tree, state.selectedConvId, activeConvId);
-    renderSubagentStrip(tree, activeConvId, onSelectSession);
+    renderSubagentStrip(tree, activeConvId, onSelectSession, snap.write_collisions || []);
     renderSessionUsageRibbon(snap);
 
     const selectedSub = tree?.selected_is_subagent
@@ -1057,6 +1104,24 @@
 
     const txs = snap.transactions || [];
     $('tx-count-badge').textContent = t('shield.tx_count', { count: txs.length });
+    const txColBadge = $('tx-collision-badge');
+    if (txColBadge) {
+      const topCol = (snap.write_collisions || [])[0];
+      if (topCol) {
+        const isRace = topCol.kind === 'same_file_race';
+        txColBadge.className = `status-pill ${isRace ? 'err' : 'warn'}`;
+        txColBadge.textContent = isRace
+          ? t('subagents.collision_race_badge', { count: (topCol.rel_paths || []).length || 1 })
+          : t('subagents.collision_shared_badge', { count: topCol.writer_count || 2 });
+        txColBadge.title = t('subagents.collision_tip', {
+          writers: topCol.writer_count || 2,
+          files: (topCol.rel_paths || []).join(', ') || 'workspace',
+        });
+        txColBadge.classList.remove('hidden');
+      } else {
+        txColBadge.classList.add('hidden');
+      }
+    }
     renderTxList($('simple-tx-list'), txs.slice(0, 4), false, onRollback, onToggleDiff, state.openDiffs);
     renderTxList($('pro-wal-list'), txs, true, onRollback, onToggleDiff, state.openDiffs);
 

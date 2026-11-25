@@ -88,6 +88,27 @@ pub fn record_native_post_edit(
     args: &Value,
     block_secret_files: bool,
 ) -> Result<Option<WalManifest>> {
+    record_native_post_edit_with_writer(
+        wal_root,
+        max_wal_entries,
+        workspace_roots,
+        tool_name,
+        args,
+        block_secret_files,
+        None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn record_native_post_edit_with_writer(
+    wal_root: &Path,
+    max_wal_entries: usize,
+    workspace_roots: &[PathBuf],
+    tool_name: &str,
+    args: &Value,
+    block_secret_files: bool,
+    writer_id: Option<&str>,
+) -> Result<Option<WalManifest>> {
     if !matches!(tool_name, "edit_file" | "write_file") {
         return Ok(None);
     }
@@ -217,6 +238,10 @@ pub fn record_native_post_edit(
             workspace_root: jail.root().display().to_string(),
             rolled_back: false,
             source: tool_name.to_string(),
+            writer_id: writer_id
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(String::from),
             files: vec![WalFileRecord {
                 abs_path: verified_abs.display().to_string(),
                 rel_path: jail.relative_display(&verified_abs),
