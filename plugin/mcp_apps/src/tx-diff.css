@@ -1,0 +1,264 @@
+/* TX Diff Inline Card Layout (capped cleanly up to 800px height) */
+
+.tx-shell {
+  width: 100%;
+  max-width: 100%;
+  padding: 10px 12px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 9px;
+}
+
+.tx-topbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.tx-brand {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+}
+
+.tx-brand-title {
+  font-size: 13px;
+  font-weight: 650;
+  letter-spacing: -0.015em;
+  white-space: nowrap;
+}
+
+.tx-topbar-right {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
+.rollback-banner {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 8px 10px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--ok-border);
+  background: var(--ok-soft);
+  color: var(--ok);
+  font-size: 11.5px;
+}
+.rollback-banner.err {
+  border-color: var(--err-border);
+  background: var(--err-soft);
+  color: var(--err);
+}
+.rollback-banner-body {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+}
+.rollback-banner-title {
+  font-weight: 650;
+}
+.rollback-banner-files {
+  font-family: var(--app-font-mono);
+  font-size: 10.5px;
+  opacity: 0.9;
+  word-break: break-all;
+}
+
+/* Horizontal Compact Transaction Timeline Strip */
+.tx-strip {
+  display: flex;
+  align-items: stretch;
+  gap: 6px;
+  overflow-x: auto;
+  padding-bottom: 3px;
+}
+
+.tx-pill {
+  flex: 0 0 auto;
+  min-width: 168px;
+  max-width: 240px;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding: 7px 9px;
+  border-radius: 8px;
+  border: 1px solid var(--line);
+  background: var(--surface);
+  text-align: left;
+  transition: border-color 140ms ease, background 140ms ease;
+}
+.tx-pill:hover {
+  border-color: var(--line-strong);
+  background: var(--hover);
+}
+.tx-pill.selected {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+}
+.tx-pill.rolled-back {
+  opacity: 0.78;
+}
+
+.tx-pill-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+}
+
+.tx-id-text {
+  font-family: var(--app-font-mono);
+  font-size: 11px;
+  font-weight: 650;
+  color: var(--fg);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tx-pill-mid {
+  font-size: 11px;
+  color: var(--fg-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.tx-pill-bot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  font-size: 10px;
+  color: var(--fg-subtle);
+  font-family: var(--app-font-mono);
+  font-variant-numeric: tabular-nums;
+}
+
+/* Selected Transaction Header & Actions */
+.tx-detail-card {
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+
+.tx-detail-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 9px 11px;
+  border-bottom: 1px solid var(--line);
+  background: var(--field);
+}
+
+.tx-detail-meta {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+  flex: 1 1 220px;
+}
+
+.tx-detail-title-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.tx-detail-summary {
+  font-size: 11.5px;
+  color: var(--fg-muted);
+  word-break: break-word;
+}
+
+.tx-detail-actions {
+  display: inline-flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
+.confirm-group {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 2px 3px 2px 8px;
+  border-radius: 7px;
+  border: 1px solid var(--err-border);
+  background: var(--err-soft);
+}
+.confirm-label {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--err);
+  white-space: nowrap;
+}
+
+/* Clickable File Chip Bar */
+.tx-files-bar {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 5px;
+  padding: 7px 11px;
+  border-bottom: 1px solid var(--line);
+}
+
+.file-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  max-width: 100%;
+  padding: 3px 7px;
+  border-radius: 6px;
+  border: 1px solid var(--line);
+  background: var(--field);
+  font-family: var(--app-font-mono);
+  font-size: 10.5px;
+  color: var(--fg);
+  transition: border-color 120ms ease, background 120ms ease, color 120ms ease;
+}
+.file-chip:hover {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+.file-chip-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 220px;
+}
+
+/* Scrollable Diff Body (keeps total inline card cleanly <= 800px) */
+.tx-diff-body {
+  padding: 9px 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-height: 490px;
+  overflow-y: auto;
+}
+
+.loading-strip {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 24px 12px;
+  color: var(--fg-muted);
+  font-size: 12px;
+}
