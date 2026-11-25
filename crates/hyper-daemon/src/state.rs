@@ -779,8 +779,12 @@ impl DaemonState {
     }
 
     pub fn set_profile(&mut self, profile_str: &str) -> Result<HyperConfig, String> {
-        let p = Profile::from_str_loose(profile_str)
-            .ok_or_else(|| format!("unknown profile '{}' (expected safe|balanced|hyper)", profile_str))?;
+        let p = Profile::from_str_loose(profile_str).ok_or_else(|| {
+            format!(
+                "unknown profile '{}' (expected observe|safe|balanced|hyper)",
+                profile_str
+            )
+        })?;
         self.config.apply_profile(p);
         self.config.save().map_err(|e| e.to_string())?;
         Ok(self.config.clone())

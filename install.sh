@@ -122,7 +122,7 @@ if [[ -n "$SCRIPT_DIR" && -f "${SCRIPT_DIR}/Cargo.toml" && -d "${SCRIPT_DIR}/plu
   fi
   "${SCRIPT_DIR}/target/release/agy-hyper" daemon stop >/dev/null 2>&1 || true
   mkdir -p "${PLUGIN_DIR}/bin" "${HOME}/.local/bin"
-  rm -rf "${PLUGIN_DIR}/sidecars" "${PLUGIN_DIR}/rules" "${PLUGIN_DIR}/assets"
+  rm -rf "${PLUGIN_DIR}/sidecars" "${PLUGIN_DIR}/rules" "${PLUGIN_DIR}/assets" "${PLUGIN_DIR}/mcp_apps"
   cp -R "${SCRIPT_DIR}/plugin/." "${PLUGIN_DIR}/"
   # Atomic fresh-inode replace: overwriting a running Mach-O binary in-place triggers SIGKILL on Apple Silicon.
   TMP_BIN="${PLUGIN_DIR}/bin/.agy-hyper.new.$$"

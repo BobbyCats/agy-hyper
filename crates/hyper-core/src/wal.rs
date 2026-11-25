@@ -31,6 +31,8 @@ pub struct WalFileRecord {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TxFileDiff {
     pub rel_path: String,
+    #[serde(default)]
+    pub abs_path: String,
     pub action: String,
     pub lines_added: usize,
     pub lines_removed: usize,
@@ -93,6 +95,14 @@ pub fn file_etag(path: &Path) -> Result<String> {
 
 pub fn default_wal_root() -> PathBuf {
     HyperConfig::wal_dir()
+}
+
+pub fn format_epoch_ms_rfc3339(ts_ms: u64) -> String {
+    let secs = (ts_ms / 1000) as i64;
+    time::OffsetDateTime::from_unix_timestamp(secs)
+        .ok()
+        .and_then(|dt| dt.format(&time::format_description::well_known::Rfc3339).ok())
+        .unwrap_or_else(|| "1970-01-01T00:00:00Z".to_string())
 }
 
 pub(crate) fn now_ms() -> u64 {
@@ -340,6 +350,7 @@ pub fn inspect_transaction_diff(
         let (Some(b_raw), Some(a_raw)) = (before_bytes, after_bytes) else {
             files.push(TxFileDiff {
                 rel_path: rec.rel_path.clone(),
+                abs_path: rec.abs_path.clone(),
                 action,
                 lines_added: rec.lines_added,
                 lines_removed: rec.lines_removed,
@@ -356,6 +367,7 @@ pub fn inspect_transaction_diff(
         let (Ok(b_txt), Ok(a_txt)) = (String::from_utf8(b_raw), String::from_utf8(a_raw)) else {
             files.push(TxFileDiff {
                 rel_path: rec.rel_path.clone(),
+                abs_path: rec.abs_path.clone(),
                 action,
                 lines_added: rec.lines_added,
                 lines_removed: rec.lines_removed,
@@ -398,6 +410,7 @@ pub fn inspect_transaction_diff(
 
         files.push(TxFileDiff {
             rel_path: rec.rel_path.clone(),
+            abs_path: rec.abs_path.clone(),
             action,
             lines_added: added,
             lines_removed: removed,

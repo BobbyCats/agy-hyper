@@ -193,7 +193,12 @@ impl HyperConfig {
             "hyper_pack" | "hyper_search" => self.enable_mcp_read,
             "hyper_edit" => self.enable_mcp_edit,
             "hyper_check" => self.enable_mcp_check,
-            "hyper_tx" => true,
+            "hyper_tx"
+            | "hyper_cockpit"
+            | "hyper_app_tx_diff"
+            | "hyper_app_tx_rollback"
+            | "hyper_app_cockpit_data"
+            | "hyper_app_set_profile" => true,
             _ => true,
         }
     }
@@ -417,6 +422,11 @@ mod tests {
         assert!(!cfg.is_mcp_tool_enabled("hyper_edit"));
         assert!(!cfg.is_mcp_tool_enabled("hyper_check"));
         assert!(cfg.is_mcp_tool_enabled("hyper_tx"));
+        assert!(cfg.is_mcp_tool_enabled("hyper_cockpit"));
+        assert!(cfg.is_mcp_tool_enabled("hyper_app_tx_diff"));
+        assert!(cfg.is_mcp_tool_enabled("hyper_app_tx_rollback"));
+        assert!(cfg.is_mcp_tool_enabled("hyper_app_cockpit_data"));
+        assert!(cfg.is_mcp_tool_enabled("hyper_app_set_profile"));
 
         // Legacy v0.3 config.json without enable_mcp_* fields preserves existing enabled defaults.
         let legacy: HyperConfig = serde_json::from_str(r#"{"profile":"balanced"}"#).unwrap();

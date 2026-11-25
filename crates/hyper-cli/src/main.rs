@@ -33,6 +33,10 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::Instant;
 
+const EXIT_OK: i32 = 0;
+const EXIT_RUNTIME_ERR: i32 = 1;
+const EXIT_VALIDATION_ERR: i32 = 2;
+
 #[derive(Parser)]
 #[command(
     name = "agy-hyper",
@@ -40,6 +44,10 @@ use std::time::Instant;
     about = "Zero-dependency Rust acceleration engine, WAL atomic editor & telemetry cockpit for Antigravity"
 )]
 struct Cli {
+    /// Emit structured JSON error envelopes on stderr and semantic exit codes (0=ok, 1=runtime, 2=usage/validation)
+    #[arg(long, global = true)]
+    agent_mode: bool,
+
     #[command(subcommand)]
     command: Commands,
 }
@@ -257,8 +265,110 @@ enum ConfigAction {
     },
 }
 
-fn main() -> Result<()> {
-    let cli = Cli::parse();
+fn is_agent_mode_env_value(val: Option<&str>) -> bool {
+    val.map(str::trim).is_some_and(|v| {
+        v == "1"
+            || v.eq_ignore_ascii_case("true")
+            || v.eq_ignore_ascii_case("yes")
+            || v.eq_ignore_ascii_case("on")
+    })
+}
+
+fn raw_args_request_agent_mode(args: &[String]) -> bool {
+    for arg in args.iter().skip(1) {
+        if arg == "--" {
+            break;
+        }
+        if arg == "--agent-mode" {
+            return true;
+        }
+    }
+    false
+}
+
+fn classify_cli_error(err: &anyhow::Error) -> (i32, &'static str) {
+    let lower = err.to_string().to_ascii_lowercase();
+    if lower.contains("invalid profile")
+        || lower.contains("unknown profile")
+        || lower.contains("unknown config toggle")
+        || lower.contains("unsupported currency")
+        || lower.contains("no valid currency rates")
+    {
+        return (EXIT_VALIDATION_ERR, "INVALID_CONFIG");
+    }
+    if lower.contains("workspace parameter is required")
+        || lower.contains("refusing to target installed plugin directory")
+        || lower.contains("remote workspace uri")
+        || lower.contains("escapes workspace")
+        || lower.contains("outside workspace")
+        || lower.contains("blocked by secret")
+        || lower.contains("workspace root")
+        || lower.contains("not a directory")
+    {
+        return (EXIT_VALIDATION_ERR, "INVALID_WORKSPACE");
+    }
+    if lower.contains("invalid tx_id")
+        || lower.contains("invalid version tag")
+        || lower.contains("invalid repository slug")
+        || lower.contains("unknown hyper_tx action")
+        || lower.contains("unknown tool")
+        || lower.contains("requires '")
+        || lower.contains("missing '")
+    {
+        return (EXIT_VALIDATION_ERR, "INVALID_ARGUMENT");
+    }
+    (EXIT_RUNTIME_ERR, "RUNTIME_ERROR")
+}
+
+fn format_agent_error_envelope(error: &str, code: &str) -> serde_json::Value {
+    serde_json::json!({
+        "ok": false,
+        "error": error,
+        "code": code
+    })
+}
+
+fn main() -> std::process::ExitCode {
+    let raw_args: Vec<String> = std::env::args().collect();
+    let env_agent = is_agent_mode_env_value(std::env::var("AGY_HYPER_AGENT_MODE").ok().as_deref());
+    let early_agent_mode = env_agent || raw_args_request_agent_mode(&raw_args);
+
+    let cli = match Cli::try_parse_from(&raw_args) {
+        Ok(c) => c,
+        Err(err) => {
+            if !err.use_stderr() {
+                let _ = err.print();
+                return std::process::ExitCode::from(EXIT_OK as u8);
+            }
+            if early_agent_mode {
+                let msg = err.to_string().trim().to_string();
+                let envelope = format_agent_error_envelope(&msg, "INVALID_USAGE");
+                eprintln!("{}", envelope);
+                return std::process::ExitCode::from(EXIT_VALIDATION_ERR as u8);
+            }
+            let _ = err.print();
+            return std::process::ExitCode::from(err.exit_code() as u8);
+        }
+    };
+
+    let agent_mode = cli.agent_mode || env_agent;
+    match run_cli(cli) {
+        Ok(()) => std::process::ExitCode::from(EXIT_OK as u8),
+        Err(err) => {
+            let (code_num, code_str) = classify_cli_error(&err);
+            if agent_mode {
+                let envelope = format_agent_error_envelope(&err.to_string(), code_str);
+                eprintln!("{}", envelope);
+                std::process::ExitCode::from(code_num as u8)
+            } else {
+                eprintln!("Error: {:#}", err);
+                std::process::ExitCode::from(EXIT_RUNTIME_ERR as u8)
+            }
+        }
+    }
+}
+
+fn run_cli(cli: Cli) -> Result<()> {
     match cli.command {
         Commands::Mcp => mcp::run_mcp_stdio(),
         Commands::Hook { event } => match event {
@@ -1021,6 +1131,68 @@ fn evaluate_dual_stack_probe(ipv4: &NetProbeSample, auto_stack: &NetProbeSample)
     )
 }
 
+fn collect_remote_uri_env_hints() -> Vec<(String, String)> {
+    let mut hints = Vec::new();
+    for key in ["PWD", "AGY_WORKSPACE", "VSCODE_IPC_HOOK_CLI", "WORKSPACE_FOLDER"] {
+        if let Ok(val) = std::env::var(key) {
+            let trimmed = val.trim();
+            if !trimmed.is_empty() {
+                hints.push((key.to_string(), trimmed.to_string()));
+            }
+        }
+    }
+    hints
+}
+
+fn evaluate_ssh_remote_doctor_check(
+    cwd: &Path,
+    ssh_session: Option<(&str, &str)>,
+    env_hints: &[(String, String)],
+) -> DoctorCheckItem {
+    let cwd_str = cwd.to_string_lossy();
+    if let Some(prefix) = mcp::detect_remote_uri_prefix(&cwd_str) {
+        return DoctorCheckItem {
+            id: "ssh_remote_env".into(),
+            status: "warn".into(),
+            label: "SSH / Remote Env".into(),
+            detail: format!(
+                "remote URI cwd detected ({}): MCP tools require host-native absolute paths rather than remote URI schemes",
+                prefix
+            ),
+        };
+    }
+    for (key, val) in env_hints {
+        if let Some(prefix) = mcp::detect_remote_uri_prefix(val) {
+            return DoctorCheckItem {
+                id: "ssh_remote_env".into(),
+                status: "warn".into(),
+                label: "SSH / Remote Env".into(),
+                detail: format!(
+                    "remote URI detected in {} ({}): pass host-native absolute workspace paths to MCP tools instead of remote URIs",
+                    key, prefix
+                ),
+            };
+        }
+    }
+    if let Some((ssh_key, _)) = ssh_session {
+        return DoctorCheckItem {
+            id: "ssh_remote_env".into(),
+            status: "info".into(),
+            label: "SSH / Remote Env".into(),
+            detail: format!(
+                "SSH session detected ({} set) — MCP workspace paths, WAL snapshots, and daemon sockets resolve on this remote host; avoid passing vscode-remote:// or ssh-remote:// URIs",
+                ssh_key
+            ),
+        };
+    }
+    DoctorCheckItem {
+        id: "ssh_remote_env".into(),
+        status: "ok".into(),
+        label: "SSH / Remote Env".into(),
+        detail: "local session (no SSH or remote URI workspace detected)".into(),
+    }
+}
+
 fn handle_doctor(with_net: bool, as_json: bool) -> Result<()> {
     let cfg = HyperConfig::load();
     let home = dirs::home_dir();
@@ -1220,7 +1392,16 @@ fn handle_doctor(with_net: bool, as_json: bool) -> Result<()> {
         },
     });
 
-    // 10. Release Status
+    // 10. SSH / Remote Workspace Guard
+    let ssh_env = mcp::current_ssh_session();
+    let env_uri_hints = collect_remote_uri_env_hints();
+    checks.push(evaluate_ssh_remote_doctor_check(
+        &cwd,
+        ssh_env.as_ref().map(|(k, v)| (*k, v.as_str())),
+        &env_uri_hints,
+    ));
+
+    // 11. Release Status
     let cur_ver = hyper_core::version();
     let upd_state = load_update_state(cur_ver);
     let (rel_status, rel_detail) = match upd_state.latest_version.as_deref() {
@@ -2110,5 +2291,99 @@ mod tests {
         assert_eq!(st_ok, "ok");
 
         let _ = fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn agent_mode_flag_env_and_semantic_exit_codes_work() {
+        let cli_before =
+            Cli::try_parse_from(["agy-hyper", "--agent-mode", "doctor", "--json"]).unwrap();
+        assert!(cli_before.agent_mode);
+
+        let cli_after =
+            Cli::try_parse_from(["agy-hyper", "doctor", "--json", "--agent-mode"]).unwrap();
+        assert!(cli_after.agent_mode);
+
+        let cli_default = Cli::try_parse_from(["agy-hyper", "doctor"]).unwrap();
+        assert!(!cli_default.agent_mode);
+
+        assert!(is_agent_mode_env_value(Some("1")));
+        assert!(is_agent_mode_env_value(Some("true")));
+        assert!(is_agent_mode_env_value(Some("YES")));
+        assert!(!is_agent_mode_env_value(Some("0")));
+        assert!(!is_agent_mode_env_value(Some("")));
+        assert!(!is_agent_mode_env_value(None));
+
+        assert!(raw_args_request_agent_mode(&[
+            "agy-hyper".into(),
+            "--agent-mode".into(),
+            "bad-cmd".into()
+        ]));
+        assert!(!raw_args_request_agent_mode(&[
+            "agy-hyper".into(),
+            "doctor".into(),
+            "--".into(),
+            "--agent-mode".into()
+        ]));
+
+        // Semantic exit code classification
+        let (code_cfg, label_cfg) =
+            classify_cli_error(&anyhow!("invalid profile 'foo'; use observe|safe|balanced|hyper"));
+        assert_eq!(code_cfg, EXIT_VALIDATION_ERR);
+        assert_eq!(label_cfg, "INVALID_CONFIG");
+
+        let (code_ws, label_ws) = classify_cli_error(&anyhow!(
+            "remote workspace URI 'ssh-remote://host/repo' is not a local filesystem path"
+        ));
+        assert_eq!(code_ws, EXIT_VALIDATION_ERR);
+        assert_eq!(label_ws, "INVALID_WORKSPACE");
+
+        let (code_arg, label_arg) = classify_cli_error(&anyhow!("invalid tx_id '../bad'"));
+        assert_eq!(code_arg, EXIT_VALIDATION_ERR);
+        assert_eq!(label_arg, "INVALID_ARGUMENT");
+
+        let (code_rt, label_rt) =
+            classify_cli_error(&anyhow!("failed to confirm daemon startup"));
+        assert_eq!(code_rt, EXIT_RUNTIME_ERR);
+        assert_eq!(label_rt, "RUNTIME_ERROR");
+
+        let env_json = format_agent_error_envelope("bad profile", label_cfg);
+        assert_eq!(env_json["ok"], false);
+        assert_eq!(env_json["error"], "bad profile");
+        assert_eq!(env_json["code"], "INVALID_CONFIG");
+    }
+
+    #[test]
+    fn doctor_detects_ssh_session_and_remote_workspace_uri() {
+        let local = evaluate_ssh_remote_doctor_check(Path::new("/work/app"), None, &[]);
+        assert_eq!(local.id, "ssh_remote_env");
+        assert_eq!(local.status, "ok");
+
+        let ssh = evaluate_ssh_remote_doctor_check(
+            Path::new("/home/dev/app"),
+            Some(("SSH_CONNECTION", "10.0.0.1 54321 10.0.0.2 22")),
+            &[],
+        );
+        assert_eq!(ssh.status, "info");
+        assert!(ssh.detail.contains("SSH_CONNECTION"));
+        assert!(ssh.detail.contains("remote host"));
+
+        let remote_env = evaluate_ssh_remote_doctor_check(
+            Path::new("/home/dev/app"),
+            None,
+            &[(
+                "AGY_WORKSPACE".to_string(),
+                "vscode-remote://ssh-remote+devbox/home/dev/app".to_string(),
+            )],
+        );
+        assert_eq!(remote_env.status, "warn");
+        assert!(remote_env.detail.contains("vscode-remote://"));
+
+        let remote_cwd = evaluate_ssh_remote_doctor_check(
+            Path::new("ssh-remote://devbox/home/dev/app"),
+            None,
+            &[],
+        );
+        assert_eq!(remote_cwd.status, "warn");
+        assert!(remote_cwd.detail.contains("ssh-remote://"));
     }
 }
