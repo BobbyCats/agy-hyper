@@ -123,7 +123,14 @@ if [[ -n "$SCRIPT_DIR" && -f "${SCRIPT_DIR}/Cargo.toml" && -d "${SCRIPT_DIR}/plu
   "${SCRIPT_DIR}/target/release/agy-hyper" daemon stop >/dev/null 2>&1 || true
   mkdir -p "${PLUGIN_DIR}/bin" "${HOME}/.local/bin"
   rm -rf "${PLUGIN_DIR}/sidecars" "${PLUGIN_DIR}/rules" "${PLUGIN_DIR}/assets" "${PLUGIN_DIR}/mcp_apps"
-  cp -R "${SCRIPT_DIR}/plugin/." "${PLUGIN_DIR}/"
+  for item in "${SCRIPT_DIR}/plugin"/*; do
+    [[ "$(basename "$item")" == "mcp_apps" ]] && continue
+    cp -R "$item" "${PLUGIN_DIR}/"
+  done
+  if [[ -d "${SCRIPT_DIR}/plugin/mcp_apps" ]]; then
+    mkdir -p "${PLUGIN_DIR}/mcp_apps"
+    find "${SCRIPT_DIR}/plugin/mcp_apps" -maxdepth 1 -type f -name '*.html' -exec cp {} "${PLUGIN_DIR}/mcp_apps/" \;
+  fi
   # Atomic fresh-inode replace: overwriting a running Mach-O binary in-place triggers SIGKILL on Apple Silicon.
   TMP_BIN="${PLUGIN_DIR}/bin/.agy-hyper.new.$$"
   cp "${SCRIPT_DIR}/target/release/agy-hyper" "${TMP_BIN}"
@@ -183,6 +190,9 @@ echo "✓ SHA-256 verified (${ACTUAL:0:16}…)"
 STAGE_DIR="${TMP_DIR}/stage"
 mkdir -p "$STAGE_DIR"
 tar -xzf "${TMP_DIR}/${ARCHIVE}" -C "$STAGE_DIR"
+if [[ -d "${STAGE_DIR}/agy-hyper/mcp_apps" ]]; then
+  find "${STAGE_DIR}/agy-hyper/mcp_apps" -mindepth 1 -maxdepth 1 ! -name '*.html' -exec rm -rf {} +
+fi
 
 mkdir -p "$(dirname "$PLUGIN_DIR")" "${HOME}/.local/bin"
 if [[ -x "${PLUGIN_DIR}/bin/agy-hyper" ]]; then

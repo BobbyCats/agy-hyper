@@ -502,7 +502,7 @@ function mapHealthLevel(level) {
   if (lv.includes("loop") || lv.includes("err")) {
     return { cls: "err", label: t("healthLoop") };
   }
-  if (lv.includes("warn") || lv.includes("warm") || lv.includes("watch")) {
+  if (lv.includes("yellow") || lv.includes("amber") || lv.includes("warn") || lv.includes("warm") || lv.includes("watch")) {
     return { cls: "warn", label: t("healthWarming") };
   }
   if (lv.includes("compact")) {
@@ -522,6 +522,13 @@ function mapAuditGrade(grade) {
   return { cls: "ok", label: t("gradeHealthy") };
 }
 
+function resolveCostDisplay(amountLocal, amountUsd, currency) {
+  if (amountLocal !== undefined && amountLocal !== null && Number.isFinite(Number(amountLocal))) {
+    return { amount: Number(amountLocal), currency: currency || "USD" };
+  }
+  return { amount: Number(amountUsd || 0), currency: "USD" };
+}
+
 function renderUsageChartSvg(daily, currency) {
   if (!Array.isArray(daily) || !daily.length) {
     return `<div class="empty-state">${escapeHtml(t("chartEmpty"))}</div>`;
@@ -535,7 +542,12 @@ function renderUsageChartSvg(daily, currency) {
   const plotW = W - padL - padR;
   const plotH = H - padT - padB;
   const isCost = state.usageMetric === "cost";
-  const vals = daily.map((d) => (isCost ? Number(d.cost_usd || 0) : Number(d.tokens || 0)));
+  const hasLocalCost = daily.some((d) => d.cost !== undefined && d.cost !== null);
+  const displayCcy = hasLocalCost ? (currency || "USD") : "USD";
+  const vals = daily.map((d) => {
+    if (!isCost) return Number(d.tokens || 0);
+    return hasLocalCost ? Number(d.cost || 0) : Number(d.cost_usd || 0);
+  });
   const maxVal = Math.max(...vals, isCost ? 0.01 : 1000);
   const n = daily.length;
   const slotW = plotW / n;
@@ -544,7 +556,7 @@ function renderUsageChartSvg(daily, currency) {
   const gridLines = [0, 0.5, 1]
     .map((f) => {
       const y = (padT + plotH * (1 - f)).toFixed(1);
-      const leftLbl = isCost ? fmtCurrency(maxVal * f, currency) : fmtTokens(maxVal * f);
+      const leftLbl = isCost ? fmtCurrency(maxVal * f, displayCcy) : fmtTokens(maxVal * f);
       const rightLbl = `${Math.round(f * 100)}%`;
       return `
         <line x1="${padL}" y1="${y}" x2="${W - padR}" y2="${y}" stroke="var(--line)" stroke-dasharray="${f === 0 ? "" : "2 3"}" />
@@ -566,7 +578,8 @@ function renderUsageChartSvg(daily, currency) {
     const by = (padT + plotH - barH).toFixed(1);
     const active = idx === state.hoveredDayIdx ? " active" : "";
     const shortDate = String(d.date || "").slice(5) || `#${idx + 1}`;
-    const tip = `${d.date || shortDate} · ${fmtTokens(d.tokens || 0)} · ${Number(d.cache_hit_pct || 0).toFixed(0)}% · ${fmtCurrency(d.cost_usd || 0, currency)}`;
+    const dc = resolveCostDisplay(d.cost, d.cost_usd, currency);
+    const tip = `${d.date || shortDate} · ${fmtTokens(d.tokens || 0)} · ${Number(d.cache_hit_pct || 0).toFixed(0)}% · ${fmtCurrency(dc.amount, dc.currency)}`;
     bars.push(
       `<rect class="svg-bar${active}" data-day-idx="${idx}" x="${bx}" y="${by}" width="${barW.toFixed(1)}" height="${barH.toFixed(1)}" rx="2.5"><title>${escapeHtml(tip)}</title></rect>`
     );
@@ -596,8 +609,9 @@ function renderUsageChartSvg(daily, currency) {
     .join("");
 
   const activeDay = daily[state.hoveredDayIdx >= 0 ? state.hoveredDayIdx : daily.length - 1];
+  const activeCost = activeDay ? resolveCostDisplay(activeDay.cost, activeDay.cost_usd, currency) : null;
   const readout = activeDay
-    ? `${activeDay.date || ""} · ${fmtTokens(activeDay.tokens || 0)} · ${Number(activeDay.cache_hit_pct || 0).toFixed(0)}% · ${fmtCurrency(activeDay.cost_usd || 0, currency)}`
+    ? `${activeDay.date || ""} · ${fmtTokens(activeDay.tokens || 0)} · ${Number(activeDay.cache_hit_pct || 0).toFixed(0)}% · ${fmtCurrency(activeCost.amount, activeCost.currency)}`
     : "";
 
   return `
@@ -720,7 +734,10 @@ function render() {
       </div>
       <div class="kpi-cell">
         <span class="kpi-lbl">${escapeHtml(t("kpiCost"))} (${escapeHtml(state.usageWindow.toUpperCase())})</span>
-        <strong class="kpi-val accent">${escapeHtml(fmtCurrency(u.est_cost_usd, u.currency || "USD"))}</strong>
+        ${(() => {
+          const kc = resolveCostDisplay(u.est_cost, u.est_cost_usd, u.currency);
+          return `<strong class="kpi-val accent">${escapeHtml(fmtCurrency(kc.amount, kc.currency))}</strong>`;
+        })()}
         <span class="kpi-sub">${escapeHtml(fmtTokens((u.total_input || 0) + (u.total_cache_read || 0) + (u.total_output || 0)))} tok</span>
       </div>
     </section>`;
@@ -789,18 +806,19 @@ function render() {
     ? `<div class="subagent-list">
         ${subs
           .map((sub, idx) => {
-            const isLoop = (sub.crash_loop_count || 0) > 0 || String(sub.state || "").toLowerCase() === "error_loop";
-            const isStalled = Boolean(sub.stalled) || String(sub.state || "").toLowerCase() === "stalled";
+            const subState = String(sub.state || "").toLowerCase();
+            const isLoop = (sub.crash_loop_count || 0) > 0 || subState === "error_loop";
+            const isStalled = Boolean(sub.stalled) || subState === "stalled";
             const cardCls = isLoop ? "crash-loop" : isStalled ? "stalled" : "";
             const rescuePrompt = buildSubagentRescuePrompt(sub);
-            const showRescue = isLoop || isStalled || Boolean(sub.rescue_prompt);
+            const showRescue = isLoop || isStalled;
 
             let statePill = `<span class="status-pill muted">${escapeHtml(sub.state || "idle")}</span>`;
             if (isLoop) {
               statePill = `<span class="status-pill err">${escapeHtml(t("loopPill"))} ×${sub.crash_loop_count || 1}</span>`;
             } else if (isStalled) {
               statePill = `<span class="status-pill warn">${escapeHtml(t("stalledPill"))}</span>`;
-            } else if (String(sub.state || "").toLowerCase() === "running" || String(sub.state || "").toLowerCase() === "working") {
+            } else if (subState === "active" || subState === "running" || subState === "working") {
               statePill = `<span class="status-pill ok">${escapeHtml(sub.state)}</span>`;
             }
 
@@ -1156,7 +1174,8 @@ rootEl.addEventListener("mouseover", (ev) => {
   const d = daily[idx];
   const readout = document.getElementById("cp-chart-readout");
   if (d && readout) {
-    readout.textContent = `${d.date || ""} · ${fmtTokens(d.tokens || 0)} · ${Number(d.cache_hit_pct || 0).toFixed(0)}% · ${fmtCurrency(d.cost_usd || 0, state.data?.usage?.currency || "USD")}`;
+    const dc = resolveCostDisplay(d.cost, d.cost_usd, state.data?.usage?.currency);
+    readout.textContent = `${d.date || ""} · ${fmtTokens(d.tokens || 0)} · ${Number(d.cache_hit_pct || 0).toFixed(0)}% · ${fmtCurrency(dc.amount, dc.currency)}`;
   }
 });
 

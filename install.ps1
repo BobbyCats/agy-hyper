@@ -79,6 +79,10 @@ try {
   $Stage = Join-Path $Tmp "stage"
   Expand-Archive -Path $ArchivePath -DestinationPath $Stage -Force
   $StagedPlugin = Join-Path $Stage "agy-hyper"
+  $StagedMcpApps = Join-Path $StagedPlugin "mcp_apps"
+  if (Test-Path $StagedMcpApps) {
+    Get-ChildItem -Path $StagedMcpApps -Force | Where-Object { $_.PSIsContainer -or $_.Extension -ine ".html" } | Remove-Item -Recurse -Force
+  }
 
   # Ensure Windows configs point to ./bin/agy-hyper.exe before swapping into place
   foreach ($cfg in @("mcp_config.json", "hooks.json")) {

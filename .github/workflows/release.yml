@@ -49,8 +49,12 @@ jobs:
         if: matrix.ext == 'tar.gz'
         shell: bash
         run: |
-          mkdir -p dist/agy-hyper/bin
-          cp -R plugin/. dist/agy-hyper/
+          mkdir -p dist/agy-hyper/bin dist/agy-hyper/mcp_apps
+          for item in plugin/*; do
+            [[ "$(basename "$item")" == "mcp_apps" ]] && continue
+            cp -R "$item" dist/agy-hyper/
+          done
+          find plugin/mcp_apps -maxdepth 1 -type f -name '*.html' -exec cp {} dist/agy-hyper/mcp_apps/ \;
           cp target/${{ matrix.target }}/release/${{ matrix.bin }} dist/agy-hyper/bin/
           chmod +x dist/agy-hyper/bin/${{ matrix.bin }}
           tar -czf agy-hyper-${{ matrix.target }}.tar.gz -C dist agy-hyper
@@ -58,8 +62,9 @@ jobs:
         if: matrix.ext == 'zip'
         shell: pwsh
         run: |
-          New-Item -ItemType Directory -Force dist/agy-hyper/bin | Out-Null
-          Copy-Item -Recurse plugin/* dist/agy-hyper/
+          New-Item -ItemType Directory -Force dist/agy-hyper/bin, dist/agy-hyper/mcp_apps | Out-Null
+          Get-ChildItem plugin | Where-Object { $_.Name -ne "mcp_apps" } | ForEach-Object { Copy-Item -Recurse $_.FullName dist/agy-hyper/ }
+          Get-ChildItem plugin/mcp_apps -Filter *.html -File | Copy-Item -Destination dist/agy-hyper/mcp_apps/
           Copy-Item target/${{ matrix.target }}/release/${{ matrix.bin }} dist/agy-hyper/bin/
           foreach ($f in @("dist/agy-hyper/mcp_config.json", "dist/agy-hyper/hooks.json")) {
             (Get-Content -Raw $f) -replace '\./bin/agy-hyper(?![\w.])', './bin/agy-hyper.exe' | Set-Content -Path $f -NoNewline

@@ -1856,7 +1856,8 @@ fn build_cockpit_app_payload_with(
                 "date": pt.iso_key,
                 "tokens": pt.total_tokens,
                 "cache_hit_pct": hit_pct,
-                "cost_usd": round4(pt.estimated_cost / fx_div)
+                "cost_usd": round4(pt.estimated_cost / fx_div),
+                "cost": round4(pt.estimated_cost)
             })
         })
         .collect();
@@ -1910,6 +1911,7 @@ fn build_cockpit_app_payload_with(
             "total_cache_read": usage_report.total_cache_read_tokens,
             "total_output": usage_report.total_output_tokens,
             "est_cost_usd": usage_report.estimated_cost_usd,
+            "est_cost": usage_report.estimated_cost,
             "currency": usage_report.currency,
             "daily": daily
         },
