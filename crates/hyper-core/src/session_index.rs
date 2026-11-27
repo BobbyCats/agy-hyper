@@ -580,6 +580,48 @@ pub fn search_sessions(req: &SessionSearchQuery) -> SessionSearchResponse {
     )
 }
 
+fn run_sqlite_tsv(db_path: &Path, sql: &str) -> Option<String> {
+    match Command::new("sqlite3")
+        .args(["-readonly", "-cmd", ".timeout 800", "-separator", "\t"])
+        .arg(db_path)
+        .arg(sql)
+        .output()
+    {
+        Ok(out) if out.status.success() => {
+            return Some(String::from_utf8_lossy(&out.stdout).into_owned());
+        }
+        Ok(_) => return None,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+        Err(_) => return None,
+    }
+
+    // Fallback for hosts (such as Windows) without the `sqlite3` CLI in PATH.
+    let py_script = concat!(
+        "import sqlite3, sys\n",
+        "sys.stdout.reconfigure(encoding='utf-8')\n",
+        "con = sqlite3.connect(sys.argv[1], timeout=0.8)\n",
+        "cur = con.execute(sys.argv[2])\n",
+        "for row in cur:\n",
+        "    print('\\t'.join('' if v is None else str(v) for v in row))\n",
+        "con.close()\n"
+    );
+    for bin in ["python3", "python"] {
+        if let Ok(out) = Command::new(bin)
+            .env("PYTHONUTF8", "1")
+            .arg("-c")
+            .arg(py_script)
+            .arg(db_path)
+            .arg(sql)
+            .output()
+        {
+            if out.status.success() {
+                return Some(String::from_utf8_lossy(&out.stdout).into_owned());
+            }
+        }
+    }
+    None
+}
+
 fn query_agy_sqlite(
     db_path: &Path,
     terms: &[String],
@@ -663,20 +705,12 @@ fn query_agy_sqlite(
         )
     };
 
-    let Ok(out) = Command::new("sqlite3")
-        .args(["-readonly", "-cmd", ".timeout 800", "-separator", "\t"])
-        .arg(db_path)
-        .arg(&sql)
-        .output()
-    else {
+    let Some(stdout) = run_sqlite_tsv(db_path, &sql) else {
         return Vec::new();
     };
-    if !out.status.success() {
-        return Vec::new();
-    }
 
     let mut items = Vec::new();
-    for line in String::from_utf8_lossy(&out.stdout).lines() {
+    for line in stdout.lines() {
         let cols: Vec<&str> = line.split('\t').collect();
         if cols.len() < 8 {
             continue;
@@ -965,20 +999,12 @@ fn query_codex_sqlite(
         where_parts.join(" AND ")
     );
 
-    let Ok(out) = Command::new("sqlite3")
-        .args(["-readonly", "-cmd", ".timeout 800", "-separator", "\t"])
-        .arg(db_path)
-        .arg(&sql)
-        .output()
-    else {
+    let Some(stdout) = run_sqlite_tsv(db_path, &sql) else {
         return Vec::new();
     };
-    if !out.status.success() {
-        return Vec::new();
-    }
 
     let mut items = Vec::new();
-    for line in String::from_utf8_lossy(&out.stdout).lines() {
+    for line in stdout.lines() {
         let cols: Vec<&str> = line.split('\t').collect();
         if cols.len() < 6 {
             continue;
@@ -1043,6 +1069,29 @@ mod tests {
     use crate::namer::SessionRegistryRule;
     use tempfile::tempdir;
 
+    fn seed_sqlite_for_test(db_path: &Path, ddl: &str) {
+        if let Ok(st) = Command::new("sqlite3").arg(db_path).arg(ddl).status() {
+            assert!(st.success(), "sqlite3 DDL seed failed");
+            return;
+        }
+        let py_seed = "import sqlite3, sys; con = sqlite3.connect(sys.argv[1]); con.executescript(sys.argv[2]); con.commit(); con.close()";
+        for bin in ["python3", "python"] {
+            if let Ok(st) = Command::new(bin)
+                .env("PYTHONUTF8", "1")
+                .arg("-c")
+                .arg(py_seed)
+                .arg(db_path)
+                .arg(ddl)
+                .status()
+            {
+                if st.success() {
+                    return;
+                }
+            }
+        }
+        panic!("neither sqlite3 nor python sqlite3 available to seed test DB");
+    }
+
     #[test]
     fn cross_client_cjk_search_achieves_full_recall_and_resolves_codex_name_priority() {
         let dir = tempdir().unwrap();
@@ -1066,8 +1115,7 @@ mod tests {
             INSERT INTO conversations_fts_content (id, c0, c10, c13, c14) VALUES (1, 'agy-1', 'Generic English Title', '门店后厨小票打印机突然无法出单，同时核对昨日提现记录', '已定位蓝牙网关队列阻塞');\
             INSERT INTO conversation_summaries VALUES ('sub-ignored', 'Worker', 'task', 2, '2026-11-26 10:05:00+00:00', '[]', 'p1', 'research', 'agy-1', 1, 0, 0, '2026-11-26 10:01:00+00:00');\
         ";
-        let st1 = Command::new("sqlite3").arg(&agy_db).arg(init_agy).status().unwrap();
-        assert!(st1.success());
+        seed_sqlite_for_test(&agy_db, init_agy);
 
         // Create temporary Codex state_5.sqlite testing COALESCE(NULLIF(name,''), NULLIF(title,''), '')
         let init_codex = "\
@@ -1080,8 +1128,7 @@ mod tests {
             INSERT INTO threads VALUES ('cdx-1', 1764140000, 1764150000, 'vscode', '/work/pos-app', 'Raw multi-line prompt that should be shadowed', 0, '检查热敏打印机驱动', 1764140000000, 1764150000000, '检查热敏打印机驱动与固件升级', '🧩 收银·热敏打印｜驱动修复', NULL);\
             INSERT INTO threads VALUES ('cdx-exec-ignored', 1764140000, 1764155000, 'exec', '/work/pos-app', 'Headless exec', 0, '打印机', 1764140000000, 1764155000000, '打印机', '', NULL);\
         ";
-        let st2 = Command::new("sqlite3").arg(&codex_db).arg(init_codex).status().unwrap();
-        assert!(st2.success());
+        seed_sqlite_for_test(&codex_db, init_codex);
 
         let reg = SessionRegistry {
             version: 1,
@@ -1137,7 +1184,9 @@ mod tests {
         let brain = dir.path().join("brain");
         fs::create_dir_all(&brain).unwrap();
 
-        let home_uri = format!("[\"file://{}\"]", fake_home.display());
+        let home_uri = serde_json::to_string(&vec![format!("file://{}", fake_home.display())])
+            .unwrap()
+            .replace('\'', "''");
         let init_agy = format!(
             "\
             CREATE TABLE conversation_summaries (\
@@ -1156,8 +1205,7 @@ mod tests {
             INSERT INTO conversations_fts_content (id, c0, c10, c13, c14) VALUES (1, 'home-1', 'Session Architecture', 'Compare billing ledger and printer queue behavior across clients', 'Done');\
             "
         );
-        let st = Command::new("sqlite3").arg(&agy_db).arg(&init_agy).status().unwrap();
-        assert!(st.success());
+        seed_sqlite_for_test(&agy_db, &init_agy);
 
         let reg = SessionRegistry {
             version: 1,
