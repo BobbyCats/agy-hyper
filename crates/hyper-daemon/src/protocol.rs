@@ -99,6 +99,12 @@ pub enum DaemonRequest {
     SetCurrency {
         currency: String,
     },
+    SetLanguage {
+        language: String,
+    },
+    SetGlyphStyle {
+        style: String,
+    },
     UpdateFxRates {
         rates: BTreeMap<String, f64>,
         #[serde(default)]
@@ -134,7 +140,73 @@ pub enum DaemonRequest {
         #[serde(default)]
         include_png: bool,
     },
+    SessionStop {
+        conversation_id: String,
+        #[serde(default)]
+        transcript_path: Option<String>,
+        #[serde(default)]
+        workspace_paths: Vec<String>,
+    },
+    NamerSync {
+        #[serde(default)]
+        conversation_id: Option<String>,
+        #[serde(default)]
+        force: bool,
+        #[serde(default = "default_namer_sync_limit")]
+        limit: usize,
+    },
+    SearchSessions {
+        #[serde(default)]
+        query: String,
+        #[serde(default = "default_sessions_client")]
+        client: String,
+        #[serde(default)]
+        group: String,
+        #[serde(default)]
+        days: u32,
+        #[serde(default = "default_sessions_sort")]
+        sort: String,
+        #[serde(default = "default_sessions_limit")]
+        limit: usize,
+    },
+    SessionRadar {
+        #[serde(default = "default_radar_recent_limit")]
+        recent_limit: usize,
+    },
+    RadarAck {
+        conversation_id: String,
+    },
+    RadarFocus {
+        #[serde(default)]
+        client: String,
+        #[serde(default)]
+        conversation_id: String,
+        #[serde(default)]
+        split: Option<String>,
+        #[serde(default)]
+        consume_seq: Option<u64>,
+    },
     Shutdown,
+}
+
+fn default_radar_recent_limit() -> usize {
+    8
+}
+
+fn default_namer_sync_limit() -> usize {
+    16
+}
+
+fn default_sessions_client() -> String {
+    "all".to_string()
+}
+
+fn default_sessions_sort() -> String {
+    "updated".to_string()
+}
+
+fn default_sessions_limit() -> usize {
+    150
 }
 
 fn default_audit_days() -> u32 {

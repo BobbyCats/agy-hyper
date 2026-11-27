@@ -6,7 +6,7 @@
 
 # AGY Hyper
 
-**Google Antigravity（桌面版 & CLI）的本地烧额度体检仪、实时缓存拐点驾驶舱、行级 WAL Diff 撤回与 Rust 加速侧边栏**
+**Google Antigravity（桌面版 & CLI）的本地烧额度体检仪、跨端实时任务雷达（含 macOS 120Hz 顶栏）、行级 WAL Diff 撤回与 Rust 加速侧边栏**
 
 [![CI](https://img.shields.io/github/actions/workflow/status/BobbyCats/agy-hyper/ci.yml?branch=main&style=flat-square&label=CI&logo=githubactions&logoColor=white)](https://github.com/BobbyCats/agy-hyper/actions/workflows/ci.yml)
 [![Release](https://img.shields.io/github/v/release/BobbyCats/agy-hyper?style=flat-square&color=E25B2A&labelColor=1E2022)](https://github.com/BobbyCats/agy-hyper/releases/latest)
@@ -15,7 +15,7 @@
 [![Rust](https://img.shields.io/badge/单文件引擎-Rust_~4.5MB_压缩包-111827.svg?style=flat-square&logo=rust&logoColor=white)](#安全与透明说明)
 [![Follow on X](https://img.shields.io/badge/X-@BobbyCat2025-000000.svg?style=flat-square&logo=x&logoColor=white)](https://x.com/BobbyCat2025)
 
-[English](./README.md) · **简体中文** · [一行安装](#一行安装装完即用) · [CLI 支持](#antigravity-cliagy完整支持) · [实测报告](./docs/ANALYSIS_REPORT.md) · [安全透明](#安全与透明说明) · [实测基准](#可复现实测数据) · [卸载说明](#卸载与保留说明)
+[English](./README.md) · **简体中文** · [一行安装](#一行安装装完即用) · [实时雷达与自动命名](#跨端实时任务雷达macos-顶栏与智能会话命名v060) · [CLI 支持](#antigravity-cliagy完整支持) · [实测报告](./docs/ANALYSIS_REPORT.md) · [安全透明](#安全与透明说明) · [实测基准](#可复现实测数据) · [卸载说明](#卸载与保留说明)
 
 </div>
 
@@ -94,7 +94,10 @@ git clone https://github.com/BobbyCats/agy-hyper.git && cd agy-hyper && ./instal
 ```bash
 agy-hyper audit --share           # 10 秒本机烧额度诊断 + 脱敏 2x 健康体检卡 PNG（零路径 / 零 UUID）
 agy-hyper audit --png audit.png   # 完整版 2x 高清 PNG 诊断卡（1920x1200，纯 Rust 直出）
-agy-hyper audit --svg audit.svg   # 导出深浅色矢量 SVG 诊断卡
+agy-hyper radar                   # 跨 Antigravity & Codex 五态实时任务雷达（待确认 / 卡住 / 未读完成 / 运行中）
+agy-hyper menubar status          # 查看或启停 macOS 原生 120Hz 顶部菜单栏雷达（start|stop|status）
+agy-hyper namer sync              # 一键扫描并为默认标题窗口生成结构化命名（<Emoji> <短码>·<对象>｜<目标>）
+agy-hyper sessions --query "鉴权" # <15ms 跨 Antigravity & Codex 中文子串与全文检索
 agy-hyper doctor --net            # 排查插件/Hook 冲突、Skill 基线负载、守护进程延迟与双栈流连通性
 agy-hyper update                  # SHA-256 强校验一键升级（加 --check 仅检查不安装）
 agy-hyper tx diff <tx_id>         # 撤回前先在终端审阅 WAL 快照的行级红绿 Diff
@@ -107,7 +110,7 @@ agy-hyper ui                      # 在浏览器独立打开 AGY Hyper Deck (127
 
 ## 本机烧钱诊断、切模型/子代理缓存分析与脱敏分享卡（`agy-hyper audit`）
 
-运行 `agy-hyper audit --days 14 --png audit-card.png`（或 `--svg audit-card.svg`），100% 本地离线扫描你自己的 Antigravity 历史日志（零云端上传、零外部浏览器/ImageMagick 依赖）。**v0.5.1** 支持精准定位各模型真实缓存掉崖时间、未命中输入成本、校准后的**首改前净探索膨胀（`pre_edit_delta_p50_tokens`）**（将真实地毯式盲读与首轮全局 Skill/MCP 固定底座剥离，拒绝误报）、**上游流中断 / `EOF` 重试空转损耗**，以及 **切模型 / 主控→子代理缓存分裂损耗**（统计跨模型切换与父子代理交接时的缓存命中骤降与未命中 Token 惩罚）。
+运行 `agy-hyper audit --days 14 --png audit-card.png`（或 `--svg audit-card.svg`），100% 本地离线扫描你自己的 Antigravity 历史日志（零云端上传、零外部浏览器/ImageMagick 依赖）。**v0.6.0** 支持精准定位各模型真实缓存掉崖时间、未命中输入成本、校准后的**首改前净探索膨胀（`pre_edit_delta_p50_tokens`）**（将真实地毯式盲读与首轮全局 Skill/MCP 固定底座剥离，拒绝误报）、**上游流中断 / `EOF` 重试空转损耗**，以及 **切模型 / 主控→子代理缓存分裂损耗**（统计跨模型切换与父子代理交接时的缓存命中骤降与未命中 Token 惩罚）。
 
 如需对外分享体检结果又不暴露隐私，运行 `agy-hyper audit --share`（默认生成 `1920x1080` 2x `agy-hyper-share-card.png`，也可指定 `--share-svg badge.svg` / `--share-png badge.png`）：输出带明确健康评级（`BLEEDING` / `WATCH` / `HEALTHY`）与核心指标（`Cache Hit %`、`First-Edit Blind Read P50`、`Split/Switch Cache Drop`、`Top Quota Drain`）的脱敏卡片，并在代码层**强制零泄露脱敏**（剥离全部本机路径、用户名、仓库/工作区名、会话 UUID 与提示词片段）。
 
@@ -121,11 +124,25 @@ agy-hyper ui                      # 在浏览器独立打开 AGY Hyper Deck (127
 
 ---
 
+## 跨端实时任务雷达、macOS 顶栏与智能会话命名（`v0.6.0`）
+
+当你在 Antigravity 里把项目目录折叠起来，或者同时在 **Antigravity** 与 **Codex** 间多开任务时，后台正在跑、卡在审批或已经跑完的会话会被折叠目录彻底遮住，而默认英文/截断会话标题也会越堆越难找。**v0.6.0** 在 `Hyper Deck` 侧边栏与 **macOS 原生 120Hz SwiftUI 顶部菜单栏伴侣（`AGYHyperBar`）** 中同步补齐跨端调度闭环：
+
+- **五态跨端实时任务雷达（`AGYHyperBar` + `Hyper Deck`）**：即使左侧项目目录全部折叠，也能实时浮出跨 Antigravity 与 Codex 的 `待确认`（工具授权 / `ask_question`）、`疑似卡住`（静默 `>=90s`）、`新完成未读`（耗时 `>=8s` 跑完待审阅）、`运行中` 与 `最近活跃窗口`。内置克制的完成/待批提示音（一键静音）、点击卡片直达对应窗口（按住 `⌥` 点击可在 Antigravity 右侧分屏打开；Codex 自动唤起 `codex://threads/<id>`）、三套 60/120Hz 开源物理动效（`声波` / `律动` / `涟漪`）、`中 / EN / 日` 三语实时同步，以及 macOS `LaunchAgent` 开机自启（原生支持 `Apple Silicon M1–M4` 与 `Intel`，macOS 14+）。
+- **零 MCP 冷启阻塞的智能会话自动命名（`agy-hyper namer` & `🪄`）**：新窗口首轮对话与 `/swarm` 机群运行期间自动重命名为 `<Emoji> <短码>·<对象>｜<目标>`（采用隔离零 MCP 沙箱调用 + 纯 Rust 确定性兜底，命名耗时从 `>25s` 压至 `~2.6s`）。改写空闲历史窗口时自动快照并还原 SQLite `(last_modified_time, last_user_input_time)`，保证侧边栏原有排序纹丝不动；自动锁定你手动改过的标题（传 `--force` 可显式覆盖），并支持通过 `~/.gemini/antigravity/agy-hyper/session_registry.json` 自定义项目目录短码规则。
+- **`<15ms` 跨端中文全文检索（`agy-hyper sessions`）**：摆脱 SQLite 默认分词器对中文子串的漏召回，毫秒级联查 Antigravity（`conversation_summaries.db` + `brain/`）与 Codex（`state_*.sqlite` + `sessions/`），支持按 `--client`、`--group`、`--days` 过滤。
+
+<div align="center">
+  <img src="./assets/menubar-radar-showcase.png" alt="AGYHyperBar 120Hz macOS 顶部菜单栏实时雷达与智能会话命名（中英双语实拍）" width="100%"/>
+</div>
+
+---
+
 ## AGY Hyper Deck（Antigravity 原生侧边栏驾驶舱）
 
-通过官方 `SIDECAR_UI_ENTRYPOINT_AUX_PANE` 协议原生嵌入右侧边栏，100% 本地离线内置 **Apache ECharts 6** 与 **i18next**（`English / 简体中文 / 日本語`，零外网 CDN），自动同步宿主明暗主题。
+通过官方 `SIDECAR_UI_ENTRYPOINT_AUX_PANE` 协议原生嵌入右侧边栏（并支持 `SEP-1865` **MCP Apps** 协议在对话流内联渲染 `hyper_cockpit` 与 `tx-diff` 交互卡片），100% 本地离线内置 **Apache ECharts 6** 与 **i18next**（`English / 简体中文 / 日本語`，零外网 CDN），自动同步宿主明暗主题。
 
-- **分层零侵入架构与无感更新雷达（`v0.5.1`）**：支持先用 **纯观测（Observe）** 模式（只开侧边栏驾驶舱、烧钱诊断与被动 WAL 快照，完全不碰原生工具与 Diff 卡片），或切到 **安全稳健（Safe）**（开启打包读与同步校验，同时保留原生 `edit_file` 行内 Diff），也可以一键解锁 **均衡 / 狂暴** 全量 Rust MCP 加速，并在 **引擎** 页独立开关读/写/校验与更新雷达。新版本发布时，通过 GitHub `Location` 重定向头低频检查（零 REST API 60次/小时限流消耗、零 Hook 网络阻塞），在顶部点亮 `↑ vX.Y.Z` 徽章，支持一键 `SHA256SUMS` 校验升级并无缝重载侧边栏。
+- **分层零侵入架构与无感更新雷达（`v0.6.0`）**：支持先用 **纯观测（Observe）** 模式（只开侧边栏驾驶舱、跨端实时雷达、烧钱诊断与被动 WAL 快照，完全不碰原生工具与 Diff 卡片），或切到 **安全稳健（Safe）**（开启打包读与同步校验，同时保留原生 `edit_file` 行内 Diff），也可以一键解锁 **均衡 / 狂暴** 全量 Rust MCP 加速，并在 **引擎** 页独立开关读/写/校验与更新雷达。新版本发布时，通过 GitHub `Location` 重定向头低频检查（零 REST API 60次/小时限流消耗、零 Hook 网络阻塞），在顶部点亮 `↑ vX.Y.Z` 徽章，支持一键 `SHA256SUMS` 校验升级并无缝重载侧边栏与顶栏。
 - **简洁模式**面向日常使用：展示上下文水位、单轮 P50（含 **推理 / 本地工具 / 流重试·EOF 三段式耗时柱**）、本步与会话累计缓存命中、**子代理与 `run_workflow` 机群树状态条**（自动收拢同步与后台完成的 `wf:*` 编排子节点而不刷屏顶层会话列表、拆分**主控 vs 机群**等价估值、点亮**共享工作区并发写冲突**告警徽章、高亮静默 `>=90s` 的 `STALLED` 卡死与 `连崩 ×N` 子代理并支持**一键救援**，以及主控→子代理切换缓存掉率徽章）、**本会话/整树等价估值缎带**（支持一键切货币）、**分模型自适应缓存保鲜条**（实测/默认 TTL 徽章与连续失败熔断预警 + **一键复制止损指令**）、四档分层模式切换，以及 **WAL 行级 Unified Diff 内联审阅 + 一键撤回**。
 - **极客模式**展开五大深度视图：**耗时瀑布**（`模型推理` / `本地工具` / `流重试·EOF` 三段拆解，一眼看清慢在模型、工具还是网络断流重试）、**上下文轨迹**（双轴堆叠面积曲线 + **上下文 X-Ray 透视条**与首改净增徽章 + 当前会话**切模型与子代理缓存损耗**明细）、**用量账本**（`24H / 7D / 30D / 90D` 增量统计 + 8 种货币 + 手动 **同步汇率** + **本机烧钱诊断与 TTL 断崖**，内置校准评级、流断连重试胶囊、**切模型/子代理缓存诊断**与一键**脱敏分享体检卡** PNG/SVG 导出及内联预览）、**引擎与缓存**（AST/打包/Singleflight 预热命中 + 手动检查更新 + 细粒度 MCP 开关）、**回滚与审计**。
 
@@ -222,7 +239,7 @@ Apple Silicon 实机 Release（LTO 优化）通过 `./bench/run-bench.sh` 实测
 | `hyper_search` + `gix` 只读 Git（单次调用） | **20 ms** | 对比基线 `git status && git log && grep -rn` 耗时 **43 ms**（**2.2x 提速**） |
 | `hyper_pack`（冷启单遍 ripgrep + AST + 切片 + `gix` + 1-hop） | **58 ms** | 零外部 `rg` 与 `git` 二进制依赖 |
 | `agy-hyper statusline`（守护进程热脉冲 + CLI stdin） | **4.2 ms** | 含进程冷启、无锁 UDS 通信与渲染（任何异常保证 `exit 0`） |
-| Rust 单元与安全混沌测试全集（`84/84`） | **2.1 s** | 覆盖磁盘满 staging、悬空软链、4 语言 1-hop、AST 符号体切片、WAL 回滚与共享工作区并发写冲突检测、Singleflight 合并预热、静默/崩溃看门狗、多生态语义诊断分类、流 `EOF` 瀑布与首改净增校准、`run_workflow` 机群树挂载、子代理连崩看门狗与 1-shot 桌面告警、实测 TTL 迁移、上下文 X-Ray、循环熔断、CLI 状态栏、纯 Rust 2x PNG/脱敏战报直出、无感更新雷达与 MCP `PLUGIN_ROOT`/`$HOME` 防呆 |
+| Rust 单元与安全混沌测试全集（`102/102`） | **2.3 s** | 覆盖磁盘满 staging、悬空软链、4 语言 1-hop、AST 符号体切片、WAL 回滚与共享工作区并发写冲突检测、Singleflight 合并预热、静默/崩溃看门狗、多生态语义诊断分类、流 `EOF` 瀑布与首改净增校准、`run_workflow` 机群树挂载、子代理连崩看门狗与 1-shot 桌面告警、跨端五态实时雷达、中文会话索引、零 MCP Connect-RPC 自动命名、MCP Apps（`SEP-1865`）内联卡片、实测 TTL 迁移、上下文 X-Ray、循环熔断、CLI 状态栏、纯 Rust 2x PNG/脱敏战报直出、无感更新雷达与 MCP `PLUGIN_ROOT`/`$HOME`/SSH 防呆 |
 
 ### 端到端受控配对 A/B 实测（`agy` CLI）
 
@@ -250,6 +267,11 @@ Apple Silicon 实机 Release（LTO 优化）通过 `./bench/run-bench.sh` 实测
 agy-hyper doctor [--net] [--json]               # Tree-sitter、gix、插件/Hook 冲突审计、Skill 基线与双栈流连通性体检
 agy-hyper update [--check] [--dismiss <ver>] [--version <ver>] [--json]  # SHA-256 校验检查更新 / 一键原子升级
 agy-hyper daemon start|stop|status              # 管理本地共享 Rust 守护进程
+agy-hyper menubar start|stop|status             # 管理 macOS 原生 120Hz 顶部菜单栏雷达伴侣（AGYHyperBar）
+agy-hyper radar [--recent 8] [--ack <id>] [--json]  # 查看跨端五态实时会话雷达快照
+agy-hyper namer sync [--limit 16] [--json]      # 批量扫描并命名仍为默认标题的近期会话
+agy-hyper namer run <conversation_id> [--force] [--json]  # 立即生成或强制刷新指定会话标题
+agy-hyper sessions [--query <q>] [--client all|agy|codex] [--group <g>] [--days N] [--json]  # <15ms 跨端中文会话检索
 agy-hyper ui [--port 47821]                     # 在浏览器独立打开 AGY Hyper Deck
 agy-hyper audit [--days 14] [--sessions 80] [--share [card.png]] [--share-png card.png] [--share-svg card.svg] [--png card.png] [--svg card.svg] [--theme dark|light] [--json]
 agy-hyper usage [--window 24h|7d|30d|90d] [--currency CNY] [--json]
@@ -295,7 +317,7 @@ $env:AGY_HYPER_UNINSTALL = "1"; irm https://raw.githubusercontent.com/BobbyCats/
 $env:AGY_HYPER_UNINSTALL = "1"; $env:AGY_HYPER_PURGE = "1"; irm https://raw.githubusercontent.com/BobbyCats/agy-hyper/main/install.ps1 | iex
 ```
 
-- **移除范围**：停止本地 Rust 守护进程与 Hyper Deck 侧边栏服务，删除 `~/.gemini/config/plugins/agy-hyper`，清理 `~/.local/bin/agy-hyper` 软链（Unix）或用户 `PATH` 中的插件目录（Windows）。
+- **移除范围**：停止本地 Rust 守护进程、macOS 顶栏 `AGYHyperBar`（及 `~/Library/LaunchAgents/com.agyhyper.menubar.plist` 开机自启项）与 Hyper Deck 侧边栏服务，删除 `~/.gemini/config/plugins/agy-hyper`，清理 `~/.local/bin/agy-hyper` / `~/.local/bin/agy-hyper-bar` 软链（Unix）或用户 `PATH` 中的插件目录（Windows）。
 - **默认保留**：保留 `~/.gemini/antigravity/agy-hyper/`（`config.json`、`usage_ledger.json` 与 `wal/` 撤回快照），防止误删自定义单价或文件备份；如需彻底清空，追加 `--purge`（Windows 为 `-Purge`）即可。安装与卸载全程均不触碰 `~/.gemini/config/config.json`。
 
 ---

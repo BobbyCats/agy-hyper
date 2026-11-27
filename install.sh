@@ -43,6 +43,52 @@ EOF
   esac
 done
 
+setup_macos_menubar() {
+  local swift_src="${1:-}"
+  if [[ "$(uname -s | tr '[:upper:]' '[:lower:]')" != "darwin" ]]; then
+    return 0
+  fi
+  if [[ -n "$swift_src" && -f "$swift_src" ]] && command -v swiftc >/dev/null 2>&1; then
+    echo "→ Building native macOS MenuBar companion (AGYHyperBar)..."
+    local tmp_bar="${PLUGIN_DIR}/bin/.agy-hyper-bar.new.$$"
+    local arch_flag="arm64-apple-macos14.0"
+    [[ "$(uname -m)" == "x86_64" ]] && arch_flag="x86_64-apple-macos14.0"
+    if swiftc -O -target "$arch_flag" "$swift_src" -framework AppKit -framework SwiftUI -o "$tmp_bar"; then
+      chmod +x "$tmp_bar"
+      mv -f "$tmp_bar" "${PLUGIN_DIR}/bin/agy-hyper-bar"
+    else
+      rm -f "$tmp_bar" 2>/dev/null || true
+    fi
+  fi
+  if [[ -x "${PLUGIN_DIR}/bin/agy-hyper-bar" ]]; then
+    chmod +x "${PLUGIN_DIR}/bin/agy-hyper-bar"
+    ln -sf "${PLUGIN_DIR}/bin/agy-hyper-bar" "${HOME}/.local/bin/agy-hyper-bar"
+    local plist_dir="${HOME}/Library/LaunchAgents"
+    local plist_file="${plist_dir}/com.agyhyper.menubar.plist"
+    mkdir -p "$plist_dir"
+    cat > "$plist_file" <<PLIST
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.agyhyper.menubar</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>${PLUGIN_DIR}/bin/agy-hyper-bar</string>
+  </array>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <false/>
+</dict>
+</plist>
+PLIST
+    "${PLUGIN_DIR}/bin/agy-hyper" menubar start >/dev/null 2>&1 || true
+    echo "✓ Native macOS MenuBar radar active + auto-start registered (AGYHyperBar)."
+  fi
+}
+
 recycle_sidecar() {
   # Gracefully recycle our running hyper_deck sidecar (if any) so Antigravity's
   # restart_policy="always" reloads updated routes/UI immediately without stale 404s.
@@ -58,13 +104,17 @@ recycle_sidecar() {
   fi
 }
 
-if [[ "$ACTION" == "uninstall" ]]; then
+  if [[ "$ACTION" == "uninstall" ]]; then
   printf "\n⚡ Uninstalling AGY Hyper...\n"
   if [[ -x "${PLUGIN_DIR}/bin/agy-hyper" ]]; then
+    "${PLUGIN_DIR}/bin/agy-hyper" menubar stop >/dev/null 2>&1 || true
     "${PLUGIN_DIR}/bin/agy-hyper" daemon stop >/dev/null 2>&1 || true
   elif [[ -x "${BIN_LINK}" ]]; then
+    "${BIN_LINK}" menubar stop >/dev/null 2>&1 || true
     "${BIN_LINK}" daemon stop >/dev/null 2>&1 || true
   fi
+  rm -f "${HOME}/.local/bin/agy-hyper-bar" 2>/dev/null || true
+  rm -f "${HOME}/Library/LaunchAgents/com.agyhyper.menubar.plist" 2>/dev/null || true
   recycle_sidecar
 
   if [[ -L "$BIN_LINK" || -f "$BIN_LINK" ]]; then
@@ -120,6 +170,7 @@ if [[ -n "$SCRIPT_DIR" && -f "${SCRIPT_DIR}/Cargo.toml" && -d "${SCRIPT_DIR}/plu
     echo "→ Building release binary via cargo..."
     (cd "$SCRIPT_DIR" && cargo build --release)
   fi
+  "${SCRIPT_DIR}/target/release/agy-hyper" menubar stop >/dev/null 2>&1 || true
   "${SCRIPT_DIR}/target/release/agy-hyper" daemon stop >/dev/null 2>&1 || true
   mkdir -p "${PLUGIN_DIR}/bin" "${HOME}/.local/bin"
   rm -rf "${PLUGIN_DIR}/sidecars" "${PLUGIN_DIR}/rules" "${PLUGIN_DIR}/assets" "${PLUGIN_DIR}/mcp_apps"
@@ -137,6 +188,7 @@ if [[ -n "$SCRIPT_DIR" && -f "${SCRIPT_DIR}/Cargo.toml" && -d "${SCRIPT_DIR}/plu
   chmod +x "${TMP_BIN}"
   mv -f "${TMP_BIN}" "${PLUGIN_DIR}/bin/agy-hyper"
   ln -sf "${PLUGIN_DIR}/bin/agy-hyper" "${BIN_LINK}"
+  setup_macos_menubar "${SCRIPT_DIR}/macos/AGYHyperBar/main.swift"
   if [[ "$OBSERVE" -eq 1 ]]; then
     "${PLUGIN_DIR}/bin/agy-hyper" config profile observe >/dev/null 2>&1 || true
     echo "✓ Profile set to 'observe' (zero-intrusion cockpit only; switch anytime in Hyper Deck)."
@@ -196,6 +248,7 @@ fi
 
 mkdir -p "$(dirname "$PLUGIN_DIR")" "${HOME}/.local/bin"
 if [[ -x "${PLUGIN_DIR}/bin/agy-hyper" ]]; then
+  "${PLUGIN_DIR}/bin/agy-hyper" menubar stop >/dev/null 2>&1 || true
   "${PLUGIN_DIR}/bin/agy-hyper" daemon stop >/dev/null 2>&1 || true
 fi
 BACKUP_DIR="${PLUGIN_DIR}.bak.$$"
@@ -212,6 +265,11 @@ fi
 
 chmod +x "${PLUGIN_DIR}/bin/agy-hyper"
 ln -sf "${PLUGIN_DIR}/bin/agy-hyper" "${BIN_LINK}"
+if [[ ! -x "${PLUGIN_DIR}/bin/agy-hyper-bar" && -f "${PLUGIN_DIR}/macos/AGYHyperBar/main.swift" ]]; then
+  setup_macos_menubar "${PLUGIN_DIR}/macos/AGYHyperBar/main.swift"
+else
+  setup_macos_menubar ""
+fi
 if [[ "$OBSERVE" -eq 1 ]]; then
   "${PLUGIN_DIR}/bin/agy-hyper" config profile observe >/dev/null 2>&1 || true
   echo "✓ Profile set to 'observe' (zero-intrusion cockpit only; switch anytime in Hyper Deck)."

@@ -25,6 +25,14 @@ pub fn default_currency() -> String {
     "USD".to_string()
 }
 
+pub fn default_ui_language() -> String {
+    "auto".to_string()
+}
+
+pub fn default_radar_glyph_style() -> String {
+    "waveform".to_string()
+}
+
 pub fn default_fx_source() -> String {
     "offline".to_string()
 }
@@ -44,6 +52,28 @@ pub fn default_fx_rates() -> BTreeMap<String, f64> {
 
 pub fn default_true() -> bool {
     true
+}
+
+pub fn default_namer_model() -> String {
+    "gemini-3.8-flash-low".to_string()
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SessionNamingConfig {
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    #[serde(default = "default_namer_model")]
+    pub model: String,
+}
+
+impl Default for SessionNamingConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            model: default_namer_model(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -103,9 +133,15 @@ pub struct HyperConfig {
     #[serde(default = "default_true")]
     pub enable_watchdog_notify: bool,
     #[serde(default = "default_true")]
+    pub enable_radar_sound: bool,
+    #[serde(default = "default_true")]
     pub enable_update_check: bool,
     #[serde(default = "default_currency")]
     pub display_currency: String,
+    #[serde(default = "default_ui_language")]
+    pub ui_language: String,
+    #[serde(default = "default_radar_glyph_style")]
+    pub radar_glyph_style: String,
     #[serde(default = "default_fx_rates")]
     pub fx_rates: BTreeMap<String, f64>,
     #[serde(default)]
@@ -114,6 +150,8 @@ pub struct HyperConfig {
     pub fx_source: String,
     #[serde(default)]
     pub pricing_overrides: BTreeMap<String, ModelPriceRate>,
+    #[serde(default)]
+    pub session_naming: SessionNamingConfig,
 }
 
 impl Default for HyperConfig {
@@ -137,12 +175,16 @@ impl Default for HyperConfig {
             max_wal_entries: 100,
             enable_ui_pill: true,
             enable_watchdog_notify: true,
+            enable_radar_sound: true,
             enable_update_check: true,
             display_currency: default_currency(),
+            ui_language: default_ui_language(),
+            radar_glyph_style: default_radar_glyph_style(),
             fx_rates: default_fx_rates(),
             fx_updated_at_ms: None,
             fx_source: default_fx_source(),
             pricing_overrides: BTreeMap::new(),
+            session_naming: SessionNamingConfig::default(),
         }
     }
 }
@@ -159,6 +201,7 @@ impl HyperConfig {
                 self.enable_mcp_check = false;
                 self.allow_custom_argv_checks = false;
                 self.prewarm_tier2 = false;
+                self.session_naming.enabled = false;
             }
             Profile::Safe => {
                 self.enable_mcp_read = true;
@@ -166,6 +209,7 @@ impl HyperConfig {
                 self.enable_mcp_check = true;
                 self.allow_custom_argv_checks = false;
                 self.prewarm_tier2 = false;
+                self.session_naming.enabled = true;
             }
             Profile::Balanced => {
                 self.enable_mcp_read = true;
@@ -173,6 +217,7 @@ impl HyperConfig {
                 self.enable_mcp_check = true;
                 self.allow_custom_argv_checks = true;
                 self.prewarm_tier2 = false;
+                self.session_naming.enabled = true;
             }
             Profile::Hyper => {
                 self.enable_mcp_read = true;
@@ -180,6 +225,7 @@ impl HyperConfig {
                 self.enable_mcp_check = true;
                 self.allow_custom_argv_checks = true;
                 self.prewarm_tier2 = true;
+                self.session_naming.enabled = true;
             }
         }
     }
@@ -210,12 +256,40 @@ impl HyperConfig {
             "allow_custom_argv_checks" => self.allow_custom_argv_checks = value,
             "enable_ui_pill" => self.enable_ui_pill = value,
             "enable_watchdog_notify" => self.enable_watchdog_notify = value,
+            "enable_radar_sound" => self.enable_radar_sound = value,
             "enable_update_check" => self.enable_update_check = value,
             "enable_mcp_read" => self.enable_mcp_read = value,
             "enable_mcp_edit" => self.enable_mcp_edit = value,
             "enable_mcp_check" => self.enable_mcp_check = value,
+            "session_naming" | "enable_session_naming" => self.session_naming.enabled = value,
             _ => anyhow::bail!("unknown config toggle '{}'", key),
         }
+        Ok(())
+    }
+
+    pub fn set_ui_language(&mut self, raw: &str) -> Result<()> {
+        let norm = match raw.trim().to_ascii_lowercase().as_str() {
+            "" | "auto" | "system" => "auto",
+            "zh" | "zh-cn" | "zh_cn" | "zh-hans" => "zh-CN",
+            "en" | "en-us" | "en-gb" => "en",
+            "ja" | "ja-jp" => "ja",
+            _ => anyhow::bail!("unsupported ui_language '{}' (expected auto|zh-CN|en|ja)", raw),
+        };
+        self.ui_language = norm.to_string();
+        Ok(())
+    }
+
+    pub fn set_radar_glyph_style(&mut self, raw: &str) -> Result<()> {
+        let norm = match raw.trim().to_ascii_lowercase().as_str() {
+            "" | "waveform" | "ldrs-waveform" => "waveform",
+            "bars" | "bars_fade" | "svg-spinners-bars" => "bars_fade",
+            "ripples" | "pulse_rings" | "sonar" => "pulse_rings",
+            _ => anyhow::bail!(
+                "unsupported radar_glyph_style '{}' (expected waveform|bars_fade|pulse_rings)",
+                raw
+            ),
+        };
+        self.radar_glyph_style = norm.to_string();
         Ok(())
     }
 
@@ -324,6 +398,14 @@ impl HyperConfig {
 
     pub fn ledger_path() -> PathBuf {
         Self::data_dir().join("usage_ledger.json")
+    }
+
+    pub fn session_registry_path() -> PathBuf {
+        Self::data_dir().join("session_registry.json")
+    }
+
+    pub fn session_titles_dir() -> PathBuf {
+        Self::data_dir().join("session_titles")
     }
 
     pub fn load() -> Self {
@@ -438,5 +520,10 @@ mod tests {
         let mut toggled = legacy;
         toggled.set_toggle("enable_update_check", false).unwrap();
         assert!(!toggled.enable_update_check);
+        assert!(toggled.session_naming.enabled);
+        assert_eq!(toggled.session_naming.model, "gemini-3.8-flash-low");
+        toggled.set_toggle("session_naming", false).unwrap();
+        assert!(!toggled.session_naming.enabled);
+        assert!(!cfg.session_naming.enabled);
     }
 }

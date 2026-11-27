@@ -849,6 +849,93 @@ pub fn run_post_tool_use() -> Result<()> {
     Ok(())
 }
 
+/// Pure, deterministic gate for `Stop` lifecycle hook (`<0.1ms`).
+/// - Blocks recursion via `AGY_HYPER_NAMER_WORKER == "1"` or `"antigravity-cli"` / `"antigravity-ide"` paths.
+/// - Drops non-normal terminations (`terminationReason != "NO_TOOL_CALL"`).
+/// - Intentionally ALLOWS `fullyIdle == false` (e.g. parked `/swarm` or `browser` subagents) and
+///   `continuationActive == true` (`/goal` loops) when `terminationReason == "NO_TOOL_CALL"`!
+pub(crate) fn extract_eligible_stop_job(
+    payload: &Value,
+    namer_worker_env: Option<&str>,
+) -> Option<(String, Option<String>, Vec<String>)> {
+    if namer_worker_env.map(str::trim) == Some("1") {
+        return None;
+    }
+
+    for path_key in ["transcriptPath", "artifactDirectoryPath", "appDataDir"] {
+        if let Some(p) = payload.get(path_key).and_then(Value::as_str) {
+            let lower = p.to_ascii_lowercase();
+            if lower.contains("antigravity-cli") || lower.contains("antigravity-ide") {
+                return None;
+            }
+        }
+    }
+
+    if payload.get("terminationReason").and_then(Value::as_str) != Some("NO_TOOL_CALL") {
+        return None;
+    }
+
+    let raw_cid = payload.get("conversationId").and_then(Value::as_str)?;
+    let cid = hyper_core::config::sanitize_id(raw_cid)?.to_string();
+
+    let transcript_path = payload
+        .get("transcriptPath")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(String::from);
+
+    let mut workspaces: Vec<String> = payload
+        .get("workspacePaths")
+        .and_then(Value::as_array)
+        .map(|arr| {
+            arr.iter()
+                .filter_map(Value::as_str)
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(String::from)
+                .collect()
+        })
+        .unwrap_or_default();
+
+    if let Some(cwd) = payload
+        .get("cwd")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        if !workspaces.iter().any(|w| w == cwd) {
+            workspaces.push(cwd.to_string());
+        }
+    }
+
+    Some((cid, transcript_path, workspaces))
+}
+
+/// Sub-2ms `Stop` hook: validates eligibility, fire-and-forget enqueues `SessionStop` to `hyper-daemon`,
+/// and unconditionally prints `{}` on stdout without blocking the agent turn loop.
+pub fn run_stop() -> Result<()> {
+    let payload = read_stdin_json();
+    let worker_env = std::env::var("AGY_HYPER_NAMER_WORKER").ok();
+    if let Some((conversation_id, transcript_path, workspace_paths)) =
+        extract_eligible_stop_job(&payload, worker_env.as_deref())
+    {
+        let cfg = HyperConfig::load();
+        if cfg.session_naming.enabled {
+            let req = DaemonRequest::SessionStop {
+                conversation_id,
+                transcript_path,
+                workspace_paths,
+            };
+            if hyper_daemon::client::send_request_with_timeout(&req, 25).is_err() {
+                let _ = hyper_daemon::client::spawn_daemon_detached();
+            }
+        }
+    }
+    println!("{{}}");
+    Ok(())
+}
+
 fn prune_guard_state(dir: &Path, max_files: usize) {
     let Ok(entries) = fs::read_dir(dir) else { return };
     let mut files: Vec<(std::time::SystemTime, PathBuf)> = entries
@@ -1147,6 +1234,50 @@ mod tests {
         assert!(!should_notify_post_tool_use("run_command", false));
         assert!(!should_notify_post_tool_use("call_mcp_tool", false));
         assert!(!should_notify_post_tool_use("mcp_agy-hyper_hyper_edit", false));
+
+        // Stop hook gate: recursion guards, fullyIdle, terminationReason, and /goal continuationActive
+        let base_stop = json!({
+            "hookEventName": "Stop",
+            "conversationId": "11111111-2222-3333-4444-555555555555",
+            "transcriptPath": "/tmp/.gemini/antigravity/brain/11111111/transcript.jsonl",
+            "artifactDirectoryPath": "/tmp/.gemini/antigravity/brain/11111111",
+            "fullyIdle": true,
+            "continuationActive": true,
+            "terminationReason": "NO_TOOL_CALL",
+            "workspacePaths": ["/work/app"]
+        });
+        // Allows continuationActive == true when terminationReason == NO_TOOL_CALL
+        assert!(extract_eligible_stop_job(&base_stop, None).is_some());
+        // Blocks AGY_HYPER_NAMER_WORKER == "1"
+        assert!(extract_eligible_stop_job(&base_stop, Some("1")).is_none());
+        // Blocks antigravity-cli / antigravity-ide recursion paths
+        let cli_stop = json!({
+            "conversationId": "11111111-2222-3333-4444-555555555555",
+            "transcriptPath": "/tmp/.gemini/antigravity-cli/brain/11111111/transcript.jsonl",
+            "fullyIdle": true,
+            "terminationReason": "NO_TOOL_CALL"
+        });
+        assert!(extract_eligible_stop_job(&cli_stop, None).is_none());
+        let ide_stop = json!({
+            "conversationId": "11111111-2222-3333-4444-555555555555",
+            "artifactDirectoryPath": "/tmp/.gemini/antigravity-ide/brain/11111111",
+            "fullyIdle": true,
+            "terminationReason": "NO_TOOL_CALL"
+        });
+        assert!(extract_eligible_stop_job(&ide_stop, None).is_none());
+        // Allows fullyIdle == false (e.g. parked /swarm or browser subagent) when NO_TOOL_CALL, blocks non-NO_TOOL_CALL reasons
+        let busy_stop = json!({
+            "conversationId": "11111111-2222-3333-4444-555555555555",
+            "fullyIdle": false,
+            "terminationReason": "NO_TOOL_CALL"
+        });
+        assert!(extract_eligible_stop_job(&busy_stop, None).is_some());
+        let canceled_stop = json!({
+            "conversationId": "11111111-2222-3333-4444-555555555555",
+            "fullyIdle": true,
+            "terminationReason": "USER_CANCELED"
+        });
+        assert!(extract_eligible_stop_job(&canceled_stop, None).is_none());
 
         let _ = fs::remove_dir_all(&tmp);
     }

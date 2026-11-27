@@ -159,6 +159,7 @@ function callDaemon(reqObj, timeoutMs = 1500) {
       client = net.createConnection(sock);
     }
 
+    client.setEncoding('utf8');
     let buf = '';
     let settled = false;
     const timer = setTimeout(() => {
@@ -173,7 +174,7 @@ function callDaemon(reqObj, timeoutMs = 1500) {
       client.write(`${authPrefix}${JSON.stringify(reqObj)}\n`);
     });
     client.on('data', (chunk) => {
-      buf += chunk.toString('utf8');
+      buf += chunk;
       const nl = buf.indexOf('\n');
       if (nl !== -1 && !settled) {
         settled = true;
@@ -228,7 +229,7 @@ function readInstalledVersion() {
   } catch {
     // fallback to built-in version
   }
-  return '0.5.1';
+  return '0.6.0';
 }
 
 function parseSemverStrict(raw) {
@@ -786,6 +787,143 @@ async function getUsageSummary(windowName = '7d', currency = '', tzOffsetMins = 
   return await runCliJson(args);
 }
 
+async function getSessions(params = {}) {
+  const query = String(params.q ?? params.query ?? '').trim();
+  const client = String(params.client || 'all').trim().toLowerCase();
+  const group = String(params.group || '').trim();
+  const days = Number.isFinite(Number(params.days)) ? Math.max(0, Math.min(3650, Math.trunc(Number(params.days)))) : 0;
+  const sort = String(params.sort || 'updated').trim().toLowerCase() === 'created' ? 'created' : 'updated';
+  const limit = Number.isFinite(Number(params.limit)) ? Math.max(1, Math.min(500, Math.trunc(Number(params.limit)))) : 150;
+
+  try {
+    const resp = await callDaemon(
+      {
+        op: 'search_sessions',
+        query,
+        client,
+        group,
+        days,
+        sort,
+        limit,
+      },
+      5000
+    );
+    if (resp?.status === 'ok') return resp.data;
+    if (resp?.status === 'err') return { ok: false, error: resp.message };
+  } catch {
+    // fallback CLI
+  }
+  const args = [
+    'sessions',
+    '--json',
+    '--query',
+    query,
+    '--client',
+    client,
+    '--group',
+    group,
+    '--days',
+    String(days),
+    '--sort',
+    sort,
+    '--limit',
+    String(limit),
+  ];
+  return await runCliJson(args);
+}
+
+async function getRadar(recentLimit = 6) {
+  const recent = Number.isFinite(Number(recentLimit)) ? Math.max(1, Math.min(24, Math.trunc(Number(recentLimit)))) : 6;
+  try {
+    const resp = await callDaemon({ op: 'session_radar', recent_limit: recent }, 3000);
+    if (resp?.status === 'ok') return resp.data;
+    if (resp?.status === 'err') return { ok: false, error: resp.message };
+  } catch {
+    // fallback CLI
+  }
+  return await runCliJson(['radar', '--json', '--recent', String(recent)]);
+}
+
+async function ackRadarSession(conversationId = '') {
+  const cid = String(conversationId || '').trim();
+  if (!cid) return { ok: false, error: 'missing conversation_id' };
+  try {
+    const resp = await callDaemon({ op: 'radar_ack', conversation_id: cid }, 1500);
+    if (resp?.status === 'ok') return resp.data;
+  } catch {
+    // ignore
+  }
+  return { ok: true };
+}
+
+async function syncNamerTitles(body = {}) {
+  const cid = String(body.conversation_id || body.conversationId || '').trim();
+  const force = Boolean(body.force);
+  const limit = Number.isFinite(Number(body.limit)) ? Math.max(1, Math.min(48, Math.trunc(Number(body.limit)))) : 16;
+  const req = cid
+    ? { op: 'namer_sync', conversation_id: cid, force, limit }
+    : { op: 'namer_sync', force, limit };
+  try {
+    const resp = await callDaemon(req, cid ? 22000 : 2500);
+    if (resp?.status === 'ok') return resp.data;
+    if (resp?.status === 'err') return { ok: false, error: resp.message };
+  } catch {
+    // fallback CLI
+  }
+  if (cid) {
+    const args = ['namer', 'run', cid, '--json'];
+    if (force) args.push('--force');
+    return await runCliJson(args);
+  }
+  return await runCliJson(['namer', 'sync', '--limit', String(limit), '--json']);
+}
+
+async function handleRadarFocus(body = {}) {
+  const consumeSeq = Number(body.consume_seq ?? body.consumeSeq ?? 0);
+  if (Number.isFinite(consumeSeq) && consumeSeq > 0) {
+    try {
+      const resp = await callDaemon({ op: 'radar_focus', consume_seq: Math.trunc(consumeSeq) }, 1500);
+      if (resp?.status === 'ok') return resp.data;
+    } catch {
+      // ignore
+    }
+    return { ok: true };
+  }
+  const client = String(body.client || 'agy').trim().toLowerCase();
+  const cid = String(body.conversation_id || body.conversationId || '').trim();
+  const split = body.split ? String(body.split).trim() : null;
+  if (!cid) return { ok: false, error: 'missing conversation_id' };
+  try {
+    const resp = await callDaemon({ op: 'radar_focus', client, conversation_id: cid, split }, 1500);
+    if (resp?.status === 'ok') return resp.data;
+  } catch {
+    // ignore
+  }
+  return { ok: false, error: 'daemon unavailable' };
+}
+
+function openExternalSessionUri(rawUri) {
+  const uri = String(rawUri || '').trim();
+  if (!/^codex:\/\/threads\/[A-Za-z0-9_-]{4,96}$/.test(uri)) {
+    return { ok: false, error: 'unsupported session URI' };
+  }
+  const cmdArgs =
+    process.platform === 'darwin'
+      ? ['open', ['-g', uri]]
+      : process.platform === 'win32'
+        ? ['cmd', ['/c', 'start', '', uri]]
+        : ['xdg-open', [uri]];
+  try {
+    const r = spawnSync(cmdArgs[0], cmdArgs[1], { timeout: 2500, windowsHide: true });
+    if (!r.error && r.status === 0) {
+      return { ok: true, uri };
+    }
+    return { ok: false, error: String(r.stderr || r.error?.message || 'open failed').trim() };
+  } catch (e) {
+    return { ok: false, error: String(e?.message || e) };
+  }
+}
+
 async function setCurrency(currency) {
   const code = String(currency || 'USD').trim().toUpperCase();
   try {
@@ -802,6 +940,27 @@ async function setCurrency(currency) {
     });
   });
   return { ok: true };
+}
+
+async function setUiPrefs(body = {}) {
+  let lastData = null;
+  if (typeof body.language === 'string' && body.language.trim()) {
+    try {
+      const resp = await callDaemon({ op: 'set_language', language: body.language.trim() });
+      if (resp?.status === 'ok') lastData = resp.data;
+    } catch {
+      // ignore
+    }
+  }
+  if (typeof body.glyph_style === 'string' && body.glyph_style.trim()) {
+    try {
+      const resp = await callDaemon({ op: 'set_glyph_style', style: body.glyph_style.trim() });
+      if (resp?.status === 'ok') lastData = resp.data;
+    } catch {
+      // ignore
+    }
+  }
+  return { ok: true, config: lastData };
 }
 
 async function fetchJsonWithTimeout(url, timeoutMs = 4500) {
@@ -1029,12 +1188,48 @@ async function startSidecarNative() {
     }
   }, 'GET');
 
+  app.api('/api/sessions', async (data) => {
+    try {
+      return await getSessions(data || {});
+    } catch (e) {
+      return { ok: false, error: String(e?.message || e) };
+    }
+  }, 'GET');
+
+  app.api('/api/radar', async (data) => {
+    try {
+      return await getRadar(data?.recent ?? 6);
+    } catch (e) {
+      return { ok: false, error: String(e?.message || e) };
+    }
+  }, 'GET');
+
+  app.api('/api/radar/ack', async (data) => {
+    return await ackRadarSession(data?.conversation_id || data?.conversationId || '');
+  }, 'POST');
+
+  app.api('/api/radar/focus', async (data) => {
+    return await handleRadarFocus(data || {});
+  }, 'POST');
+
+  app.api('/api/namer/sync', async (data) => {
+    return await syncNamerTitles(data || {});
+  }, 'POST');
+
+  app.api('/api/sessions/open', async (data) => {
+    return openExternalSessionUri(data?.uri || data?.url || '');
+  }, 'POST');
+
   app.api('/api/currency', async (data) => {
     try {
       return await setCurrency(data?.currency || 'USD');
     } catch (e) {
       return { ok: false, error: String(e?.message || e) };
     }
+  }, 'POST');
+
+  app.api('/api/ui-prefs', async (data) => {
+    return await setUiPrefs(data || {});
   }, 'POST');
 
   app.api('/api/fx/sync', async () => {
@@ -1199,9 +1394,43 @@ function startStandaloneHttp() {
         );
         return sendJson(200, rep);
       }
+      if (pathname === '/api/sessions' && req.method === 'GET') {
+        const rep = await getSessions({
+          q: url.searchParams.get('q') ?? url.searchParams.get('query') ?? '',
+          client: url.searchParams.get('client') || 'all',
+          group: url.searchParams.get('group') || '',
+          days: url.searchParams.get('days') || '0',
+          sort: url.searchParams.get('sort') || 'updated',
+          limit: url.searchParams.get('limit') || '150',
+        });
+        return sendJson(200, rep);
+      }
+      if (pathname === '/api/radar' && req.method === 'GET') {
+        return sendJson(200, await getRadar(url.searchParams.get('recent') || '6'));
+      }
+      if (pathname === '/api/radar/ack' && req.method === 'POST') {
+        const body = await readBody(req);
+        return sendJson(200, await ackRadarSession(body.conversation_id || body.conversationId || ''));
+      }
+      if (pathname === '/api/radar/focus' && req.method === 'POST') {
+        const body = await readBody(req);
+        return sendJson(200, await handleRadarFocus(body));
+      }
+      if (pathname === '/api/namer/sync' && req.method === 'POST') {
+        const body = await readBody(req);
+        return sendJson(200, await syncNamerTitles(body));
+      }
+      if (pathname === '/api/sessions/open' && req.method === 'POST') {
+        const body = await readBody(req);
+        return sendJson(200, openExternalSessionUri(body.uri || body.url || ''));
+      }
       if (pathname === '/api/currency' && req.method === 'POST') {
         const body = await readBody(req);
         return sendJson(200, await setCurrency(body.currency || 'USD'));
+      }
+      if (pathname === '/api/ui-prefs' && req.method === 'POST') {
+        const body = await readBody(req);
+        return sendJson(200, await setUiPrefs(body));
       }
       if (pathname === '/api/fx/sync' && req.method === 'POST') {
         return sendJson(200, await syncLiveFxRates());

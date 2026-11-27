@@ -804,6 +804,22 @@ impl DaemonState {
         Ok(self.config.clone())
     }
 
+    pub fn set_ui_language(&mut self, language: &str) -> Result<HyperConfig, String> {
+        self.config
+            .set_ui_language(language)
+            .map_err(|e| e.to_string())?;
+        self.config.save().map_err(|e| e.to_string())?;
+        Ok(self.config.clone())
+    }
+
+    pub fn set_radar_glyph_style(&mut self, style: &str) -> Result<HyperConfig, String> {
+        self.config
+            .set_radar_glyph_style(style)
+            .map_err(|e| e.to_string())?;
+        self.config.save().map_err(|e| e.to_string())?;
+        Ok(self.config.clone())
+    }
+
     pub fn update_fx_rates(
         &mut self,
         rates: BTreeMap<String, f64>,

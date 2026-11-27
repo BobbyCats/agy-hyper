@@ -990,7 +990,7 @@
     const tree = snap.session_tree || null;
     const activeConvId = pulse?.conversation_id || bench?.conversation_id || '';
 
-    $('version-pill').textContent = `v${eng.version || snap.version || snap.update_state?.current_version || '0.5.1'}`;
+    $('version-pill').textContent = `v${eng.version || snap.version || snap.update_state?.current_version || '0.6.0'}`;
     renderUpdateRadar(snap, state);
     const isUds = snap.transport === 'uds-daemon';
     $('daemon-dot').classList.toggle('warn', !isUds);
@@ -1151,6 +1151,8 @@
     $('tog-argv').checked = Boolean(cfg.allow_custom_argv_checks);
     $('tog-pill').checked = Boolean(cfg.enable_ui_pill);
     if ($('tog-watchdog-notify')) $('tog-watchdog-notify').checked = cfg.enable_watchdog_notify !== false;
+    if ($('tog-session-naming')) $('tog-session-naming').checked = cfg.session_naming?.enabled !== false;
+    if ($('tog-radar-sound')) $('tog-radar-sound').checked = cfg.enable_radar_sound !== false;
     if ($('tog-update-check')) $('tog-update-check').checked = cfg.enable_update_check !== false;
 
     renderToolsBars(eng);
@@ -1189,10 +1191,412 @@
     }
   }
 
+  function fmtMonthDay(tsMs) {
+    if (!tsMs || tsMs <= 0) return '—';
+    const d = new Date(Number(tsMs));
+    if (Number.isNaN(d.getTime())) return '—';
+    const mm = String(d.getMonth() + 1).padStart(2, '0');
+    const dd = String(d.getDate()).padStart(2, '0');
+    return `${mm}-${dd}`;
+  }
+
+  function fmtSessionAge(tsMs) {
+    if (!tsMs || tsMs <= 0) return '—';
+    const diffSec = Math.max(0, Math.floor((Date.now() - Number(tsMs)) / 1000));
+    const lang = (window.i18next?.language || 'en').toLowerCase();
+    const isZh = lang.startsWith('zh');
+    const isJa = lang.startsWith('ja');
+    if (diffSec < 60) return isZh ? `${diffSec}秒前` : isJa ? `${diffSec}秒前` : `${diffSec}s ago`;
+    const mins = Math.floor(diffSec / 60);
+    if (mins < 60) return isZh ? `${mins}分钟前` : isJa ? `${mins}分前` : `${mins}m ago`;
+    const hrs = Math.floor(mins / 60);
+    if (hrs < 24) return isZh ? `${hrs}小时前` : isJa ? `${hrs}時間前` : `${hrs}h ago`;
+    const days = Math.floor(hrs / 24);
+    return isZh ? `${days}天前` : isJa ? `${days}日前` : `${days}d ago`;
+  }
+
+  function highlightTermsHtml(rawText, queryStr) {
+    const text = String(rawText || '');
+    if (!text) return '';
+    const terms = String(queryStr || '')
+      .split(/\s+/)
+      .map((s) => s.trim())
+      .filter(Boolean);
+    if (!terms.length) return escapeHtml(text);
+
+    const escapedTerms = terms
+      .slice(0, 6)
+      .map((term) => term.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'));
+    if (!escapedTerms.length) return escapeHtml(text);
+
+    try {
+      const re = new RegExp(`(${escapedTerms.join('|')})`, 'gi');
+      return text
+        .split(re)
+        .map((part, idx) =>
+          idx % 2 === 1 ? `<mark class="sess-hl">${escapeHtml(part)}</mark>` : escapeHtml(part)
+        )
+        .join('');
+    } catch {
+      return escapeHtml(text);
+    }
+  }
+
+  function stripRedundantCodePrefix(rawTitle, code, group) {
+    const s = String(rawTitle || '').trim();
+    if (!s || (!code && !group)) return s;
+    // Match `<Emoji> <Code>·<Rest>` so when `[Group]` badge is already shown beside it, `<Code>·` isn't repeated
+    const m = /^(\S+)\s+([^·｜\s]{1,12})·(.+)$/u.exec(s);
+    if (!m) return s;
+    const [, emoji, pfx, rest] = m;
+    const pfxLower = pfx.trim().toLowerCase();
+    const codeLower = String(code || '').trim().toLowerCase();
+    const grpLower = String(group || '').trim().toLowerCase();
+    if (pfxLower && (pfxLower === codeLower || grpLower.includes(pfxLower))) {
+      return `${emoji} ${rest.trim()}`;
+    }
+    return s;
+  }
+
+  function renderRadarGlyph(rawState, size = 15, glyphStyle = 'waveform') {
+    const st = ['waiting', 'stalled', 'unread', 'running', 'idle'].includes(rawState) ? rawState : 'idle';
+    const tip = escapeHtml(t(`radar.state_${st}`));
+    let inner = '';
+    if (st === 'running') {
+      if (glyphStyle === 'bars_fade') {
+        // n3r4zzurr0/svg-spinners `bars-scale-fade`
+        inner = `
+          <rect class="sp-bar s1" x="2.2" y="2.5" width="2.5" height="11" rx="1.2" fill="currentColor"/>
+          <rect class="sp-bar s2" x="6.75" y="2.5" width="2.5" height="11" rx="1.2" fill="currentColor"/>
+          <rect class="sp-bar s3" x="11.3" y="2.5" width="2.5" height="11" rx="1.2" fill="currentColor"/>`;
+      } else if (glyphStyle === 'pulse_rings') {
+        // uiball/ldrs `l-ripples` dual expanding wave rings
+        inner = `
+          <circle class="ldrs-ripple r1" cx="8" cy="8" r="6.4" stroke="currentColor" stroke-width="1.5"/>
+          <circle class="ldrs-ripple r2" cx="8" cy="8" r="6.4" stroke="currentColor" stroke-width="1.5"/>
+          <circle cx="8" cy="8" r="2" fill="currentColor"/>`;
+      } else {
+        // Default: uiball/ldrs `l-waveform` 4-bar sinusoidal phase wave
+        inner = `
+          <rect class="ldrs-bar b1" x="1.8" y="2.4" width="2.1" height="11.2" rx="1.05" fill="currentColor"/>
+          <rect class="ldrs-bar b2" x="5.2" y="2.4" width="2.1" height="11.2" rx="1.05" fill="currentColor"/>
+          <rect class="ldrs-bar b3" x="8.6" y="2.4" width="2.1" height="11.2" rx="1.05" fill="currentColor"/>
+          <rect class="ldrs-bar b4" x="12.0" y="2.4" width="2.1" height="11.2" rx="1.05" fill="currentColor"/>`;
+      }
+    } else if (st === 'waiting') {
+      // uiball/ldrs `l-dot-wave`: 3 gently undulating prompt beads
+      inner = `
+        <circle class="ldrs-dot d1" cx="3.6" cy="8" r="1.65" fill="currentColor"/>
+        <circle class="ldrs-dot d2" cx="8" cy="8" r="1.65" fill="currentColor"/>
+        <circle class="ldrs-dot d3" cx="12.4" cy="8" r="1.65" fill="currentColor"/>`;
+    } else if (st === 'unread') {
+      // Crisp squircle check-capsule (lucide check)
+      inner = `
+        <rect x="1.75" y="1.75" width="12.5" height="12.5" rx="3.8" fill="currentColor" fill-opacity="0.14" stroke="currentColor" stroke-width="1.35" stroke-opacity="0.42"/>
+        <path d="M5.1 8.15L7.05 10.1L11.05 5.95" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/>`;
+    } else if (st === 'stalled') {
+      // Interrupted ECG / waveform slash
+      inner = `
+        <path d="M1.8 8H4.6L6.3 4.3L8.8 11.7L10.4 8H14.2" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+        <line x1="3.2" y1="12.8" x2="12.8" y2="3.2" stroke="currentColor" stroke-width="1.45" stroke-linecap="round" stroke-opacity="0.85"/>`;
+    } else {
+      // Calm resting 3-bar studio equalizer baseline
+      inner = `
+        <rect x="3.1" y="6.2" width="1.9" height="3.6" rx="0.95" fill="currentColor" fill-opacity="0.55"/>
+        <rect x="7.05" y="4.6" width="1.9" height="6.8" rx="0.95" fill="currentColor" fill-opacity="0.75"/>
+        <rect x="11.0" y="6.2" width="1.9" height="3.6" rx="0.95" fill="currentColor" fill-opacity="0.55"/>`;
+    }
+    return `<span class="radar-glyph ${st}" title="${tip}"><svg width="${size}" height="${size}" viewBox="0 0 16 16" fill="none" aria-hidden="true">${inner}</svg></span>`;
+  }
+
+  function renderSoundIcon(enabled) {
+    if (enabled) {
+      return `<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/><path d="M15.54 8.46a5 5 0 0 1 0 7.07"/><path d="M19.07 4.93a10 10 0 0 1 0 14.14"/></svg>`;
+    }
+    return `<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/><line x1="23" y1="9" x2="17" y2="15"/><line x1="17" y1="9" x2="23" y2="15"/></svg>`;
+  }
+
+  function renderRadarRowHtml(it, glyphStyle = 'waveform') {
+    const isCodex = it.client === 'codex';
+    const st = it.live_state || 'idle';
+    const clientBadge = isCodex
+      ? '<span class="sess-client-badge codex">Codex</span>'
+      : '<span class="sess-client-badge agy">AGY</span>';
+    const bizLabel = it.group || it.code || '';
+    const bizBadge = bizLabel ? `<span class="sess-biz-badge">${escapeHtml(bizLabel)}</span>` : '';
+    const shortId = (it.id || '').slice(0, 8);
+    const cleanTitle = stripRedundantCodePrefix(it.title || `#${shortId}`, it.code, it.group);
+    const tip = isCodex ? t('sessions.open_codex') : t('sessions.jump_agy_tip');
+    return `
+      <button type="button" class="radar-row ${escapeHtml(st)}" data-radar-client="${escapeHtml(it.client)}" data-radar-id="${escapeHtml(it.id)}" data-radar-uri="${escapeHtml(it.open_url || '')}" title="${escapeHtml(tip)}">
+        <span class="radar-row-main">
+          ${renderRadarGlyph(st, 15, glyphStyle)}
+          ${clientBadge}
+          ${bizBadge}
+          <span class="radar-row-title">${escapeHtml(cleanTitle)}</span>
+        </span>
+        <span class="radar-row-right">
+          <span class="radar-age">${escapeHtml(fmtSessionAge(it.updated_at_ms))}</span>
+        </span>
+      </button>`;
+  }
+
+  function renderLiveRadar(radar, state, handlers = {}) {
+    const panel = $('live-radar-strip');
+    if (!panel) return;
+    if (!radar || radar.ok === false || state.mode === 'pro') {
+      panel.classList.add('hidden');
+      return;
+    }
+
+    const att = radar.attention_items || [];
+    const rec = radar.recent_items || [];
+    if (!att.length && !rec.length) {
+      panel.classList.add('hidden');
+      return;
+    }
+    panel.classList.remove('hidden');
+
+    const wCnt = Number(radar.waiting_count || 0);
+    const sCnt = Number(radar.stalled_count || 0);
+    const uCnt = Number(radar.unread_count || 0);
+    const rCnt = Number(radar.running_count || 0);
+
+    panel.classList.toggle('has-urgent', wCnt > 0 || sCnt > 0);
+    panel.classList.toggle('has-unread', uCnt > 0);
+
+    const gStyle = radar.glyph_style || 'waveform';
+    const leadState = wCnt > 0 ? 'waiting' : sCnt > 0 ? 'stalled' : uCnt > 0 ? 'unread' : rCnt > 0 ? 'running' : 'idle';
+    const leadEl = $('radar-lead-glyph');
+    if (leadEl) leadEl.innerHTML = renderRadarGlyph(leadState, 16, gStyle);
+
+    const pills = [];
+    if (wCnt > 0) pills.push(`<span class="status-pill warn">${escapeHtml(t('radar.waiting_pill', { count: wCnt }))}</span>`);
+    if (sCnt > 0) pills.push(`<span class="status-pill err">${escapeHtml(t('radar.stalled_pill', { count: sCnt }))}</span>`);
+    if (uCnt > 0) pills.push(`<span class="status-pill info">${escapeHtml(t('radar.unread_pill', { count: uCnt }))}</span>`);
+    if (rCnt > 0) pills.push(`<span class="status-pill ok">${escapeHtml(t('radar.running_pill', { count: rCnt }))}</span>`);
+    if (!pills.length) pills.push(`<span class="mono-tag">${escapeHtml(t('radar.calm_pill'))}</span>`);
+    const pillsEl = $('radar-summary-pills');
+    if (pillsEl) pillsEl.innerHTML = pills.join('');
+
+    const namerBtn = $('btn-radar-namer');
+    if (namerBtn) {
+      if (!namerBtn.innerHTML) {
+        namerBtn.innerHTML = `<svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M10.5 2.5l3 3-8 8-3-3 8-8z"/><path d="M8.5 4.5l3 3"/><path d="M13 1v2M12 2h2M3 1v1.5M2.25 1.75h1.5"/></svg>`;
+      }
+      const nTip = t('radar.sync_titles_tip');
+      namerBtn.title = nTip;
+      namerBtn.setAttribute('aria-label', nTip);
+    }
+
+    const soundBtn = $('btn-radar-sound');
+    if (soundBtn) {
+      const soundOn = radar.sound_enabled !== false;
+      soundBtn.innerHTML = renderSoundIcon(soundOn);
+      soundBtn.classList.toggle('muted', !soundOn);
+      const sTip = soundOn ? t('radar.sound_on_tip') : t('radar.sound_off_tip');
+      soundBtn.title = sTip;
+      soundBtn.setAttribute('aria-label', sTip);
+    }
+
+    const recentBtn = $('btn-radar-recent');
+    const recentDrawer = $('radar-recent-drawer');
+    const showRecent = Boolean(state.radarRecentOpen) || att.length === 0;
+    if (recentBtn) {
+      recentBtn.classList.toggle('hidden', rec.length === 0 || att.length === 0);
+      recentBtn.setAttribute('aria-expanded', String(Boolean(state.radarRecentOpen)));
+    }
+
+    const attEl = $('radar-attention-list');
+    if (attEl) {
+      attEl.innerHTML = att.slice(0, 8).map((it) => renderRadarRowHtml(it, gStyle)).join('');
+      attEl.classList.toggle('hidden', att.length === 0);
+    }
+
+    if (recentDrawer) {
+      const recList = $('radar-recent-list');
+      if (showRecent && rec.length > 0 && recList) {
+        recentDrawer.classList.remove('hidden');
+        recList.innerHTML = rec.slice(0, 6).map((it) => renderRadarRowHtml(it, gStyle)).join('');
+      } else {
+        recentDrawer.classList.add('hidden');
+      }
+    }
+
+    panel.querySelectorAll('button.radar-row[data-radar-id]').forEach((btn) => {
+      btn.addEventListener('click', (ev) => {
+        if (typeof handlers.onJumpRadarItem === 'function') {
+          handlers.onJumpRadarItem(
+            {
+              client: btn.dataset.radarClient || 'agy',
+              id: btn.dataset.radarId || '',
+              open_url: btn.dataset.radarUri || '',
+            },
+            ev
+          );
+        }
+      });
+    });
+  }
+
+  function renderSessionsView(resp, state, handlers = {}) {
+    const metaEl = $('sessions-stats-meta');
+    const groupsEl = $('sessions-group-pills');
+    const listEl = $('sessions-list');
+    if (!listEl) return;
+
+    document.querySelectorAll('.sess-filter-btn[data-sclient]').forEach((b) => {
+      b.classList.toggle('active', b.dataset.sclient === state.sessionsClient);
+    });
+    document.querySelectorAll('.sess-filter-btn[data-sdays]').forEach((b) => {
+      b.classList.toggle('active', Number(b.dataset.sdays) === Number(state.sessionsDays));
+    });
+    document.querySelectorAll('.sess-filter-btn[data-ssort]').forEach((b) => {
+      b.classList.toggle('active', b.dataset.ssort === state.sessionsSort);
+    });
+    const clearBtn = $('btn-sessions-clear');
+    if (clearBtn) {
+      clearBtn.classList.toggle('hidden', !state.sessionsQuery);
+    }
+
+    if (!resp) {
+      if (metaEl) metaEl.textContent = '…';
+      listEl.innerHTML = `<div class="empty-state">${escapeHtml(t('sessions.loading'))}</div>`;
+      return;
+    }
+
+    if (metaEl) {
+      metaEl.textContent = t('sessions.stats_summary', {
+        total: resp.total_matches ?? 0,
+        agy: resp.agy_matches ?? 0,
+        codex: resp.codex_matches ?? 0,
+        ms: Number(resp.elapsed_ms ?? 0).toFixed(1),
+      });
+    }
+
+    if (groupsEl) {
+      const facets = resp.groups || [];
+      const totalAll = facets.reduce((acc, g) => acc + (g.count || 0), 0);
+      const pills = [
+        `<button type="button" class="sess-group-pill ${!state.sessionsGroup ? 'active' : ''}" data-sgroup="">${escapeHtml(
+          t('sessions.group_all')
+        )} <span class="sess-pill-cnt">${totalAll}</span></button>`,
+      ];
+      for (const g of facets) {
+        const isAct = state.sessionsGroup && state.sessionsGroup === g.group;
+        pills.push(
+          `<button type="button" class="sess-group-pill ${isAct ? 'active' : ''}" data-sgroup="${escapeHtml(
+            g.group
+          )}">${escapeHtml(g.group)} <span class="sess-pill-cnt">${g.count || 0}</span></button>`
+        );
+      }
+      groupsEl.innerHTML = pills.join('');
+      groupsEl.querySelectorAll('.sess-group-pill[data-sgroup]').forEach((btn) => {
+        btn.addEventListener('click', () => {
+          if (typeof handlers.onSelectGroup === 'function') {
+            handlers.onSelectGroup(btn.dataset.sgroup || '');
+          }
+        });
+      });
+    }
+
+    const items = resp.sessions || [];
+    if (!items.length) {
+      listEl.innerHTML = `<div class="empty-state">${escapeHtml(t('sessions.empty'))}</div>`;
+      return;
+    }
+
+    const q = state.sessionsQuery || '';
+    listEl.innerHTML = items
+      .map((it) => {
+        const isCodex = it.client === 'codex';
+        const clientBadge = isCodex
+          ? '<span class="sess-client-badge codex">Codex</span>'
+          : '<span class="sess-client-badge agy">AGY</span>';
+        const bizLabel = it.group || it.code || '';
+        const bizBadge = bizLabel
+          ? `<span class="sess-biz-badge">${escapeHtml(bizLabel)}</span>`
+          : '';
+        const gStyle = state.lastRadar?.glyph_style || state.lastSnap?.config?.radar_glyph_style || 'waveform';
+        const st = it.live_state || (it.active ? 'running' : 'idle');
+        const stateGlyph = renderRadarGlyph(st, 14, gStyle);
+        const shortId = (it.id || '').slice(0, 8);
+        const createdTxt = t('sessions.created_lbl', { date: fmtMonthDay(it.created_at_ms) });
+        const activeTxt = t('sessions.active_lbl', { age: fmtSessionAge(it.updated_at_ms) });
+
+        const snippetHtml =
+          it.snippet && it.snippet.trim() && it.snippet.trim() !== it.title.trim()
+            ? `<p class="sess-snippet">${highlightTermsHtml(it.snippet, q)}</p>`
+            : '';
+
+        const primaryAction = isCodex && it.open_url
+          ? `<a href="${escapeHtml(it.open_url)}" class="btn-accent btn-xs sess-open-link" data-open-uri="${escapeHtml(
+              it.open_url
+            )}" data-short-id="${escapeHtml(shortId)}">${escapeHtml(t('sessions.open_codex'))}</a>`
+          : `<button type="button" class="btn-ghost btn-xs" data-inspect-agy="${escapeHtml(it.id)}">${escapeHtml(
+              t('sessions.inspect_agy')
+            )}</button><button type="button" class="btn-accent btn-xs" data-jump-agy="${escapeHtml(it.id)}" title="${escapeHtml(
+              t('sessions.jump_agy_tip')
+            )}">${escapeHtml(t('sessions.jump_agy'))}</button>`;
+
+        return `
+          <article class="sess-card">
+            <div class="sess-card-top">
+              <div class="sess-badges">
+                ${stateGlyph}${clientBadge}${bizBadge}
+                <span class="sess-id-tag">#${escapeHtml(shortId)}</span>
+              </div>
+              <div class="sess-actions">
+                <button type="button" class="btn-ghost btn-xs" data-copy-sid="${escapeHtml(it.id)}">${escapeHtml(
+          t('sessions.copy_id')
+        )}</button>
+                ${primaryAction}
+              </div>
+            </div>
+            <h3 class="sess-title">${highlightTermsHtml(it.title || `#${shortId}`, q)}</h3>
+            ${snippetHtml}
+            <div class="sess-meta-row">
+              <span>${escapeHtml(createdTxt)}</span>
+              <span class="sess-meta-sep">·</span>
+              <span>${escapeHtml(activeTxt)}</span>
+              ${it.workspace ? `<span class="sess-meta-sep">·</span><span class="sess-ws-lbl">${escapeHtml(it.workspace)}</span>` : ''}
+            </div>
+          </article>`;
+      })
+      .join('');
+
+    listEl.querySelectorAll('button[data-copy-sid]').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        if (typeof handlers.onCopyId === 'function') handlers.onCopyId(btn.dataset.copySid);
+      });
+    });
+    listEl.querySelectorAll('button[data-inspect-agy]').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        if (typeof handlers.onInspectAgy === 'function') handlers.onInspectAgy(btn.dataset.inspectAgy);
+      });
+    });
+    listEl.querySelectorAll('button[data-jump-agy]').forEach((btn) => {
+      btn.addEventListener('click', (ev) => {
+        if (typeof handlers.onJumpAgy === 'function') handlers.onJumpAgy(btn.dataset.jumpAgy, ev);
+      });
+    });
+    listEl.querySelectorAll('a.sess-open-link[data-open-uri]').forEach((link) => {
+      link.addEventListener('click', (ev) => {
+        if (typeof handlers.onOpenCodex === 'function') {
+          ev.preventDefault();
+          handlers.onOpenCodex(link.dataset.openUri, link.dataset.shortId || '', link.closest('.sess-card')?.querySelector('[data-copy-sid]')?.dataset.copySid || '');
+        }
+      });
+    });
+  }
+
   root.render = {
     renderWarmthMeter,
     renderSnapshot,
     renderUsageReport,
     renderAuditPanel,
+    renderSessionsView,
+    renderLiveRadar,
+    renderRadarGlyph,
   };
 })();

@@ -7,8 +7,8 @@ description: Install, verify, configure, inspect usage/telemetry, rollback WAL f
 
 Use this guide when a user asks you to install, upgrade, verify, configure, troubleshoot, or uninstall **AGY Hyper** (`BobbyCats/agy-hyper`).
 
-> **Architecture & Safety Guarantees (`v0.5.1`)**:
-> - Uses **100% official Antigravity plugin protocols** (MCP, Hooks, Rules, `SIDECAR_UI_ENTRYPOINT_AUX_PANE`). Does **not** inject into Electron DOM, open CDP debugging ports, or modify `~/.gemini/config/config.json`.
+> **Architecture & Safety Guarantees (`v0.6.0`)**:
+> - Uses **100% official Antigravity plugin protocols** (MCP, MCP Apps `SEP-1865`, Hooks, Rules, `SIDECAR_UI_ENTRYPOINT_AUX_PANE`), plus an optional native SwiftUI macOS MenuBar companion (`AGYHyperBar`). Does **not** inject into Electron DOM, open CDP debugging ports, or modify `~/.gemini/config/config.json`.
 > - Single ~10MB static Rust binary (`agy-hyper`); zero Rust/Python/`ripgrep`/`git` runtime dependencies required for release installs.
 > - Zero telemetry uploads and zero synchronous hook network calls. `Release Update Radar` uses rate-limit-free GitHub `Location` redirects (`enable_update_check`, or disable with `AGY_HYPER_NO_UPDATE_CHECK=1`) and **never** auto-installs binaries without explicit `agy-hyper update` / **Update Now** (`SHA256SUMS` verified).
 
@@ -69,12 +69,21 @@ Confirm:
 # Release update radar & SHA-256 verified 1-click upgrade
 agy-hyper update --check
 agy-hyper update
-agy-hyper update --dismiss 0.5.1
+agy-hyper update --dismiss 0.6.0
 
-# Daemon lifecycle
+# Daemon & macOS 120Hz MenuBar radar lifecycle
 agy-hyper daemon status
 agy-hyper daemon start
 agy-hyper daemon stop
+agy-hyper menubar status
+agy-hyper menubar start
+agy-hyper menubar stop
+
+# Cross-client live radar, smart auto-naming & CJK session search
+agy-hyper radar --recent 8
+agy-hyper namer sync --limit 16
+agy-hyper namer run <conversation_id> --force
+agy-hyper sessions --query "auth" --client all
 
 # Local burn audit (pre-edit bloat delta, stream EOF retry stalls, split-cache drops & redacted Share Card)
 agy-hyper audit --days 14 --share

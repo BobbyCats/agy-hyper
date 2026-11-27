@@ -65,5 +65,11 @@ jobs:
           bash -n install.sh
           # Guard against `set -u` unbound BASH_SOURCE[0] when executed via `curl ... | bash`
           bash -c 'set -euo pipefail; SCRIPT_SRC="${BASH_SOURCE[0]:-}"; [[ -z "$SCRIPT_SRC" ]]'
+      - name: Verify macOS MenuBar companion Swift build
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          swiftc -O -target arm64-apple-macos14.0 macos/AGYHyperBar/main.swift -framework AppKit -framework SwiftUI -o /tmp/agy-hyper-bar-arm64
+          swiftc -O -target x86_64-apple-macos14.0 macos/AGYHyperBar/main.swift -framework AppKit -framework SwiftUI -o /tmp/agy-hyper-bar-x64
       - name: Verify release build
         run: cargo build --release

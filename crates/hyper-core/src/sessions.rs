@@ -88,7 +88,7 @@ pub fn sanitize_session_title(raw: &str, workspace: &str, conv_id: &str) -> Stri
     }
 }
 
-fn percent_decode_utf8(input: &str) -> String {
+pub fn percent_decode_utf8(input: &str) -> String {
     let bytes = input.as_bytes();
     let mut out = Vec::with_capacity(bytes.len());
     let mut i = 0;
@@ -108,7 +108,18 @@ fn percent_decode_utf8(input: &str) -> String {
     String::from_utf8_lossy(&out).into_owned()
 }
 
-fn extract_workspace_basename(workspace_uris_json: &str, home_dir: Option<&Path>) -> String {
+pub fn decode_workspace_uris(workspace_uris_json: &str) -> Vec<String> {
+    let Ok(Value::Array(arr)) = serde_json::from_str::<Value>(workspace_uris_json) else {
+        return Vec::new();
+    };
+    arr.iter()
+        .filter_map(Value::as_str)
+        .map(|s| percent_decode_utf8(s.strip_prefix("file://").unwrap_or(s)))
+        .filter(|s| !s.trim().is_empty())
+        .collect()
+}
+
+pub fn extract_workspace_basename(workspace_uris_json: &str, home_dir: Option<&Path>) -> String {
     let Ok(Value::Array(arr)) = serde_json::from_str::<Value>(workspace_uris_json) else {
         return String::new();
     };

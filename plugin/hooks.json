@@ -26,6 +26,13 @@
           }
         ]
       }
+    ],
+    "Stop": [
+      {
+        "type": "command",
+        "command": "./bin/agy-hyper hook stop",
+        "timeout": 5
+      }
     ]
   }
 }

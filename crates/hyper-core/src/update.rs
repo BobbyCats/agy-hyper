@@ -670,12 +670,105 @@ fn stop_existing_daemon(plugin_dir: &Path) {
     };
     let existing = plugin_dir.join("bin").join(bin_name);
     if existing.is_file() {
+        #[cfg(target_os = "macos")]
+        {
+            let _ = Command::new(&existing)
+                .args(["menubar", "stop"])
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status();
+        }
         let _ = Command::new(existing)
             .args(["daemon", "stop"])
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .status();
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn is_menubar_running() -> bool {
+    let pid_file = HyperConfig::run_dir().join("menubar.pid");
+    let Ok(raw) = fs::read_to_string(pid_file) else {
+        return false;
+    };
+    let Ok(pid) = raw.trim().parse::<i32>() else {
+        return false;
+    };
+    pid > 1 && unsafe { libc::kill(pid, 0) == 0 }
+}
+
+#[cfg(target_os = "macos")]
+fn refresh_macos_menubar_if_present(plugin_dir: &Path, bin_link: &Path, was_running: bool) {
+    let bar_bin = plugin_dir.join("bin").join("agy-hyper-bar");
+    if !bar_bin.is_file() {
+        return;
+    }
+    if let Some(link_parent) = bin_link.parent() {
+        if link_parent.is_dir() {
+            let bar_link = link_parent.join("agy-hyper-bar");
+            let tmp_link = link_parent.join(format!(".agy-hyper-bar.link.{}", std::process::id()));
+            let _ = fs::remove_file(&tmp_link);
+            if std::os::unix::fs::symlink(&bar_bin, &tmp_link).is_ok() {
+                let _ = fs::rename(&tmp_link, &bar_link);
+            }
+        }
+    }
+    if std::env::var("AGY_HYPER_NO_MENUBAR")
+        .ok()
+        .as_deref()
+        == Some("1")
+    {
+        return;
+    }
+    if let Some(home) = dirs::home_dir() {
+        let plist_dir = home.join("Library").join("LaunchAgents");
+        if fs::create_dir_all(&plist_dir).is_ok() {
+            let plist_path = plist_dir.join("com.agyhyper.menubar.plist");
+            let plist = format!(
+                r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.agyhyper.menubar</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>{}</string>
+  </array>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <false/>
+</dict>
+</plist>
+"#,
+                bar_bin.display()
+            );
+            let _ = fs::write(&plist_path, plist);
+        }
+    }
+    let uid = unsafe { libc::getuid() };
+    let has_gui_session = Command::new("launchctl")
+        .args(["print", &format!("gui/{}", uid)])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+    if was_running || has_gui_session {
+        let cli_bin = plugin_dir.join("bin").join("agy-hyper");
+        if cli_bin.is_file() {
+            let _ = Command::new(cli_bin)
+                .args(["menubar", "start"])
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status();
+        }
     }
 }
 
@@ -807,6 +900,10 @@ pub fn apply_verified_archive_bundle(
     {
         use std::os::unix::fs::PermissionsExt;
         let _ = fs::set_permissions(&staged_bin, fs::Permissions::from_mode(0o755));
+        let staged_bar = staged_plugin.join("bin").join("agy-hyper-bar");
+        if staged_bar.is_file() {
+            let _ = fs::set_permissions(&staged_bar, fs::Permissions::from_mode(0o755));
+        }
     }
 
     #[cfg(windows)]
@@ -824,6 +921,9 @@ pub fn apply_verified_archive_bundle(
 
     let installed_version = read_plugin_version(&staged_plugin)
         .unwrap_or_else(|| normalize_semver_str(crate::version()));
+
+    #[cfg(target_os = "macos")]
+    let was_menubar_running = stop_services && is_menubar_running();
 
     if stop_services {
         stop_existing_daemon(plugin_dir);
@@ -863,6 +963,8 @@ pub fn apply_verified_archive_bundle(
 
     if stop_services {
         recycle_sidecar_if_external();
+        #[cfg(target_os = "macos")]
+        refresh_macos_menubar_if_present(plugin_dir, bin_link, was_menubar_running);
     }
 
     let prev_state = load_update_state_from(state_path, &installed_version);

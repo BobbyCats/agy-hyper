@@ -10,6 +10,15 @@ use hyper_core::audit::{
     render_share_card_svg, AuditShareCardPayload, SHARE_PNG_PAD, SHARE_SVG_H, SHARE_SVG_W,
 };
 use hyper_core::config::HyperConfig;
+use hyper_core::namer::{
+    discover_unmanaged_recent_agy_sessions, process_session_naming_with_options,
+    process_session_stop, NamingOutcome,
+};
+use hyper_core::radar::{
+    build_session_radar, now_epoch_ms_u64 as radar_now_ms, FocusSessionRequest, RadarRuntimeLedger,
+    SessionLiveState,
+};
+use hyper_core::session_index::{search_sessions, SessionSearchQuery};
 use hyper_core::sessions::discover_all_active_subagents;
 use hyper_core::transcript::inspect_transcript_tail;
 use hyper_core::usage::UsageWindow;
@@ -71,6 +80,8 @@ pub async fn run_daemon_server() -> Result<()> {
     }
 
     let state = Arc::new(Mutex::new(DaemonState::new()));
+    let namer = Arc::new(NamerCoordinator::new());
+    let radar = Arc::new(RadarCoordinator::new());
     let (shutdown_tx, mut shutdown_rx) = tokio::sync::watch::channel(false);
 
     let sig_tx = shutdown_tx.clone();
@@ -79,6 +90,8 @@ pub async fn run_daemon_server() -> Result<()> {
         let _ = sig_tx.send(true);
     });
     spawn_watchdog_loop(state.clone(), shutdown_rx.clone());
+    spawn_namer_loop(state.clone(), namer.clone(), shutdown_rx.clone());
+    spawn_radar_loop(state.clone(), namer.clone(), radar.clone(), shutdown_rx.clone());
 
     loop {
         tokio::select! {
@@ -88,6 +101,8 @@ pub async fn run_daemon_server() -> Result<()> {
             accepted = listener.accept() => {
                 let Ok((stream, _)) = accepted else { continue; };
                 let state = state.clone();
+                let namer = namer.clone();
+                let radar = radar.clone();
                 let shutdown_tx = shutdown_tx.clone();
                 tokio::spawn(async move {
                     let (reader, mut writer) = stream.into_split();
@@ -97,8 +112,10 @@ pub async fn run_daemon_server() -> Result<()> {
                         if n == 0 { break; }
                         let raw = std::mem::take(&mut line);
                         let st = state.clone();
+                        let nm = namer.clone();
+                        let rd = radar.clone();
                         let tx = shutdown_tx.clone();
-                        let resp = tokio::task::spawn_blocking(move || handle_line(&st, &tx, &raw))
+                        let resp = tokio::task::spawn_blocking(move || handle_line(&st, &nm, &rd, &tx, &raw))
                             .await
                             .unwrap_or_else(|e| DaemonResponse::err(e.to_string()));
                         if let Ok(mut out) = serde_json::to_string(&resp) {
@@ -142,6 +159,8 @@ pub async fn run_daemon_server() -> Result<()> {
     fs::write(run_dir.join("agy-hyper-v1.addr"), addr.to_string())?;
     fs::write(run_dir.join("agy-hyper-v1.token"), &token)?;
     let state = Arc::new(Mutex::new(DaemonState::new()));
+    let namer = Arc::new(NamerCoordinator::new());
+    let radar = Arc::new(RadarCoordinator::new());
     let (shutdown_tx, mut shutdown_rx) = tokio::sync::watch::channel(false);
     let token = Arc::new(token);
 
@@ -151,6 +170,8 @@ pub async fn run_daemon_server() -> Result<()> {
         let _ = sig_tx.send(true);
     });
     spawn_watchdog_loop(state.clone(), shutdown_rx.clone());
+    spawn_namer_loop(state.clone(), namer.clone(), shutdown_rx.clone());
+    spawn_radar_loop(state.clone(), namer.clone(), radar.clone(), shutdown_rx.clone());
 
     loop {
         tokio::select! {
@@ -160,6 +181,8 @@ pub async fn run_daemon_server() -> Result<()> {
             accepted = listener.accept() => {
                 let Ok((stream, _)) = accepted else { continue; };
                 let state = state.clone();
+                let namer = namer.clone();
+                let radar = radar.clone();
                 let shutdown_tx = shutdown_tx.clone();
                 let expected_token = token.clone();
                 tokio::spawn(async move {
@@ -178,8 +201,10 @@ pub async fn run_daemon_server() -> Result<()> {
                         if n == 0 { break; }
                         let raw = std::mem::take(&mut line);
                         let st = state.clone();
+                        let nm = namer.clone();
+                        let rd = radar.clone();
                         let tx = shutdown_tx.clone();
-                        let resp = tokio::task::spawn_blocking(move || handle_line(&st, &tx, &raw))
+                        let resp = tokio::task::spawn_blocking(move || handle_line(&st, &nm, &rd, &tx, &raw))
                             .await
                             .unwrap_or_else(|e| DaemonResponse::err(e.to_string()));
                         if let Ok(mut out) = serde_json::to_string(&resp) {
@@ -204,6 +229,8 @@ pub async fn run_daemon_server() -> Result<()> {
 
 fn handle_line(
     state: &Arc<Mutex<DaemonState>>,
+    namer: &Arc<NamerCoordinator>,
+    radar: &Arc<RadarCoordinator>,
     shutdown_tx: &tokio::sync::watch::Sender<bool>,
     raw: &str,
 ) -> DaemonResponse {
@@ -215,6 +242,130 @@ fn handle_line(
     // Execute disk-heavy Snapshot and Rollback OUTSIDE the global DaemonState lock so
     // concurrent MCP tools and lifecycle hooks are never blocked by 2.5s UI polling.
     match req {
+        DaemonRequest::SessionRadar { recent_limit } => {
+            let (sound_enabled, ui_language, glyph_style) = state
+                .lock()
+                .map(|g| {
+                    let c = g.config_clone();
+                    (c.enable_radar_sound, c.ui_language, c.radar_glyph_style)
+                })
+                .unwrap_or_else(|_| {
+                    (
+                        true,
+                        hyper_core::config::default_ui_language(),
+                        hyper_core::config::default_radar_glyph_style(),
+                    )
+                });
+            let (ledger_snap, focus_snap) = radar.snapshot_runtime();
+            let mut resp = build_session_radar(
+                recent_limit,
+                sound_enabled,
+                Some(&ledger_snap),
+                focus_snap,
+            );
+            resp.ui_language = ui_language;
+            resp.glyph_style = glyph_style;
+            return DaemonResponse::ok(resp);
+        }
+        DaemonRequest::RadarAck { conversation_id } => {
+            radar.acknowledge(&conversation_id);
+            return DaemonResponse::ok(serde_json::json!({ "ok": true }));
+        }
+        DaemonRequest::RadarFocus {
+            client,
+            conversation_id,
+            split,
+            consume_seq,
+        } => {
+            if let Some(seq) = consume_seq {
+                radar.consume_focus(seq);
+                return DaemonResponse::ok(serde_json::json!({ "ok": true, "consumed": seq }));
+            }
+            let focus = radar.queue_focus(&client, &conversation_id, split);
+            return DaemonResponse::ok(serde_json::json!({ "ok": true, "focus": focus }));
+        }
+        DaemonRequest::SessionStop {
+            conversation_id,
+            transcript_path,
+            workspace_paths,
+        } => {
+            let queued = namer.enqueue(StopNamingJob {
+                conversation_id,
+                transcript_path,
+                workspace_paths,
+                enqueued_at: std::time::Instant::now(),
+                force: false,
+            });
+            return DaemonResponse::ok(serde_json::json!({ "queued": queued }));
+        }
+        DaemonRequest::NamerSync {
+            conversation_id,
+            force,
+            limit,
+        } => {
+            if let Some(cid) = conversation_id.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+                let cfg = state
+                    .lock()
+                    .map(|g| g.config_clone())
+                    .unwrap_or_default();
+                let t0 = std::time::Instant::now();
+                return match process_session_naming_with_options(&cfg, cid, None, &[], force) {
+                    Ok(outcome) => {
+                        if let NamingOutcome::Renamed { .. } = &outcome {
+                            let short_id = &cid[..cid.len().min(8)];
+                            if let Ok(mut guard) = state.lock() {
+                                guard.record_event(
+                                    "session_namer".into(),
+                                    None,
+                                    t0.elapsed().as_millis() as u64,
+                                    0,
+                                    0,
+                                    format!("renamed #{}", short_id),
+                                    false,
+                                );
+                            }
+                        }
+                        DaemonResponse::ok(serde_json::json!({
+                            "ok": true,
+                            "conversation_id": cid,
+                            "outcome": outcome,
+                        }))
+                    }
+                    Err(e) => DaemonResponse::err(e.to_string()),
+                };
+            }
+
+            let candidates = discover_unmanaged_recent_agy_sessions(limit.clamp(1, 48));
+            let mut queued_ids = Vec::new();
+            for (cid, ws) in candidates {
+                if namer.enqueue_immediate(cid.clone(), ws, force) {
+                    queued_ids.push(cid);
+                }
+            }
+            return DaemonResponse::ok(serde_json::json!({
+                "ok": true,
+                "queued": queued_ids.len(),
+                "conversation_ids": queued_ids,
+            }));
+        }
+        DaemonRequest::SearchSessions {
+            query,
+            client,
+            group,
+            days,
+            sort,
+            limit,
+        } => {
+            let resp = search_sessions(&SessionSearchQuery {
+                query,
+                client,
+                group,
+                days,
+                sort,
+                limit,
+            });
+            return DaemonResponse::ok(resp);
+        }
         DaemonRequest::Snapshot {
             conversation_id,
             transcript_path,
@@ -442,6 +593,14 @@ fn handle_line(
             Ok(cfg) => DaemonResponse::ok(cfg),
             Err(e) => DaemonResponse::err(e),
         },
+        DaemonRequest::SetLanguage { language } => match guard.set_ui_language(&language) {
+            Ok(cfg) => DaemonResponse::ok(cfg),
+            Err(e) => DaemonResponse::err(e),
+        },
+        DaemonRequest::SetGlyphStyle { style } => match guard.set_radar_glyph_style(&style) {
+            Ok(cfg) => DaemonResponse::ok(cfg),
+            Err(e) => DaemonResponse::err(e),
+        },
         DaemonRequest::UpdateFxRates { rates, source } => {
             match guard.update_fx_rates(rates, source.as_deref()) {
                 Ok(cfg) => DaemonResponse::ok(cfg),
@@ -454,6 +613,12 @@ fn handle_line(
             DaemonResponse::ok(serde_json::json!({ "shutting_down": true }))
         }
         DaemonRequest::Snapshot { .. }
+        | DaemonRequest::SessionRadar { .. }
+        | DaemonRequest::RadarAck { .. }
+        | DaemonRequest::RadarFocus { .. }
+        | DaemonRequest::SessionStop { .. }
+        | DaemonRequest::NamerSync { .. }
+        | DaemonRequest::SearchSessions { .. }
         | DaemonRequest::LookupPrewarm { .. }
         | DaemonRequest::StatuslinePulse { .. }
         | DaemonRequest::CacheTtlReport { .. }
@@ -463,6 +628,262 @@ fn handle_line(
         | DaemonRequest::AuditReport { .. }
         | DaemonRequest::AuditShareCard { .. } => unreachable!(),
     }
+}
+
+const NAMER_MAX_CONCURRENCY: usize = 2;
+const NAMER_DEBOUNCE_MS: u64 = 450;
+const NAMER_AUTO_SWEEP_COOLDOWN_SECS: u64 = 45;
+
+#[derive(Debug, Clone)]
+struct StopNamingJob {
+    conversation_id: String,
+    transcript_path: Option<String>,
+    workspace_paths: Vec<String>,
+    enqueued_at: std::time::Instant,
+    force: bool,
+}
+
+struct NamerCoordinator {
+    pending: Mutex<HashMap<String, StopNamingJob>>,
+    in_flight: Mutex<HashSet<String>>,
+    auto_attempted_at: Mutex<HashMap<String, std::time::Instant>>,
+    notify: tokio::sync::Notify,
+    sem: Arc<tokio::sync::Semaphore>,
+}
+
+impl NamerCoordinator {
+    fn new() -> Self {
+        Self {
+            pending: Mutex::new(HashMap::new()),
+            in_flight: Mutex::new(HashSet::new()),
+            auto_attempted_at: Mutex::new(HashMap::new()),
+            notify: tokio::sync::Notify::new(),
+            sem: Arc::new(tokio::sync::Semaphore::new(NAMER_MAX_CONCURRENCY)),
+        }
+    }
+
+    /// Per-conversation coalescing enqueue (`<0.05ms`): latest `Stop` event overwrites any queued
+    /// job for the same `conversation_id`.
+    fn enqueue(&self, job: StopNamingJob) -> bool {
+        let cid = job.conversation_id.trim().to_string();
+        if cid.is_empty() {
+            return false;
+        }
+        if let Ok(mut map) = self.pending.lock() {
+            if map.len() >= 128 && !map.contains_key(&cid) {
+                return false;
+            }
+            map.insert(cid, job);
+        }
+        self.notify.notify_one();
+        true
+    }
+
+    fn enqueue_immediate(&self, cid: String, workspace_paths: Vec<String>, force: bool) -> bool {
+        let clean = cid.trim().to_string();
+        if clean.is_empty() {
+            return false;
+        }
+        if let Ok(mut attempted) = self.auto_attempted_at.lock() {
+            attempted.remove(&clean);
+        }
+        self.enqueue(StopNamingJob {
+            conversation_id: clean,
+            transcript_path: None,
+            workspace_paths,
+            enqueued_at: std::time::Instant::now()
+                .checked_sub(Duration::from_millis(NAMER_DEBOUNCE_MS + 10))
+                .unwrap_or_else(std::time::Instant::now),
+            force,
+        })
+    }
+
+    /// Coalesced background sweep for newly opened / active `/swarm` windows still carrying
+    /// Antigravity's default unformatted title. Rate-limited per `conversation_id` (`45s`).
+    fn enqueue_auto_sweep(&self, candidates: Vec<(String, Vec<String>)>) {
+        if candidates.is_empty() {
+            return;
+        }
+        let now = std::time::Instant::now();
+        let cooldown = Duration::from_secs(NAMER_AUTO_SWEEP_COOLDOWN_SECS);
+        let mut to_queue = Vec::new();
+        if let Ok(mut attempted) = self.auto_attempted_at.lock() {
+            attempted.retain(|_, ts| now.duration_since(*ts) < Duration::from_secs(600));
+            let in_f = self.in_flight.lock().ok();
+            let pend = self.pending.lock().ok();
+            for (cid, ws) in candidates {
+                if in_f.as_ref().is_some_and(|s| s.contains(&cid))
+                    || pend.as_ref().is_some_and(|m| m.contains_key(&cid))
+                {
+                    continue;
+                }
+                if attempted
+                    .get(&cid)
+                    .is_some_and(|prev| now.duration_since(*prev) < cooldown)
+                {
+                    continue;
+                }
+                attempted.insert(cid.clone(), now);
+                to_queue.push((cid, ws));
+            }
+        }
+        for (cid, ws) in to_queue {
+            let _ = self.enqueue(StopNamingJob {
+                conversation_id: cid,
+                transcript_path: None,
+                workspace_paths: ws,
+                enqueued_at: now,
+                force: false,
+            });
+        }
+    }
+
+    fn take_ready_job(&self) -> (Option<StopNamingJob>, Option<Duration>) {
+        let Ok(mut pending) = self.pending.lock() else {
+            return (None, None);
+        };
+        let Ok(mut in_flight) = self.in_flight.lock() else {
+            return (None, None);
+        };
+        if pending.is_empty() {
+            return (None, None);
+        }
+
+        let debounce = Duration::from_millis(NAMER_DEBOUNCE_MS);
+        let mut next_wait: Option<Duration> = None;
+        let mut chosen_cid: Option<String> = None;
+
+        for (cid, job) in pending.iter() {
+            if in_flight.contains(cid) {
+                continue;
+            }
+            let elapsed = job.enqueued_at.elapsed();
+            if elapsed >= debounce {
+                chosen_cid = Some(cid.clone());
+                break;
+            } else {
+                let rem = debounce - elapsed;
+                next_wait = Some(next_wait.map_or(rem, |cur| cur.min(rem)));
+            }
+        }
+
+        if let Some(cid) = chosen_cid {
+            if let Some(job) = pending.remove(&cid) {
+                in_flight.insert(cid);
+                return (Some(job), next_wait);
+            }
+        }
+        (None, next_wait)
+    }
+
+    fn finish_in_flight(&self, cid: &str) {
+        if let Ok(mut in_flight) = self.in_flight.lock() {
+            in_flight.remove(cid);
+        }
+        self.notify.notify_one();
+    }
+}
+
+fn spawn_namer_loop(
+    state: Arc<Mutex<DaemonState>>,
+    namer: Arc<NamerCoordinator>,
+    mut shutdown_rx: tokio::sync::watch::Receiver<bool>,
+) {
+    tokio::spawn(async move {
+        loop {
+            let (ready_job, next_wait) = namer.take_ready_job();
+            if let Some(job) = ready_job {
+                let sem = namer.sem.clone();
+                let Ok(permit) = sem.acquire_owned().await else {
+                    namer.finish_in_flight(&job.conversation_id);
+                    break;
+                };
+                let st = state.clone();
+                let nm = namer.clone();
+                tokio::spawn(async move {
+                    let _permit = permit;
+                    let cid = job.conversation_id.clone();
+                    let cfg = st
+                        .lock()
+                        .map(|g| g.config_clone())
+                        .unwrap_or_default();
+                    let t0 = std::time::Instant::now();
+                    let job_moved = job;
+                    let res = tokio::task::spawn_blocking(move || {
+                        if job_moved.force {
+                            process_session_naming_with_options(
+                                &cfg,
+                                &job_moved.conversation_id,
+                                job_moved.transcript_path.as_deref(),
+                                &job_moved.workspace_paths,
+                                true,
+                            )
+                        } else {
+                            process_session_stop(
+                                &cfg,
+                                &job_moved.conversation_id,
+                                job_moved.transcript_path.as_deref(),
+                                &job_moved.workspace_paths,
+                            )
+                        }
+                    })
+                    .await;
+
+                    match res {
+                        Ok(Ok(NamingOutcome::Renamed { .. })) => {
+                            let short_id = &cid[..cid.len().min(8)];
+                            if let Ok(mut guard) = st.lock() {
+                                guard.record_event(
+                                    "session_namer".into(),
+                                    None,
+                                    t0.elapsed().as_millis() as u64,
+                                    0,
+                                    0,
+                                    format!("renamed #{}", short_id),
+                                    false,
+                                );
+                            }
+                        }
+                        Ok(Err(err)) => {
+                            let short_id = &cid[..cid.len().min(8)];
+                            let msg: String = err.to_string().chars().take(72).collect();
+                            if let Ok(mut guard) = st.lock() {
+                                guard.record_event(
+                                    "session_namer_err".into(),
+                                    None,
+                                    t0.elapsed().as_millis() as u64,
+                                    0,
+                                    0,
+                                    format!("#{} {}", short_id, msg),
+                                    false,
+                                );
+                            }
+                        }
+                        _ => {}
+                    }
+                    nm.finish_in_flight(&cid);
+                });
+                continue;
+            }
+
+            if let Some(wait_dur) = next_wait {
+                tokio::select! {
+                    _ = shutdown_rx.changed() => {
+                        if *shutdown_rx.borrow() { break; }
+                    }
+                    _ = namer.notify.notified() => {}
+                    _ = tokio::time::sleep(wait_dur) => {}
+                }
+            } else {
+                tokio::select! {
+                    _ = shutdown_rx.changed() => {
+                        if *shutdown_rx.borrow() { break; }
+                    }
+                    _ = namer.notify.notified() => {}
+                }
+            }
+        }
+    });
 }
 
 const WATCHDOG_POLL_SECS: u64 = 15;
@@ -682,6 +1103,281 @@ fn spawn_watchdog_loop(
                         if let Ok(mut guard) = tr.lock() {
                             run_watchdog_tick(&st, &mut guard);
                         }
+                    }).await;
+                }
+            }
+        }
+    });
+}
+
+const RADAR_POLL_SECS: u64 = 3;
+const RADAR_MIN_RUN_DURATION_FOR_CHIME_MS: u64 = 8_000;
+const FOCUS_REQUEST_TTL_MS: u64 = 15_000;
+
+#[derive(Debug, Default)]
+struct RadarRuntimeState {
+    seeded: bool,
+    last_states: HashMap<String, SessionLiveState>,
+    observed_active_since_ms: HashMap<String, u64>,
+    notified_gate_keys: HashSet<String>,
+    ledger: RadarRuntimeLedger,
+    focus_seq: u64,
+    pending_focus: Option<FocusSessionRequest>,
+}
+
+struct RadarCoordinator {
+    inner: Mutex<RadarRuntimeState>,
+}
+
+impl RadarCoordinator {
+    fn new() -> Self {
+        Self {
+            inner: Mutex::new(RadarRuntimeState::default()),
+        }
+    }
+
+    fn snapshot_runtime(&self) -> (RadarRuntimeLedger, Option<FocusSessionRequest>) {
+        let now_ms = radar_now_ms();
+        let Ok(mut g) = self.inner.lock() else {
+            return (RadarRuntimeLedger::default(), None);
+        };
+        if let Some(ref f) = g.pending_focus {
+            if now_ms.saturating_sub(f.requested_at_ms) > FOCUS_REQUEST_TTL_MS {
+                g.pending_focus = None;
+            }
+        }
+        (g.ledger.clone(), g.pending_focus.clone())
+    }
+
+    fn acknowledge(&self, conversation_id: &str) {
+        let cid = conversation_id.trim();
+        if cid.is_empty() {
+            return;
+        }
+        if let Ok(mut g) = self.inner.lock() {
+            g.ledger
+                .acknowledged_at_ms
+                .insert(cid.to_string(), radar_now_ms());
+        }
+    }
+
+    fn queue_focus(
+        &self,
+        client: &str,
+        conversation_id: &str,
+        split: Option<String>,
+    ) -> Option<FocusSessionRequest> {
+        let cid = conversation_id.trim();
+        if cid.is_empty() {
+            return None;
+        }
+        let now_ms = radar_now_ms();
+        let Ok(mut g) = self.inner.lock() else {
+            return None;
+        };
+        g.ledger
+            .acknowledged_at_ms
+            .insert(cid.to_string(), now_ms);
+        g.focus_seq = g.focus_seq.saturating_add(1);
+        let req = FocusSessionRequest {
+            seq: g.focus_seq,
+            client: if client.trim().is_empty() {
+                "agy".to_string()
+            } else {
+                client.trim().to_ascii_lowercase()
+            },
+            conversation_id: cid.to_string(),
+            split: split.filter(|s| !s.trim().is_empty()),
+            requested_at_ms: now_ms,
+        };
+        g.pending_focus = Some(req.clone());
+        Some(req)
+    }
+
+    fn consume_focus(&self, seq: u64) {
+        if let Ok(mut g) = self.inner.lock() {
+            if g.pending_focus.as_ref().is_some_and(|f| f.seq <= seq) {
+                g.pending_focus = None;
+            }
+        }
+    }
+}
+
+fn dispatch_earcon_sound(sound_name: &str) {
+    if std::env::var_os("AGY_HYPER_NO_NOTIFY").is_some() {
+        return;
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let sound_path = format!("/System/Library/Sounds/{}.aiff", sound_name);
+        if std::path::Path::new(&sound_path).is_file() {
+            let _ = std::process::Command::new("/usr/bin/afplay")
+                .args(["-v", "0.58", &sound_path])
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn();
+        }
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = sound_name;
+    }
+}
+
+fn run_radar_transition_tick(
+    state: &Arc<Mutex<DaemonState>>,
+    namer: &Arc<NamerCoordinator>,
+    radar: &Arc<RadarCoordinator>,
+) {
+    let cfg = match state.lock() {
+        Ok(g) => g.config_clone(),
+        Err(_) => return,
+    };
+    if cfg.session_naming.enabled {
+        namer.enqueue_auto_sweep(discover_unmanaged_recent_agy_sessions(12));
+    }
+    let (ledger_snap, _) = radar.snapshot_runtime();
+    let snap = build_session_radar(8, cfg.enable_radar_sound, Some(&ledger_snap), None);
+    let now_ms = radar_now_ms();
+
+    let mut pending_alerts: Vec<(&'static str, String, String)> = Vec::new();
+    {
+        let Ok(mut rt) = radar.inner.lock() else {
+            return;
+        };
+        let mut current_states: HashMap<String, (SessionLiveState, String, String)> = HashMap::new();
+        for it in snap.attention_items.iter().chain(snap.recent_items.iter()) {
+            let key = format!("{}:{}", it.client, it.id);
+            current_states.insert(
+                key,
+                (
+                    it.live_state,
+                    it.title.clone(),
+                    it.group.clone(),
+                ),
+            );
+        }
+
+        if !rt.seeded {
+            rt.seeded = true;
+            for (key, (st, _, _)) in &current_states {
+                rt.last_states.insert(key.clone(), *st);
+                if st.is_active_work() {
+                    rt.observed_active_since_ms.insert(key.clone(), now_ms);
+                }
+            }
+            return;
+        }
+
+        for (key, (cur_st, title, group)) in &current_states {
+            let prev_st = rt
+                .last_states
+                .get(key)
+                .copied()
+                .unwrap_or(SessionLiveState::Idle);
+            let raw_id = key.split_once(':').map(|(_, id)| id).unwrap_or(key.as_str());
+
+            if cur_st.is_active_work() {
+                rt.observed_active_since_ms
+                    .entry(key.clone())
+                    .or_insert(now_ms);
+            }
+
+            match *cur_st {
+                SessionLiveState::Waiting if prev_st != SessionLiveState::Waiting => {
+                    let gate_key = format!("wait:{}", key);
+                    if rt.notified_gate_keys.insert(gate_key) {
+                        pending_alerts.push((
+                            "Ping",
+                            format!("AGY Hyper · Waiting ({})", group),
+                            title.clone(),
+                        ));
+                    }
+                }
+                SessionLiveState::Stalled
+                    if prev_st != SessionLiveState::Stalled
+                        && rt.observed_active_since_ms.contains_key(key) =>
+                {
+                    let gate_key = format!("stall:{}", key);
+                    if rt.notified_gate_keys.insert(gate_key) {
+                        pending_alerts.push((
+                            "Basso",
+                            format!("AGY Hyper · Stalled ({})", group),
+                            title.clone(),
+                        ));
+                    }
+                }
+                SessionLiveState::Idle | SessionLiveState::Unread => {
+                    rt.notified_gate_keys.remove(&format!("wait:{}", key));
+                    rt.notified_gate_keys.remove(&format!("stall:{}", key));
+                    if let Some(started_ms) = rt.observed_active_since_ms.remove(key) {
+                        rt.ledger
+                            .completed_at_ms
+                            .insert(raw_id.to_string(), now_ms);
+                        let ran_ms = now_ms.saturating_sub(started_ms);
+                        // Only chime if task ran >=8s AND became Unread (suppressed when user is already viewing the chat)
+                        if ran_ms >= RADAR_MIN_RUN_DURATION_FOR_CHIME_MS
+                            && *cur_st == SessionLiveState::Unread
+                        {
+                            pending_alerts.push((
+                                "Glass",
+                                format!("AGY Hyper · Task Complete ({})", group),
+                                title.clone(),
+                            ));
+                        }
+                    }
+                }
+                _ => {}
+            }
+            rt.last_states.insert(key.clone(), *cur_st);
+        }
+
+        // Also check if any previously observed active session dropped off top list -> mark completed
+        let finished_keys: Vec<(String, u64)> = rt
+            .observed_active_since_ms
+            .iter()
+            .filter(|(k, _)| !current_states.contains_key(*k))
+            .map(|(k, ts)| (k.clone(), *ts))
+            .collect();
+        for (k, _started) in finished_keys {
+            rt.observed_active_since_ms.remove(&k);
+            if let Some((_, raw_id)) = k.split_once(':') {
+                rt.ledger.completed_at_ms.insert(raw_id.to_string(), now_ms);
+            }
+        }
+    }
+
+    for (sound, alert_title, alert_body) in pending_alerts {
+        if cfg.enable_radar_sound {
+            dispatch_earcon_sound(sound);
+        }
+        if cfg.enable_watchdog_notify {
+            dispatch_desktop_notification(&alert_title, &alert_body);
+        }
+    }
+}
+
+fn spawn_radar_loop(
+    state: Arc<Mutex<DaemonState>>,
+    namer: Arc<NamerCoordinator>,
+    radar: Arc<RadarCoordinator>,
+    mut shutdown_rx: tokio::sync::watch::Receiver<bool>,
+) {
+    tokio::spawn(async move {
+        let mut ticker = tokio::time::interval(Duration::from_secs(RADAR_POLL_SECS));
+        ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        loop {
+            tokio::select! {
+                _ = shutdown_rx.changed() => {
+                    if *shutdown_rx.borrow() { break; }
+                }
+                _ = ticker.tick() => {
+                    let st = state.clone();
+                    let nm = namer.clone();
+                    let rd = radar.clone();
+                    let _ = tokio::task::spawn_blocking(move || {
+                        run_radar_transition_tick(&st, &nm, &rd);
                     }).await;
                 }
             }

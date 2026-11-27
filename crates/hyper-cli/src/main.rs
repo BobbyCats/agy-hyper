@@ -12,6 +12,11 @@ use hyper_core::audit::{
 use hyper_core::bench::{aggregate_sessions, render_waterfall_svg};
 use hyper_core::config::{HyperConfig, Profile};
 use hyper_core::git::quick_head;
+use hyper_core::namer::{
+    discover_unmanaged_recent_agy_sessions, process_session_naming_with_options,
+};
+use hyper_core::radar::{build_session_radar, SessionRadarResponse};
+use hyper_core::session_index::{search_sessions, SessionSearchQuery, SessionSearchResponse};
 use hyper_core::sessions::discover_transcripts;
 use hyper_core::update::{
     check_latest_release, dismiss_update_version, is_newer_version, load_update_state,
@@ -200,6 +205,72 @@ enum Commands {
         #[arg(long, default_value_t = 47821)]
         port: u16,
     },
+    /// Search Antigravity and Codex interactive sessions with CJK substring recall
+    Sessions {
+        #[arg(long, default_value = "")]
+        query: String,
+        #[arg(long, default_value = "all")]
+        client: String,
+        #[arg(long, default_value = "")]
+        group: String,
+        #[arg(long, default_value_t = 0)]
+        days: u32,
+        #[arg(long, default_value = "updated")]
+        sort: String,
+        #[arg(long, default_value_t = 150)]
+        limit: usize,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Inspect live cross-client session radar (Waiting / Stalled / Unread / Running / Recent)
+    Radar {
+        #[arg(long, default_value_t = 8)]
+        recent: usize,
+        #[arg(long)]
+        ack: Option<String>,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Manage the native macOS MenuBar companion (AGYHyperBar)
+    Menubar {
+        #[command(subcommand)]
+        action: MenubarAction,
+    },
+    /// Sync or regenerate structured `<Emoji> <Code>·<Object>｜<Goal>` session titles on demand
+    Namer {
+        #[command(subcommand)]
+        action: NamerAction,
+    },
+}
+
+#[derive(Subcommand)]
+enum NamerAction {
+    /// Scan and queue naming for recent Antigravity sessions still using default titles
+    Sync {
+        #[arg(long, default_value_t = 16)]
+        limit: usize,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Immediately generate or refresh the title for a specific conversation ID
+    Run {
+        conversation_id: String,
+        /// Override manual lock and force regeneration even if fingerprint is unchanged
+        #[arg(long)]
+        force: bool,
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(Subcommand)]
+enum MenubarAction {
+    /// Launch or restart the native macOS MenuBar companion
+    Start,
+    /// Stop the running macOS MenuBar companion
+    Stop,
+    /// Print MenuBar companion status
+    Status,
 }
 
 #[derive(Subcommand)]
@@ -207,6 +278,7 @@ enum HookEvent {
     SessionStart,
     PreInvocation,
     PostToolUse,
+    Stop,
 }
 
 #[derive(Subcommand)]
@@ -249,7 +321,7 @@ enum ConfigAction {
         name: String,
     },
     Toggle {
-        /// prewarm_tier2 | block_secret_files | allow_custom_argv_checks | enable_ui_pill | enable_watchdog_notify | enable_update_check | enable_mcp_read | enable_mcp_edit | enable_mcp_check
+        /// prewarm_tier2 | block_secret_files | allow_custom_argv_checks | enable_ui_pill | enable_watchdog_notify | enable_update_check | enable_mcp_read | enable_mcp_edit | enable_mcp_check | session_naming
         key: String,
         value: bool,
     },
@@ -375,6 +447,7 @@ fn run_cli(cli: Cli) -> Result<()> {
             HookEvent::SessionStart => hooks::run_session_start(),
             HookEvent::PreInvocation => hooks::run_pre_invocation(),
             HookEvent::PostToolUse => hooks::run_post_tool_use(),
+            HookEvent::Stop => hooks::run_stop(),
         },
         Commands::Daemon { action } => handle_daemon(action),
         Commands::Bench {
@@ -441,6 +514,18 @@ fn run_cli(cli: Cli) -> Result<()> {
             json,
         } => handle_usage(window, currency, tz_offset_mins, force_sync, json),
         Commands::Ui { port } => handle_ui(port),
+        Commands::Sessions {
+            query,
+            client,
+            group,
+            days,
+            sort,
+            limit,
+            json,
+        } => handle_sessions(query, client, group, days, sort, limit, json),
+        Commands::Radar { recent, ack, json } => handle_radar(recent, ack, json),
+        Commands::Menubar { action } => handle_menubar(action),
+        Commands::Namer { action } => handle_namer(action),
     }
 }
 
@@ -2094,6 +2179,299 @@ fn handle_ui(port: u16) -> Result<()> {
         return Err(anyhow!("Hyper Deck exited with {}", status));
     }
     Ok(())
+}
+
+fn handle_sessions(
+    query: String,
+    client: String,
+    group: String,
+    days: u32,
+    sort: String,
+    limit: usize,
+    as_json: bool,
+) -> Result<()> {
+    let bypass_daemon = std::env::var_os("AGY_HYPER_SUMMARIES_DB").is_some()
+        || std::env::var_os("AGY_HYPER_CODEX_DB").is_some()
+        || std::env::var_os("AGY_HYPER_BRAIN_DIR").is_some();
+
+    let resp: SessionSearchResponse = if bypass_daemon {
+        search_sessions(&SessionSearchQuery {
+            query,
+            client,
+            group,
+            days,
+            sort,
+            limit,
+        })
+    } else if let Ok(DaemonResponse::Ok { data }) = ensure_and_send(&DaemonRequest::SearchSessions {
+        query: query.clone(),
+        client: client.clone(),
+        group: group.clone(),
+        days,
+        sort: sort.clone(),
+        limit,
+    }) {
+        serde_json::from_value(data)?
+    } else {
+        search_sessions(&SessionSearchQuery {
+            query,
+            client,
+            group,
+            days,
+            sort,
+            limit,
+        })
+    };
+
+    if as_json {
+        println!("{}", serde_json::to_string(&resp)?);
+        return Ok(());
+    }
+
+    println!(
+        "\n⚡ AGY HYPER SESSIONS · {} match(es) (AGY {} · Codex {}) · {:.2}ms",
+        resp.total_matches, resp.agy_matches, resp.codex_matches, resp.elapsed_ms
+    );
+    println!("─────────────────────────────────────────────────────────────────");
+    for item in resp.sessions.iter().take(40) {
+        println!(
+            "  [{:<5}] {:<10} {}  (#{})",
+            item.client.to_uppercase(),
+            item.code,
+            item.title,
+            &item.id[..item.id.len().min(8)]
+        );
+    }
+    println!();
+    Ok(())
+}
+
+fn handle_radar(recent: usize, ack: Option<String>, as_json: bool) -> Result<()> {
+    if let Some(cid) = ack.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        let _ = ensure_and_send(&DaemonRequest::RadarAck {
+            conversation_id: cid.to_string(),
+        });
+    }
+    let resp: SessionRadarResponse = if let Ok(DaemonResponse::Ok { data }) =
+        ensure_and_send(&DaemonRequest::SessionRadar {
+            recent_limit: recent,
+        })
+    {
+        serde_json::from_value(data)?
+    } else {
+        let cfg = HyperConfig::load();
+        build_session_radar(recent, cfg.enable_radar_sound, None, None)
+    };
+
+    if as_json {
+        println!("{}", serde_json::to_string(&resp)?);
+        return Ok(());
+    }
+
+    println!(
+        "\n⚡ AGY HYPER LIVE RADAR · waiting={} · stalled={} · unread={} · running={} · {:.2}ms",
+        resp.waiting_count,
+        resp.stalled_count,
+        resp.unread_count,
+        resp.running_count,
+        resp.elapsed_ms
+    );
+    println!("─────────────────────────────────────────────────────────────────");
+    for item in &resp.attention_items {
+        println!(
+            "  [{:<7}] {:<5} {:<10} {}  (#{})",
+            item.live_state.as_str().to_uppercase(),
+            item.client.to_uppercase(),
+            item.group,
+            item.title,
+            &item.id[..item.id.len().min(8)]
+        );
+    }
+    if !resp.recent_items.is_empty() {
+        println!("  ── Recent ──");
+        for item in &resp.recent_items {
+            println!(
+                "  [RECENT ] {:<5} {:<10} {}  (#{})",
+                item.client.to_uppercase(),
+                item.group,
+                item.title,
+                &item.id[..item.id.len().min(8)]
+            );
+        }
+    }
+    println!();
+    Ok(())
+}
+
+fn resolve_menubar_bin() -> Option<PathBuf> {
+    let mut candidates = Vec::new();
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            candidates.push(dir.join("agy-hyper-bar"));
+        }
+    }
+    if let Some(home) = dirs::home_dir() {
+        candidates.push(
+            home.join(".gemini")
+                .join("config")
+                .join("plugins")
+                .join("agy-hyper")
+                .join("bin")
+                .join("agy-hyper-bar"),
+        );
+        candidates.push(home.join(".local").join("bin").join("agy-hyper-bar"));
+    }
+    candidates.into_iter().find(|p| p.is_file())
+}
+
+fn menubar_pid_path() -> PathBuf {
+    HyperConfig::run_dir().join("menubar.pid")
+}
+
+fn read_live_menubar_pid() -> Option<u32> {
+    let raw = fs::read_to_string(menubar_pid_path()).ok()?;
+    let pid = raw.trim().parse::<u32>().ok()?;
+    if pid == 0 {
+        return None;
+    }
+    let ok = Command::new("kill")
+        .args(["-0", &pid.to_string()])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+    ok.then_some(pid)
+}
+
+fn stop_menubar_if_running() -> bool {
+    let mut stopped = false;
+    if let Some(pid) = read_live_menubar_pid() {
+        let _ = Command::new("kill")
+            .arg(pid.to_string())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+        stopped = true;
+    }
+    let _ = Command::new("pkill")
+        .args(["-f", "agy-hyper-bar"])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
+    let _ = fs::remove_file(menubar_pid_path());
+    stopped
+}
+
+fn handle_menubar(action: MenubarAction) -> Result<()> {
+    if !cfg!(target_os = "macos") {
+        println!("MenuBar companion is only supported on macOS.");
+        return Ok(());
+    }
+    match action {
+        MenubarAction::Stop => {
+            stop_menubar_if_running();
+            println!("AGYHyperBar stopped.");
+            Ok(())
+        }
+        MenubarAction::Status => {
+            if let Some(pid) = read_live_menubar_pid() {
+                println!("running · pid={}", pid);
+            } else {
+                println!("stopped");
+            }
+            Ok(())
+        }
+        MenubarAction::Start => {
+            let Some(bin) = resolve_menubar_bin() else {
+                return Err(anyhow!(
+                    "agy-hyper-bar binary not found; re-run ./install.sh on macOS to build it"
+                ));
+            };
+            stop_menubar_if_running();
+            let _ = ensure_and_send(&DaemonRequest::Ping);
+            let run_dir = HyperConfig::run_dir();
+            let _ = fs::create_dir_all(&run_dir);
+            let child = Command::new(&bin)
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()?;
+            let pid = child.id();
+            let _ = fs::write(menubar_pid_path(), format!("{}\n", pid));
+            println!("AGYHyperBar started (pid={} · {})", pid, bin.display());
+            Ok(())
+        }
+    }
+}
+
+fn handle_namer(action: NamerAction) -> Result<()> {
+    match action {
+        NamerAction::Sync { limit, json } => {
+            if let Ok(DaemonResponse::Ok { data }) = ensure_and_send(&DaemonRequest::NamerSync {
+                conversation_id: None,
+                force: false,
+                limit,
+            }) {
+                if json {
+                    println!("{}", serde_json::to_string(&data)?);
+                } else {
+                    let q = data.get("queued").and_then(|v| v.as_u64()).unwrap_or(0);
+                    println!(
+                        "Queued {} unformatted session(s) for background naming.",
+                        q
+                    );
+                }
+                return Ok(());
+            }
+
+            let cfg = HyperConfig::load();
+            let candidates = discover_unmanaged_recent_agy_sessions(limit);
+            let mut renamed = Vec::new();
+            for (cid, ws) in candidates {
+                if let Ok(hyper_core::namer::NamingOutcome::Renamed { title }) =
+                    process_session_naming_with_options(&cfg, &cid, None, &ws, false)
+                {
+                    renamed.push(serde_json::json!({ "id": cid, "title": title }));
+                }
+            }
+            if json {
+                println!(
+                    "{}",
+                    serde_json::to_string(&serde_json::json!({
+                        "ok": true,
+                        "renamed": renamed.len(),
+                        "items": renamed,
+                    }))?
+                );
+            } else {
+                println!("Renamed {} session(s).", renamed.len());
+            }
+            Ok(())
+        }
+        NamerAction::Run {
+            conversation_id,
+            force,
+            json,
+        } => {
+            let cfg = HyperConfig::load();
+            let outcome =
+                process_session_naming_with_options(&cfg, &conversation_id, None, &[], force)?;
+            if json {
+                println!(
+                    "{}",
+                    serde_json::to_string(&serde_json::json!({
+                        "ok": true,
+                        "conversation_id": conversation_id,
+                        "outcome": outcome,
+                    }))?
+                );
+            } else {
+                println!("{:?}", outcome);
+            }
+            Ok(())
+        }
+    }
 }
 
 #[cfg(test)]

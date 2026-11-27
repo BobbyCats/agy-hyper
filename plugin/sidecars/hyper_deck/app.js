@@ -1,18 +1,26 @@
 (() => {
   const { $, apiFetch, copyTextReliable, initThemeSync, isDark, showToast, t } = window.HyperDeck.api;
   const { renderFullContextChart, renderHeroChart, renderUsageChart, renderWaterfallChart, resizeAllCharts } = window.HyperDeck.charts;
-  const { renderAuditPanel, renderSnapshot, renderUsageReport, renderWarmthMeter } = window.HyperDeck.render;
+  const { renderAuditPanel, renderLiveRadar, renderSessionsView, renderSnapshot, renderUsageReport, renderWarmthMeter } = window.HyperDeck.render;
 
   const SUPPORTED_LANGS = ['en', 'zh-CN', 'ja'];
   const state = {
     lastSnap: null,
     lastUsage: null,
     lastAudit: null,
+    lastSessions: null,
+    lastRadar: null,
+    radarRecentOpen: false,
     openDiffs: {},
     mode: 'simple',
     heroTab: 'context',
     proTab: 'waterfall',
     selectedConvId: '',
+    sessionsQuery: '',
+    sessionsClient: 'all',
+    sessionsGroup: '',
+    sessionsDays: 0,
+    sessionsSort: 'updated',
     usageWindow: localStorage.getItem('agy-hyper-uwin') || '7d',
     usageMetric: localStorage.getItem('agy-hyper-umetric') || 'cost',
     sharePreviewOpen: false,
@@ -22,6 +30,11 @@
   };
   let pollInFlight = false;
   let pollSeq = 0;
+  let sessionsInFlight = false;
+  let sessionsSeq = 0;
+  let lastSessionsFetchMs = 0;
+  let searchDebounceTimer = null;
+  let imeComposing = false;
   let usageInFlight = false;
   let usageSeq = 0;
   let lastUsageFetchMs = 0;
@@ -29,6 +42,8 @@
   let lastAuditFetchMs = 0;
   let sharePreviewSeq = 0;
   let sharePreviewObjectUrl = '';
+  let radarInFlight = false;
+  let lastConsumedFocusSeq = 0;
 
   function selectSession(convId) {
     state.selectedConvId = convId || '';
@@ -323,6 +338,10 @@
 
   function render() {
     if (state.lastSnap) renderSnapshot(state.lastSnap, state, triggerRollback, selectSession, toggleTxDiff);
+    if (state.lastRadar) renderLiveRadar(state.lastRadar, state, sessionHandlers);
+    if (state.mode === 'sessions') {
+      renderSessionsView(state.lastSessions, state, sessionHandlers);
+    }
     if (state.lastUsage && state.mode === 'pro' && state.proTab === 'usage') {
       renderUsageReport(state.lastUsage, state);
     }
@@ -366,6 +385,9 @@
     document.querySelectorAll('[data-i18n]').forEach((el) => {
       el.textContent = t(el.dataset.i18n);
     });
+    document.querySelectorAll('[data-i18n-placeholder]').forEach((el) => {
+      el.setAttribute('placeholder', t(el.dataset.i18nPlaceholder));
+    });
   }
 
   function syncLangButtons() {
@@ -405,15 +427,175 @@
     syncLangButtons();
   }
 
+  function ackRadarItem(cid) {
+    if (!cid) return;
+    apiFetch('/api/radar/ack', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ conversation_id: cid }),
+    }).catch(() => {});
+  }
+
+  function jumpToAgyConversation(cid, splitRight = false) {
+    if (!cid) return;
+    ackRadarItem(cid);
+    state.selectedConvId = cid;
+    try {
+      if (window.sidecar?.ui?.toggleConversation) {
+        const opts = splitRight ? { openSidePanel: true, split: 'right' } : { openSidePanel: true };
+        window.sidecar.ui.toggleConversation(cid, opts);
+        showToast(t('sessions.jumped_agy', { id: cid.slice(0, 8) }));
+      }
+    } catch {
+      // fallback to telemetry selection when outside Antigravity host
+    }
+    poll(true);
+    pollRadar(true);
+  }
+
+  const sessionHandlers = {
+    onSelectGroup: (groupName) => {
+      state.sessionsGroup = groupName || '';
+      pollSessions(true);
+    },
+    onCopyId: async (sid) => {
+      if (!sid) return;
+      const ok = await copyTextReliable(sid);
+      if (ok) showToast(t('sessions.copied_id', { id: sid.slice(0, 8) }));
+    },
+    onInspectAgy: (cid) => {
+      if (!cid) return;
+      ackRadarItem(cid);
+      state.selectedConvId = cid;
+      setMode('simple');
+      poll(true);
+    },
+    onJumpAgy: (cid, ev) => {
+      const splitRight = Boolean(ev?.altKey || ev?.metaKey);
+      jumpToAgyConversation(cid, splitRight);
+    },
+    onOpenCodex: async (uri, shortId, fullId = '') => {
+      if (!uri) return;
+      if (fullId) ackRadarItem(fullId);
+      showToast(t('sessions.opened_codex', { id: shortId || '' }));
+      const r = await apiFetch('/api/sessions/open', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ uri }),
+      })
+        .then((x) => x.json())
+        .catch(() => ({ ok: false }));
+      if (!r?.ok) {
+        try {
+          window.open(uri, '_blank', 'noopener,noreferrer');
+        } catch {
+          // ignore
+        }
+      }
+      pollRadar(true);
+    },
+    onJumpRadarItem: (item, ev) => {
+      if (!item?.id) return;
+      if (item.client === 'codex') {
+        const uri = item.open_url || `codex://threads/${item.id}`;
+        sessionHandlers.onOpenCodex(uri, item.id.slice(0, 8), item.id);
+      } else {
+        const splitRight = Boolean(ev?.altKey || ev?.metaKey);
+        jumpToAgyConversation(item.id, splitRight);
+      }
+    },
+  };
+
+  async function pollRadar(force = false) {
+    if (radarInFlight && !force) return;
+    radarInFlight = true;
+    try {
+      const rep = await apiFetch('/api/radar?recent=6', { method: 'GET' }).then((r) => r.json());
+      if (rep && rep.ok !== false && !rep.error) {
+        state.lastRadar = rep;
+        if (rep.ui_language && rep.ui_language !== 'auto' && SUPPORTED_LANGS.includes(rep.ui_language) && window.i18next?.language !== rep.ui_language) {
+          window.i18next.changeLanguage(rep.ui_language).then(() => {
+            localStorage.setItem('agy-hyper-lang', rep.ui_language);
+            applyStaticTranslations();
+            syncLangButtons();
+            render();
+          });
+        }
+        renderLiveRadar(rep, state, sessionHandlers);
+        const freq = rep.focus_request;
+        if (freq && freq.seq > lastConsumedFocusSeq && freq.conversation_id) {
+          lastConsumedFocusSeq = freq.seq;
+          apiFetch('/api/radar/focus', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ consume_seq: freq.seq }),
+          }).catch(() => {});
+          if (freq.client === 'agy' && window.sidecar?.ui?.toggleConversation) {
+            const opts = freq.split === 'right' ? { openSidePanel: true, split: 'right' } : { openSidePanel: true };
+            window.sidecar.ui.toggleConversation(freq.conversation_id, opts);
+            state.selectedConvId = freq.conversation_id;
+            poll(true);
+          }
+        }
+      }
+    } catch {
+      // keep previous radar state
+    } finally {
+      radarInFlight = false;
+    }
+  }
+
+  async function pollSessions(force = false) {
+    if (state.mode !== 'sessions') return;
+    if (sessionsInFlight && !force) return;
+    if (!force && state.lastSessions && Date.now() - lastSessionsFetchMs < 8000) {
+      renderSessionsView(state.lastSessions, state, sessionHandlers);
+      return;
+    }
+    const seq = ++sessionsSeq;
+    sessionsInFlight = true;
+    if (!state.lastSessions) {
+      renderSessionsView(null, state, sessionHandlers);
+    }
+    try {
+      const q = new URLSearchParams();
+      if (state.sessionsQuery) q.set('q', state.sessionsQuery);
+      q.set('client', state.sessionsClient);
+      if (state.sessionsGroup) q.set('group', state.sessionsGroup);
+      if (state.sessionsDays > 0) q.set('days', String(state.sessionsDays));
+      q.set('sort', state.sessionsSort);
+      q.set('limit', '150');
+      const rep = await apiFetch(`/api/sessions?${q.toString()}`, { method: 'GET' }).then((r) => r.json());
+      if (seq !== sessionsSeq) return;
+      if (rep && rep.ok !== false && !rep.error) {
+        state.lastSessions = rep;
+        lastSessionsFetchMs = Date.now();
+        renderSessionsView(rep, state, sessionHandlers);
+      }
+    } catch {
+      // keep previous list intact
+    } finally {
+      if (seq === sessionsSeq) sessionsInFlight = false;
+    }
+  }
+
   function setMode(next) {
     state.mode = next;
     $('btn-mode-simple').classList.toggle('active', next === 'simple');
     $('btn-mode-simple').setAttribute('aria-selected', String(next === 'simple'));
+    const sessBtn = $('btn-mode-sessions');
+    if (sessBtn) {
+      sessBtn.classList.toggle('active', next === 'sessions');
+      sessBtn.setAttribute('aria-selected', String(next === 'sessions'));
+    }
     $('btn-mode-pro').classList.toggle('active', next === 'pro');
     $('btn-mode-pro').setAttribute('aria-selected', String(next === 'pro'));
     $('view-simple').classList.toggle('hidden', next !== 'simple');
+    $('view-sessions')?.classList.toggle('hidden', next !== 'sessions');
     $('view-pro').classList.toggle('hidden', next !== 'pro');
-    if (next === 'pro' && state.proTab === 'usage') {
+    if (next === 'sessions') {
+      pollSessions(false);
+    } else if (next === 'pro' && state.proTab === 'usage') {
       pollUsage(false);
       pollAudit(false);
     }
@@ -546,7 +728,7 @@
           showToast(t('update.toast_check_err', { err: r.last_error }));
         } else {
           render();
-          showToast(t('update.toast_up_to_date', { version: r.current_version || '0.5.1' }));
+          showToast(t('update.toast_up_to_date', { version: r.current_version || '0.6.0' }));
         }
       } else {
         showToast(t('update.toast_check_err', { err: r?.error || 'error' }));
@@ -680,8 +862,14 @@
   document.querySelectorAll('.lang-btn[data-lang]').forEach((btn) => {
     btn.addEventListener('click', async () => {
       if (!window.i18next) return;
-      await window.i18next.changeLanguage(btn.dataset.lang);
-      localStorage.setItem('agy-hyper-lang', btn.dataset.lang);
+      const lng = btn.dataset.lang;
+      await window.i18next.changeLanguage(lng);
+      localStorage.setItem('agy-hyper-lang', lng);
+      apiFetch('/api/ui-prefs', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ language: lng }),
+      }).catch(() => {});
       applyStaticTranslations();
       syncLangButtons();
       syncSharePreviewButton();
@@ -689,8 +877,103 @@
     });
   });
 
-  $('btn-mode-simple').addEventListener('click', () => setMode('simple'));
-  $('btn-mode-pro').addEventListener('click', () => setMode('pro'));
+  $('btn-mode-simple').addEventListener('click', () => { setMode('simple'); render(); });
+  $('btn-mode-sessions')?.addEventListener('click', () => { setMode('sessions'); render(); });
+  $('btn-mode-pro').addEventListener('click', () => { setMode('pro'); render(); });
+
+  $('btn-radar-recent')?.addEventListener('click', () => {
+    state.radarRecentOpen = !state.radarRecentOpen;
+    if (state.lastRadar) renderLiveRadar(state.lastRadar, state, sessionHandlers);
+  });
+
+  $('btn-radar-namer')?.addEventListener('click', async () => {
+    const btn = $('btn-radar-namer');
+    if (btn?.dataset.busy === '1') return;
+    if (btn) btn.dataset.busy = '1';
+    try {
+      const r = await apiFetch('/api/namer/sync', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ limit: 16 }),
+      }).then((x) => x.json()).catch(() => ({ ok: false }));
+      const count = Number(r?.queued ?? r?.renamed ?? 0);
+      showToast(t('radar.sync_titles_toast', { count }));
+      setTimeout(() => {
+        pollRadar(true);
+        if (state.mode === 'sessions') pollSessions(true);
+      }, 3200);
+    } finally {
+      setTimeout(() => {
+        if (btn) delete btn.dataset.busy;
+      }, 2000);
+    }
+  });
+
+  $('btn-radar-sound')?.addEventListener('click', async () => {
+    const nextVal = !(state.lastRadar?.sound_enabled !== false);
+    const r = await apiFetch('/api/toggle', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ key: 'enable_radar_sound', value: nextVal }),
+    }).then((x) => x.json()).catch(() => ({ ok: false }));
+    if (r.ok) {
+      if (state.lastRadar) state.lastRadar.sound_enabled = nextVal;
+      if ($('tog-radar-sound')) $('tog-radar-sound').checked = nextVal;
+      if (state.lastRadar) renderLiveRadar(state.lastRadar, state, sessionHandlers);
+      showToast(t('engine.toast_toggle_ok', { key: 'enable_radar_sound', state: nextVal ? 'ON' : 'OFF' }));
+    }
+  });
+
+  const sessInput = $('sessions-search-input');
+  if (sessInput) {
+    sessInput.addEventListener('compositionstart', () => {
+      imeComposing = true;
+    });
+    sessInput.addEventListener('compositionend', () => {
+      imeComposing = false;
+      state.sessionsQuery = sessInput.value.trim();
+      clearTimeout(searchDebounceTimer);
+      searchDebounceTimer = setTimeout(() => pollSessions(true), 80);
+    });
+    sessInput.addEventListener('input', () => {
+      if (imeComposing) return;
+      const nextQ = sessInput.value.trim();
+      if (nextQ === state.sessionsQuery) return;
+      state.sessionsQuery = nextQ;
+      $('btn-sessions-clear')?.classList.toggle('hidden', !nextQ);
+      clearTimeout(searchDebounceTimer);
+      searchDebounceTimer = setTimeout(() => pollSessions(true), 140);
+    });
+  }
+
+  $('btn-sessions-clear')?.addEventListener('click', () => {
+    if (sessInput) sessInput.value = '';
+    state.sessionsQuery = '';
+    $('btn-sessions-clear')?.classList.add('hidden');
+    pollSessions(true);
+    sessInput?.focus();
+  });
+
+  document.querySelectorAll('.sess-filter-btn[data-sclient]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      state.sessionsClient = btn.dataset.sclient || 'all';
+      pollSessions(true);
+    });
+  });
+
+  document.querySelectorAll('.sess-filter-btn[data-sdays]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      state.sessionsDays = Number(btn.dataset.sdays || 0);
+      pollSessions(true);
+    });
+  });
+
+  document.querySelectorAll('.sess-filter-btn[data-ssort]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      state.sessionsSort = btn.dataset.ssort || 'updated';
+      pollSessions(true);
+    });
+  });
   document.querySelectorAll('.kpi-tab[data-herotab]').forEach((b) =>
     b.addEventListener('click', () => setHeroTab(b.dataset.herotab))
   );
@@ -849,7 +1132,12 @@
 
   const qs = new URLSearchParams(location.search);
   if (qs.get('conversationId')) state.selectedConvId = qs.get('conversationId');
+  if (qs.get('q')) {
+    state.sessionsQuery = qs.get('q');
+    if (sessInput) sessInput.value = state.sessionsQuery;
+  }
   if (qs.get('mode') === 'pro') setMode('pro');
+  else if (qs.get('mode') === 'sessions' || qs.get('tab') === 'sessions') setMode('sessions');
   if (['context', 'latency', 'cache', 'saved'].includes(qs.get('hero'))) setHeroTab(qs.get('hero'));
   if (['waterfall', 'context', 'usage', 'engine', 'security'].includes(qs.get('tab'))) setProTab(qs.get('tab'));
 
@@ -857,13 +1145,20 @@
     .catch(() => {})
     .finally(() => {
       poll(true);
-      if (state.mode === 'pro' && state.proTab === 'usage') {
+      pollRadar(true);
+      if (state.mode === 'sessions') {
+        pollSessions(true);
+      } else if (state.mode === 'pro' && state.proTab === 'usage') {
         pollUsage(false);
         pollAudit(false);
       }
-      setInterval(() => poll(false), 2500);
+      setInterval(() => {
+        poll(false);
+        pollRadar(false);
+      }, 2500);
       setInterval(() => {
         if (state.mode === 'pro' && state.proTab === 'usage') pollUsage(false);
+        else if (state.mode === 'sessions') pollSessions(false);
       }, 20000);
       setInterval(() => { if (state.lastSnap) renderWarmthMeter(state.lastSnap); }, 1000);
     });

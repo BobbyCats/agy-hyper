@@ -24,7 +24,7 @@
         <div class="brand-copy">
           <div class="brand-title-row">
             <span class="brand-name" data-i18n="app.title">AGY Hyper</span>
-            <span id="version-pill" class="mono-tag">v0.5.1</span>
+            <span id="version-pill" class="mono-tag">v0.6.0</span>
             <button id="update-pill" type="button" class="update-pill hidden" aria-expanded="false"></button>
           </div>
           <div class="brand-sub">
@@ -42,6 +42,7 @@
         </div>
         <div class="mode-switch" role="tablist" aria-label="View density">
           <button id="btn-mode-simple" type="button" class="mode-btn active" role="tab" aria-selected="true" data-i18n="mode.simple">Simple</button>
+          <button id="btn-mode-sessions" type="button" class="mode-btn" role="tab" aria-selected="false" data-i18n="mode.sessions">Sessions</button>
           <button id="btn-mode-pro" type="button" class="mode-btn" role="tab" aria-selected="false" data-i18n="mode.pro">Pro</button>
         </div>
         <button id="btn-theme" type="button" class="icon-btn hidden" title="Toggle theme" aria-label="Toggle theme">
@@ -63,6 +64,27 @@
       </select>
       <span id="health-chip" class="status-pill ok" data-i18n="pulse.healthy">Healthy</span>
     </div>
+
+    <!-- Cross-Project Live Radar & Recent Switcher (never hidden by collapsed sidebar folders) -->
+    <section id="live-radar-strip" class="radar-panel hidden" aria-label="Live Session Radar">
+      <div class="radar-head">
+        <div class="radar-head-left">
+          <span id="radar-lead-glyph" class="radar-lead-glyph" aria-hidden="true"></span>
+          <span class="sub-title" data-i18n="radar.heading">Live Radar</span>
+          <div id="radar-summary-pills" class="radar-pills"></div>
+        </div>
+        <div class="radar-head-right">
+          <button id="btn-radar-namer" type="button" class="radar-icon-toggle" title="Sync window titles" aria-label="Sync window titles"></button>
+          <button id="btn-radar-sound" type="button" class="radar-icon-toggle" title="Toggle completion sound" aria-label="Toggle completion sound"></button>
+          <button id="btn-radar-recent" type="button" class="btn-ghost btn-xs" aria-expanded="false" data-i18n="radar.recent_btn">Recent</button>
+        </div>
+      </div>
+      <div id="radar-attention-list" class="radar-list"></div>
+      <div id="radar-recent-drawer" class="radar-recent-drawer hidden">
+        <div class="radar-recent-divider"><span data-i18n="radar.recent_heading">Recently Active Windows</span></div>
+        <div id="radar-recent-list" class="radar-list compact"></div>
+      </div>
+    </section>
 
     <!-- Verified Release Update Strip (toggled by #update-pill) -->
     <section id="update-banner" class="update-banner hidden" aria-label="Release update">
@@ -225,6 +247,53 @@
           </div>
         </div>
         <div id="simple-tx-list" class="tx-list"></div>
+      </section>
+    </main>
+
+    <!-- ================= SESSIONS & CJK SEARCH MODE ================= -->
+    <main id="view-sessions" class="stack hidden">
+      <section class="panel sess-panel">
+        <div class="panel-head tight">
+          <h2 class="panel-title">
+            <svg class="inline-ico" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+              <circle cx="11" cy="11" r="8"/>
+              <line x1="21" y1="21" x2="16.65" y2="16.65"/>
+            </svg>
+            <span data-i18n="sessions.heading">Cross-Client Sessions</span>
+          </h2>
+          <span id="sessions-stats-meta" class="mono-tag">—</span>
+        </div>
+
+        <div class="sess-search-wrap">
+          <svg class="sess-search-ico" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <circle cx="11" cy="11" r="8"/>
+            <line x1="21" y1="21" x2="16.65" y2="16.65"/>
+          </svg>
+          <input id="sessions-search-input" type="search" class="sess-search-input" autocomplete="off" spellcheck="false" data-i18n-placeholder="sessions.search_placeholder" placeholder="Search titles, prompts &amp; CJK content…">
+          <button id="btn-sessions-clear" type="button" class="sess-clear-btn hidden" aria-label="Clear">×</button>
+        </div>
+
+        <div class="sess-toolbar">
+          <div class="seg-inline" role="group" aria-label="Client filter">
+            <button type="button" class="sess-filter-btn active" data-sclient="all" data-i18n="sessions.client_all">All</button>
+            <button type="button" class="sess-filter-btn" data-sclient="agy">AGY</button>
+            <button type="button" class="sess-filter-btn" data-sclient="codex">Codex</button>
+          </div>
+          <div class="seg-inline" role="group" aria-label="Time window">
+            <button type="button" class="sess-filter-btn active" data-sdays="0" data-i18n="sessions.days_all">All</button>
+            <button type="button" class="sess-filter-btn" data-sdays="1" data-i18n="sessions.days_1">24h</button>
+            <button type="button" class="sess-filter-btn" data-sdays="7" data-i18n="sessions.days_7">7d</button>
+            <button type="button" class="sess-filter-btn" data-sdays="30" data-i18n="sessions.days_30">30d</button>
+          </div>
+          <div class="seg-inline" role="group" aria-label="Sort order">
+            <button type="button" class="sess-filter-btn active" data-ssort="updated" data-i18n="sessions.sort_updated">Recent</button>
+            <button type="button" class="sess-filter-btn" data-ssort="created" data-i18n="sessions.sort_created">Created</button>
+          </div>
+        </div>
+
+        <div id="sessions-group-pills" class="sess-group-strip"></div>
+
+        <div id="sessions-list" class="sess-card-list"></div>
       </section>
     </main>
 
@@ -489,6 +558,20 @@
               <small data-i18n="engine.tog_watchdog_desc">Send a 1-shot OS notification when a background subagent stalls or crash-loops</small>
             </div>
             <input id="tog-watchdog-notify" type="checkbox" data-toggle="enable_watchdog_notify">
+          </label>
+          <label class="toggle-row">
+            <div>
+              <strong data-i18n="engine.tog_namer_title">Auto Session Naming</strong>
+              <small data-i18n="engine.tog_namer_desc">Coalesced Stop-hook naming via local Connect-RPC (preserves manual titles)</small>
+            </div>
+            <input id="tog-session-naming" type="checkbox" data-toggle="session_naming">
+          </label>
+          <label class="toggle-row">
+            <div>
+              <strong data-i18n="engine.tog_sound_title">Radar Earcon Chimes</strong>
+              <small data-i18n="engine.tog_sound_desc">Play subtle macOS system chimes when background tasks finish or wait for input</small>
+            </div>
+            <input id="tog-radar-sound" type="checkbox" data-toggle="enable_radar_sound">
           </label>
           <div class="toggle-row toggle-row-split">
             <label for="tog-update-check" class="toggle-row-copy">

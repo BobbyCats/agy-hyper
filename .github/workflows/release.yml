@@ -57,6 +57,14 @@ jobs:
           find plugin/mcp_apps -maxdepth 1 -type f -name '*.html' -exec cp {} dist/agy-hyper/mcp_apps/ \;
           cp target/${{ matrix.target }}/release/${{ matrix.bin }} dist/agy-hyper/bin/
           chmod +x dist/agy-hyper/bin/${{ matrix.bin }}
+          if [[ "${{ matrix.os }}" == "macos-latest" && -f macos/AGYHyperBar/main.swift ]]; then
+            mkdir -p dist/agy-hyper/macos/AGYHyperBar
+            cp macos/AGYHyperBar/main.swift dist/agy-hyper/macos/AGYHyperBar/main.swift
+            SWIFT_TARGET="arm64-apple-macos14.0"
+            [[ "${{ matrix.target }}" == x86_64-* ]] && SWIFT_TARGET="x86_64-apple-macos14.0"
+            swiftc -O -target "$SWIFT_TARGET" macos/AGYHyperBar/main.swift -framework AppKit -framework SwiftUI -o dist/agy-hyper/bin/agy-hyper-bar
+            chmod +x dist/agy-hyper/bin/agy-hyper-bar
+          fi
           tar -czf agy-hyper-${{ matrix.target }}.tar.gz -C dist agy-hyper
       - name: Package plugin bundle (Windows)
         if: matrix.ext == 'zip'
